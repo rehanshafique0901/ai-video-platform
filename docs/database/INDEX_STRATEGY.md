@@ -130,7 +130,7 @@
 | `render_jobs` | `uq_render_jobs_project_id_idempotency_key` | unique constraint | Implemented | Idempotent render creation |
 | `export_jobs` | `ix_export_jobs_render_job_id` | B-tree | Implemented | All exports of a render |
 | `export_jobs` | `ix_export_jobs_requested_by_user_id_created_at` | composite | Implemented | "My downloads" feed |
-| `export_jobs` | `uq_export_jobs_render_job_id_format_quality_orientation` (partial active) | partial unique | **Deferred (Phase 3)** | Currently enforced in the use-case layer; promote to DB if a race condition is observed (`schema.md` §37 q8) |
+| `export_jobs` | `uq_export_jobs_render_job_id_format_quality_orientation` (partial: `WHERE status IN ('queued','running','succeeded')`) | partial unique | Implemented | At most one active-or-fulfilled export per `(render_job_id, format, quality, orientation)`; `failed`/`canceled` rows excluded so retries after failure are permitted (ADR-0030, migration `0003_export_jobs_partial_unique`, Phase 3 W1.1, 2026-06-29) |
 
 ## 9. Usage Records (Partitioned)
 
@@ -294,16 +294,16 @@ Until then the rule is: **no scored CI gate failure may be attributed to a missi
 
 ---
 
-## 18. Reconciliation Summary (Phase 2D, 2026-06-29)
+## 18. Reconciliation Summary (Phase 2D, 2026-06-29; updated Phase 3 W1.1, 2026-06-29)
 
 | Metric | Count |
 |---|---|
-| Indexes implemented (ORM-declared, in live schema) | 81 |
-| Unique constraints implemented | 23 |
-| Index rows in this document marked **Implemented** | 73 |
-| Index rows marked **Deferred (Phase 3)** | 21 |
+| Indexes implemented (ORM-declared, in live schema) | 82 |
+| Unique constraints implemented (incl. partial-unique indexes) | 24 |
+| Index rows in this document marked **Implemented** | 74 |
+| Index rows marked **Deferred (Phase 3)** | 20 |
 | Index rows marked **Deferred (Phase 5)** | 3 |
-| Cross-checked against `orm_inventory.json` | yes |
-| Cross-checked against live `pg_indexes` via `validate_schema.py` | yes (2026-06-29 run) |
+| Cross-checked against `orm_inventory.json` | yes (Phase 2D, 2026-06-29) |
+| Cross-checked against live `pg_indexes` via `validate_schema.py` | yes (Phase 3 W1.1 round-trip, 2026-06-29) |
 
-The deferred items collectively form §16 above and the open-question list in `schema.md` §37.
+The deferred items collectively form §16 above and the open-question list in `schema.md` §37. **Phase 3 W1.1 (2026-06-29)** promoted §8's `uq_export_jobs_render_job_id_format_quality_orientation` from Deferred to Implemented (ADR-0030, migration `0003_export_jobs_partial_unique`); deferred-Phase-3 count drops from 21 → 20 accordingly.

@@ -7,7 +7,7 @@
 ## 1. Ground Rules
 
 1. **Never bypass the phase gates.** Code for Phase N+1 may not land until Phase N is approved in `CHANGELOG.md`.
-2. **Never invent dependencies.** Stick to the technology stack listed in `rule.md`. New libraries require an ADR in `DECISIONS.md`.
+2. **Never invent dependencies.** Stick to the technology stack listed in `rule.md`. New libraries require an ADR (either as a new file in `docs/decisions/` per the convention introduced in ADR-0030, or appended to `DECISIONS.md` for compatibility with ADR-0001 through ADR-0029).
 3. **Never produce placeholder code** (`TODO`, `pass`, `# implement later`, stubbed returns). Every merged module must be production-ready.
 4. **Never hardcode model or provider names** outside the registry. Use `ModelRegistry.get(...)` and `PluginRegistry.get(...)`.
 5. **Never reach into another bounded context's internals.** Cross-context communication happens via use cases or the Event Bus.
@@ -123,9 +123,11 @@ A `pyproject.toml` `[tool.importlinter]` block declares these contracts. Phase 2
 For every PR that changes architecture:
 
 - Update the relevant section of `ARCHITECTURE.md`.
-- Add an entry to `DECISIONS.md` if a non-trivial trade-off was made.
+- Add an ADR for any non-trivial trade-off (see `docs/decisions/` for the file-per-ADR convention introduced in **ADR-0030**, Phase 3 W1.1; older ADRs live inline in `DECISIONS.md` and are not being retro-migrated). Cross-link new file-based ADRs from `DECISIONS.md` with a one-line entry (title + status + relative link) so single-file readers still discover them.
 - Add an entry to `CHANGELOG.md` (in `[Unreleased]`).
 - If an endpoint changes: update `API_CONTRACT.md` **first**, then implement.
+
+**ADR convention change.** ADR-0030 (`docs/decisions/ADR-0030-export-jobs-partial-unique.md`) is the record of the switch from "ADRs are inline sections in `DECISIONS.md`" to "ADRs are standalone files under `docs/decisions/`, cross-linked from `DECISIONS.md`." See ADR-0030 §Context for the rationale and the migration policy for older ADRs.
 
 ---
 

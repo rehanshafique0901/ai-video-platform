@@ -306,6 +306,14 @@ The runner is implemented in Python (`ci_gate.py`) so a developer's local invoca
 
 ---
 
+## ADR-0030 — Promote `export_jobs (render_job_id, format, quality, orientation)` Uniqueness to a Partial-Unique DB Constraint
+
+**Status:** Proposed (Phase 3 W1.1, 2026-06-29). Becomes Accepted on merge of `phase3/wave1.1-export-jobs-partial-unique`.
+**File:** [`docs/decisions/ADR-0030-export-jobs-partial-unique.md`](docs/decisions/ADR-0030-export-jobs-partial-unique.md)
+**Summary:** Promotes the `(render_job_id, format, quality, orientation)` uniqueness invariant from the use-case layer (which had no consumer yet) directly to the database as `uq_export_jobs_render_job_id_format_quality_orientation` with `WHERE status IN ('queued','running','succeeded')`. First ADR stored as a standalone file under `docs/decisions/`; ADRs 0001–0029 remain inline in this document and are not being retro-migrated. See the ADR file for full Context, Decision, 7 Alternatives Considered, Migration Plan, Rollback, Consequences, and 15-item Acceptance Criteria.
+
+---
+
 ## Decisions Log Format (for future entries)
 
 ```
