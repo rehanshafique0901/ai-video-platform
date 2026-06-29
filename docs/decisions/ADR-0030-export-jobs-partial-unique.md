@@ -1,6 +1,6 @@
 # ADR-0030 — Promote `export_jobs (render_job_id, format, quality, orientation)` Uniqueness to a Partial-Unique DB Constraint
 
-**Status:** Proposed (Phase 3, Wave 1.1, 2026-06-29). Becomes Accepted on merge of `phase3/wave1.1-export-jobs-partial-unique`.
+**Status:** Accepted (Phase 3, Wave 1.1, 2026-06-29). Validated end-to-end against Supabase Postgres 17.6 + pgvector 0.8.0; full 10-stage CI gate green; alembic forward/reverse/idempotency round-trip clean; schema validator 9/9; ERD comparator 0 drift; pre-upgrade safety check returned `export_jobs_active_rowcount = 0`.
 **Supersedes / refines:** `docs/database/schema.md` §37 Q8 (prior default: "enforce in use-case layer"); `docs/database/INDEX_STRATEGY.md` §8 row `uq_export_jobs_render_job_id_format_quality_orientation` (Deferred → Implemented).
 **Wave:** Phase 3 W1.1 (Schema integrity — promote use-case invariants into the DB).
 
