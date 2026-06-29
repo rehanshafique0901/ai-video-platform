@@ -1,6 +1,6 @@
 # ADR-0031 — Promote `idempotency_keys` Mutability Tracking and Status↔Response Invariant to the Database
 
-**Status:** Proposed (Phase 3, Wave 1.2). To be flipped to Accepted in the pre-merge `docs(adr): mark ADR-0031 Accepted` commit after live validation passes.
+**Status:** Accepted (Phase 3, Wave 1.2, 2026-06-29). Validated end-to-end against Supabase Postgres 17.6 + pgvector 0.8.0; full 10-stage CI gate green (10/10 in 106.7s); alembic forward/reverse/idempotency round-trip clean (`0003 → 0004 → 0001 → 0004`); schema validator 9/9; ERD comparator 0 drift (51 entities, 60 shared design edges); pre-upgrade safety check returned `idempotency_keys_fsm_violations = 0`; `pg_constraint`, `pg_trigger`, and `information_schema.columns` all show the three new objects (CHECK, BIU trigger, `updated_at timestamptz NOT NULL`) after upgrade and none after downgrade.
 **Supersedes / refines:** `docs/database/schema.md` §31 Reconciled-in-2D note (which justified dropping `updated_at` as "redundant — any state transition produces an audit event"); §37 Q9 (prior default: "application invariant only"); extends ADR-0021 — First-Class Idempotency Framework (CR-DB-1).
 **Wave:** Phase 3 W1.2 (Schema integrity — promote use-case invariants into the DB).
 
