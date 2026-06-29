@@ -1,6 +1,6 @@
 # ADR-0032 — Promote `distributed_locks` Lease Sanity to a Database CHECK Constraint
 
-**Status:** Proposed (Phase 3, Wave 1.3, 2026-06-29). To be flipped to Accepted in the pre-merge `docs(adr): mark ADR-0032 Accepted` commit after live validation passes.
+**Status:** Accepted (Phase 3, Wave 1.3, 2026-06-29). Validated end-to-end against Supabase Postgres 17.6 + pgvector 0.8.0; full 10-stage CI gate green (10/10 in 107.6s); alembic round-trip clean across both the W1.3-isolated path (`0004 → 0005 → 0004 → 0005`) and the full-baseline path (`0005 → empty → 0005` via CI gate stages 6 + 7); schema validator 9/9 (87 indexes total — W1.3 adds 0 as predicted); ERD comparator 0 drift (51 entities and 60 shared design edges, both unchanged); pre-upgrade safety check returned `distributed_locks_lease_violations = 0`; `pg_constraint` shows `chk_distributed_locks_lease_until_after_acquired_at: CHECK ((lease_until > acquired_at))` present after upgrade and absent after downgrade.
 **Supersedes / refines:** `docs/database/schema.md` §32 reconciliation note (which deferred the CHECK to a Phase-3 decision); `docs/database/schema.md` §37 Q10 (prior default: "rely on application logic"). Builds on ADR-0022 (which introduced `distributed_locks` as CR-DB-2).
 **Wave:** Phase 3 W1.3 (Schema integrity — promote use-case invariants into the DB).
 
