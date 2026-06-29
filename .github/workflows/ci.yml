@@ -72,10 +72,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: "ai creation/backend/pyproject.toml"
+          cache-dependency-path: "backend/pyproject.toml"
 
       - name: Install backend (dev extras)
-        working-directory: ai creation/backend
+        working-directory: backend
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
@@ -98,7 +98,7 @@ jobs:
       # the live-DB stages 5–9. All driven by the single Python entrypoint
       # so a developer's local invocation is byte-identical to CI.
       - name: Run CI gate
-        working-directory: ai creation/backend
+        working-directory: backend
         run: python scripts/ci_gate.py --no-color
 
       - name: Upload validation artefacts
@@ -107,10 +107,10 @@ jobs:
         with:
           name: ci-gate-artefacts
           path: |
-            ai creation/backend/.validation/schema_validation_report.json
-            ai creation/backend/.validation/erd_generated.md
-            ai creation/backend/.validation/erd_diff.json
-            ai creation/backend/.validation/coverage.xml
+            backend/.validation/schema_validation_report.json
+            backend/.validation/erd_generated.md
+            backend/.validation/erd_diff.json
+            backend/.validation/coverage.xml
           if-no-files-found: warn
           retention-days: 14
 
@@ -118,7 +118,7 @@ jobs:
       # delta directly in the PR's Checks tab without opening artefacts.
       - name: Append coverage to job summary
         if: always()
-        working-directory: ai creation/backend
+        working-directory: backend
         run: |
           if [ -f .coverage ]; then
             echo "### Coverage" >> "$GITHUB_STEP_SUMMARY"

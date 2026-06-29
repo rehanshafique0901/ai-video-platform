@@ -44,8 +44,8 @@ repos:
     rev: v0.7.1
     hooks:
       - id: ruff
-        args: ["--config=ai creation/backend/pyproject.toml"]
-        files: ^ai creation/backend/(app|tests|scripts)/.*\.py$
+        args: ["--config=backend/pyproject.toml"]
+        files: ^backend/(app|tests|scripts)/.*\.py$
 
   # ---------------------------------------------------------------------
   # Stage 2 of the gate — Black formatting check.
@@ -54,5 +54,5 @@ repos:
     rev: 24.10.0
     hooks:
       - id: black
-        args: ["--check", "--config=ai creation/backend/pyproject.toml"]
-        files: ^ai creation/backend/(app|tests|scripts)/.*\.py$
+        args: ["--check", "--config=backend/pyproject.toml"]
+        files: ^backend/(app|tests|scripts)/.*\.py$
