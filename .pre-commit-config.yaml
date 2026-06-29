@@ -1,0 +1,58 @@
+# Pre-commit hooks — the *fast* subset of the CI quality gate.
+#
+# A pre-commit hook is only acceptable if it runs in well under a second
+# on a warm cache. Slow checks (mypy, pytest, alembic round-trip, live-DB
+# stages) stay in CI only. The hooks here cover stages 1–2 of the gate
+# (ruff + black) plus generic hygiene fixers, so any commit that lands
+# is at least guaranteed to be lint-clean and consistently formatted.
+#
+# Install once per clone:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# Run on the full tree (matches CI stages 1–2 exactly):
+#
+#     pre-commit run --all-files
+
+default_language_version:
+  python: python3.12
+
+repos:
+  # ---------------------------------------------------------------------
+  # General hygiene
+  # ---------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # ---------------------------------------------------------------------
+  # Stage 1 of the gate — Ruff (lint + import sort).
+  # We do NOT use --fix here so the hook fails loudly on real issues
+  # instead of silently rewriting code mid-commit.
+  # ---------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.1
+    hooks:
+      - id: ruff
+        args: ["--config=ai creation/backend/pyproject.toml"]
+        files: ^ai creation/backend/(app|tests|scripts)/.*\.py$
+
+  # ---------------------------------------------------------------------
+  # Stage 2 of the gate — Black formatting check.
+  # ---------------------------------------------------------------------
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        args: ["--check", "--config=ai creation/backend/pyproject.toml"]
+        files: ^ai creation/backend/(app|tests|scripts)/.*\.py$

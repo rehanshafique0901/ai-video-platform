@@ -1,0 +1,6 @@
+# Phase 2 Step B — local validation artefacts
+.env.validation
+.validation/
+__pycache__/
+*.pyc
+.venv/
