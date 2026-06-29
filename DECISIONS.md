@@ -322,6 +322,14 @@ The runner is implemented in Python (`ci_gate.py`) so a developer's local invoca
 
 ---
 
+## ADR-0032 — Promote `distributed_locks` Lease Sanity to a Database CHECK Constraint
+
+**Status:** Accepted (Phase 3 W1.3, 2026-06-29).
+**File:** [`docs/decisions/ADR-0032-distributed-locks-lease-check.md`](docs/decisions/ADR-0032-distributed-locks-lease-check.md)
+**Summary:** Resolves `docs/database/schema.md` §37 Q10 by promoting the `lease_until > acquired_at` invariant from "rely on application logic" to a first-class database CHECK constraint named `chk_distributed_locks_lease_until_after_acquired_at`. Strict greater-than (`>`, not `>=`) rejects the degenerate zero-second lease that a buggy `$lease = 0` or negative-`$lease` call site would produce. Single-predicate by deliberate choice — `lease_until >= heartbeat_at` and other temporal-anchor invariants remain future-ADR territory (the heartbeat code path doesn't exist yet, so protecting it is speculative). Smallest W1.x migration to date: one hand-written `ALTER TABLE … ADD CONSTRAINT` in `upgrade()`, one `ALTER TABLE … DROP CONSTRAINT` in `downgrade()`. The 2D reconciliation note's original "harder to diagnose" argument inverts in practice once the CHECK has a descriptive name — silent corruption of the lock table is categorically worse than a surfaced `IntegrityError` at the bug's call site. See the ADR file for full Context, Decision, 7 Alternatives Considered, Migration Plan, 3-tier Rollback, Consequences, and 19-item Acceptance Criteria.
+
+---
+
 ## Decisions Log Format (for future entries)
 
 ```

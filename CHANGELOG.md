@@ -6,6 +6,97 @@
 
 ## [Unreleased]
 
+### Phase 3 Wave 1.3 — `distributed_locks` lease CHECK (2026-06-29, ADR-0032)
+
+#### Added
+- **`backend/alembic/versions/0005_distributed_locks_lease.py`** —
+  Alembic migration adding a single CHECK constraint
+  `chk_distributed_locks_lease_until_after_acquired_at` enforcing
+  `lease_until > acquired_at`. Strict greater-than (`>`, not `>=`)
+  rejects the degenerate zero-second lease that a buggy `$lease = 0` or
+  negative-`$lease` call site would produce. Hand-written rather than via
+  `alembic revision --autogenerate` because autogenerate does not
+  reliably preserve the exact text of CHECK expressions. Smallest W1.x
+  migration to date: one `ALTER TABLE … ADD CONSTRAINT` in `upgrade()`,
+  one `ALTER TABLE … DROP CONSTRAINT` in `downgrade()`. Forward + reverse
+  + idempotency round-trip validated against Supabase Postgres 17.6 +
+  pgvector 0.8.0 via `backend/.env.validation`.
+- **`docs/decisions/ADR-0032-distributed-locks-lease-check.md`** — third
+  file-per-ADR under `docs/decisions/` (ADR-0030 was the first,
+  ADR-0031 the second). Records the promotion of the §37 Q10 invariant
+  verbatim — no bundling with `lease_until >= heartbeat_at` or other
+  temporal-anchor invariants (those remain future-ADR territory). 7
+  alternatives considered, 3-tier rollback plan, 19-item acceptance
+  criteria including an explicit pre-upgrade safety SELECT.
+- **`DECISIONS.md`** — one-line cross-link entry for ADR-0032 pointing
+  at the new file (status flips from `Proposed` → `Accepted` in the
+  pre-merge `docs(adr): mark ADR-0032 Accepted` commit).
+
+#### Changed
+- **`backend/app/infrastructure/db/models/operations.py`** —
+  `DistributedLock.__table_args__` extended with the matching
+  `CheckConstraint("lease_until > acquired_at", name="chk_distributed_locks_lease_until_after_acquired_at")`
+  declaration so the ORM mirrors the migration exactly. No import changes
+  needed; `CheckConstraint` was already imported during W1.2 for
+  `IdempotencyKey`. The existing `Index("ix_distributed_locks_lease_until", "lease_until")`
+  is preserved unchanged; the new `CheckConstraint` is placed
+  immediately before it inside the `__table_args__` tuple per the
+  W1.2 ordering precedent (constraint before index).
+- **`docs/database/schema.md`** — §32 column block now lists the CHECK
+  constraint inline; new **Lease validity invariant (DB-enforced,
+  Phase 3 W1.3)** paragraph mirrors §31's W1.2 FSM-invariant paragraph
+  and explains the single-predicate scoping decision (and why
+  `lease_until >= heartbeat_at` is intentionally deferred); §32
+  reconciliation note revised to acknowledge that W1.3 reverses the 2D
+  deferral with stated reasoning (the original "harder to diagnose"
+  argument inverts in practice once the CHECK has a descriptive name);
+  §37 Q10 row marked **Resolved (Phase 3 W1.3, 2026-06-29)** with full
+  constraint details; §37 epilogue Wave 1 bullet for §32 q10 marked
+  ✅ Done.
+- **`ROADMAP.md`** — Phase 3 wave table W1 row annotated with W1.3
+  ✅ Complete alongside W1.1 and W1.2; remaining W1.4 split out.
+
+#### Validated (live, 2026-06-29)
+- **Pre-upgrade safety check** — `SELECT COUNT(*) FROM
+  distributed_locks WHERE NOT (lease_until > acquired_at)` against
+  Supabase returned `0`, clearing the gate for `alembic upgrade head`.
+  Zero existing rows in the live target, so the gate is trivially
+  satisfied — but the SELECT is run for audit-trail completeness and
+  to verify the production-rollback variant (`ADD CONSTRAINT … NOT
+  VALID` + later `VALIDATE CONSTRAINT`) is not required.
+- **Alembic round-trip** — `upgrade head → downgrade -1 → upgrade head`
+  clean; `pg_constraint` diff = exactly one CHECK added on forward,
+  exactly one removed on reverse; the constraint's `consrc` predicate
+  reads exactly `lease_until > acquired_at`.
+- **Schema validator** — `scripts/validate_schema.py` 9/9 (no validator
+  code change; none of the 9 structural checks inspect CHECK
+  constraints by name — the table-parity check passes by construction
+  because the ORM and DB agree on the column shape, which is unchanged
+  by W1.3).
+- **ERD round-trip** — `regenerate_erd.py` + `compare_erd.py` 0 drift
+  (ERD ignores CHECK constraints).
+- **Full CI gate** — `scripts/ci_gate.py` 10/10 local; matching GitHub
+  Actions run on the PR also 10/10 against the pgvector service
+  container.
+
+#### Not modified (scope discipline)
+- **`docs/database/INDEX_STRATEGY.md`** — no changes (W1.3 adds zero
+  indexes and zero unique constraints; only a CHECK constraint, which
+  `INDEX_STRATEGY.md` does not track; the 87-index count stays at 87).
+- **`docs/database/ERD.md`** — no changes (ERD tracks entities and FKs
+  only; CHECK constraints are invisible to it; the 51-entity / 60-edge
+  count stays unchanged).
+- **`CONTRIBUTING.md`** — no changes (the file-per-ADR convention was
+  already documented in W1.1; ADR-0032 is the third adopter, not the
+  convention-establisher).
+- **`backend/alembic/versions/0001_baseline.py`** — baseline migrations
+  are historical and never amended in place; the new CHECK is added
+  entirely by migration `0005` and dropped on its downgrade.
+
+#### Scope discipline (per Wave 1 isolation constraint)
+- No changes to `export_jobs` (W1.1 territory), `idempotency_keys`
+  (W1.2), or `usage_records` (W1.4). W1.4 gets its own branch + ADR.
+
 ### Phase 3 Wave 1.2 — `idempotency_keys` mutability + status↔response invariant (2026-06-29, ADR-0031)
 
 #### Added
