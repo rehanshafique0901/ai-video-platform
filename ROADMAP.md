@@ -132,25 +132,37 @@ Out of scope (intentionally untouched per reviewer rule):
 
 ## Phase 3 — Repositories, Services, Auth Foundation
 
-**Pre-flight (recommended by reviewer at Phase 2D close):**
+**Pre-flight (completed 2026-06-29):**
 
-1. **Initialise version control + tag the baseline.** The workspace is
-   not yet a git repository. The agent did not commit during Phase 2D
-   (per the workspace rule: *never commit unless explicitly asked*).
-   When you are ready to start Phase 3, run these commands locally:
+1. **Initialise version control + tag the baseline.** ✅ Done.
+   The repository is rooted at `ai creation/` (the parent
+   `programming bench/` workspace root contains unrelated
+   ProgramBench evaluation artefacts and was deliberately excluded).
+   A project-root `.gitignore` was authored before the first commit
+   to keep secrets (`.env.validation`), caches (`.pytest_cache/`,
+   `.mypy_cache/`, `.ruff_cache/`, `.import_linter_cache/`), and
+   validation outputs (`.validation/`) out of the index.
 
+   - **Branch:** `main`
+   - **Initial commit:** `412796f` — *Phase 2D: Documentation
+     reconciliation complete (no code changes)*
+   - **Baseline tag:** `v0.2.2-phase2d-docs-reconciled` (annotated)
+   - **Tracked files:** 80
+   - **Working tree:** clean
+
+   This commit is the rollback / reference point for everything that
+   follows. Any Phase 3 work that proves untenable can be undone with
+   `git reset --hard v0.2.2-phase2d-docs-reconciled`.
+
+   **Reproduction command sequence (for future reference):**
    ```powershell
-   # From repo root (parent of "ai creation")
+   cd "C:\Users\rehan\OneDrive\Desktop\programming bench\ai creation"
    git init
    git checkout -b main
    git add .
-   git commit -m "Initial commit: Phase 2A architecture + Phase 2B schema + Phase 2C CI gate + Phase 2D doc reconciliation"
-   git tag -a v0.2.2-phase2d-docs-reconciled -m "Phase 2D baseline: docs reconciled with validated implementation. CI gate 10/10 green; spot-check 8/8 MATCH. See PHASE2D_SPOT_CHECK.md."
+   git commit -m "Phase 2D: Documentation reconciliation complete (no code changes)"
+   git tag -a v0.2.2-phase2d-docs-reconciled -m "Phase 2D baseline: documentation reconciled with validated implementation; CI gate 10/10; spot-check 8/8."
    ```
-
-   This gives you a clean rollback / reference point before any
-   schema or architecture change lands. If you prefer a shorter name,
-   use `phase2d-baseline` instead.
 
 2. **Sequence the 13 deferred decisions** catalogued in
    `schema.md` §37 into the four waves below rather than tackling

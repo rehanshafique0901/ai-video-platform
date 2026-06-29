@@ -10,15 +10,22 @@ conflict (and any drift is itself a defect to be reconciled).
   2026-06-29 (no code changes). Phase 2 Step B approved 2026-06-28.
   Phase 2C (CI Quality Gate) gate-green and ratified as ADR-0028 +
   ADR-0029. Manual spot-check 8/8 MATCH (`PHASE2D_SPOT_CHECK.md`).
-- **Pre-flight before Phase 3 (deferred to user):**
-  - Workspace is not yet a git repository. The reviewer-recommended
-    baseline tag (`v0.2.2-phase2d-docs-reconciled`) requires the user
-    to install git locally and initialise the repo. The exact command
-    sequence is recorded in `ROADMAP.md` (Phase 3 Pre-flight section).
-    No commits have been made by the agent.
-- **Next gate:** User initialises version control + creates the
-  baseline tag, then sequences the 13 deferred decisions from
-  `schema.md` §37 according to the Wave 1–4 plan in `ROADMAP.md`.
+- **Pre-flight before Phase 3 (completed 2026-06-29):**
+  - Workspace is now a git repository rooted at
+    `ai creation/` (not at the parent `programming bench/` workspace
+    root, which contains unrelated ProgramBench evaluation artefacts).
+  - **Initial commit:** `412796f` — *Phase 2D: Documentation
+    reconciliation complete (no code changes)*.
+  - **Baseline tag:** `v0.2.2-phase2d-docs-reconciled` (annotated)
+    pointing at `412796f` on `main`.
+  - 80 files tracked. `.env.validation`, `.validation/`, caches, and
+    virtualenvs all correctly excluded via the project-root
+    `.gitignore` (added during pre-flight).
+- **Next gate:** Phase 3 **Wave 1.1** — promote the
+  `export_jobs (render_job_id, format, quality, orientation)`
+  use-case invariant to a partial-unique DB constraint
+  (one PR + one ADR + one migration; CI gate must stay green).
+  Remaining waves are sequenced in `ROADMAP.md` Phase 3 Pre-flight §2.
 
 ## 1. Phase Summary
 
