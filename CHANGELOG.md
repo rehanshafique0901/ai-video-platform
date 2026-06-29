@@ -6,6 +6,94 @@
 
 ## [Unreleased]
 
+### Phase 3 Wave 1.2 — `idempotency_keys` mutability + status↔response invariant (2026-06-29, ADR-0031)
+
+#### Added
+- **`backend/alembic/versions/0004_idempotency_keys_invariants.py`** — Alembic
+  migration applying three coordinated changes to `idempotency_keys` in a
+  single transaction: (1) `ADD COLUMN updated_at timestamptz NOT NULL
+  DEFAULT now()`, (2) `CREATE TRIGGER tg_idempotency_keys_biu_touch_updated_at`
+  bound to the shared `touch_updated_at()` function (already defined in
+  the baseline, already wired to 30+ other tables), and (3) `ADD
+  CONSTRAINT chk_idempotency_keys_response_hash_matches_status CHECK
+  ((status = 'in_flight') = (response_hash IS NULL))`. Hand-written
+  rather than via `alembic revision --autogenerate` because autogenerate
+  does not emit `CREATE TRIGGER` statements and would not preserve the
+  exact text of the CHECK expression or the explicit sequencing of the
+  three ops. Forward + reverse + idempotency round-trip validated
+  against Supabase Postgres 17.6 + pgvector 0.8.0 via
+  `backend/.env.validation`.
+- **`docs/decisions/ADR-0031-idempotency-keys-invariants.md`** — second
+  file-per-ADR under `docs/decisions/` (ADR-0030 was the first). Records
+  the promotion of two long-standing application-layer assumptions to
+  the DB: the mixin misclassification that left `idempotency_keys` in a
+  "mutable-but-untracked" state, and the unprotected status↔response
+  FSM invariant. 8 alternatives considered, 3-tier rollback plan, 17-item
+  acceptance criteria including an explicit pre-upgrade safety SELECT.
+- **`DECISIONS.md`** — one-line cross-link entry for ADR-0031 pointing
+  at the new file (status flips from `Proposed` → `Accepted` in the
+  pre-merge `docs(adr): mark ADR-0031 Accepted` commit).
+
+#### Changed
+- **`backend/app/infrastructure/db/models/operations.py`** — `IdempotencyKey`
+  switched from `CreatedAtOnlyMixin` to `TimestampMixin` (the original
+  mixin choice was a Phase 2 Step-A misclassification — `CreatedAtOnlyMixin`
+  is documented as "for immutable / append-only tables" but the row IS
+  mutated `in_flight → succeeded`/`failed`). `__table_args__` extended
+  with the matching `CheckConstraint(..., name="chk_idempotency_keys_response_hash_matches_status")`
+  declaration so the ORM mirrors the migration exactly. `CheckConstraint`
+  added to the SQLAlchemy import line; `CreatedAtOnlyMixin` removed
+  from the mixins import.
+- **`docs/database/schema.md`** — §31 column block now lists
+  `updated_at`; new **FSM invariant (DB-enforced, Phase 3 W1.2)**
+  paragraph explains the CHECK's scope decision (`response_hash` only,
+  not `response_payload` or `http_status`); §31 reconciliation note
+  updated to acknowledge that W1.2 reverses the 2D `updated_at`
+  omission with stated reasoning (the original "audit event covers it"
+  rationale conflated audit replay with operational observability);
+  §37 Q9 row marked **Resolved (Phase 3 W1.2, 2026-06-29)**; Wave 1
+  bullet for §31 q9 marked ✅ Done.
+- **`ROADMAP.md`** — Phase 3 wave table W1 row annotated with
+  W1.2 ✅ Complete alongside W1.1; remaining W1.3 / W1.4 split out.
+
+#### Validated (live, 2026-06-29)
+- **Pre-upgrade safety check** — `SELECT COUNT(*) FROM idempotency_keys
+  WHERE (status = 'in_flight') <> (response_hash IS NULL)` against
+  Supabase returned `0`, clearing the gate for `alembic upgrade head`.
+- **Alembic round-trip** — `upgrade head → downgrade -1 → upgrade head`
+  clean; `pg_constraint` diff = exactly one CHECK added on forward,
+  exactly one removed on reverse; `pg_trigger` diff = exactly one BIU
+  trigger added on forward, exactly one removed on reverse;
+  `information_schema.columns` confirms `updated_at` is
+  `timestamp with time zone NOT NULL` after upgrade and gone after
+  downgrade.
+- **Schema validator** — `scripts/validate_schema.py` 9/9 (no validator
+  code change; `check_table_parity` picked up the new `updated_at`
+  column automatically from ORM metadata; no validator check covers
+  CHECK constraints or `_UPDATED_AT_TABLES` membership, so those
+  remain green by construction).
+- **ERD round-trip** — `regenerate_erd.py` + `compare_erd.py` 0 drift
+  (ERD ignores CHECK constraints, triggers, and per-column shape; only
+  entity-level changes show up there).
+- **Full CI gate** — `scripts/ci_gate.py` 10/10 local; matching GitHub
+  Actions run on the PR also 10/10 against the pgvector service container.
+
+#### Not modified (scope discipline)
+- **`docs/database/INDEX_STRATEGY.md`** — no changes (W1.2 adds zero
+  indexes and zero unique constraints; only a column, a trigger, and a
+  CHECK constraint — none of which `INDEX_STRATEGY.md` tracks).
+- **`CONTRIBUTING.md`** — no changes (the file-per-ADR convention was
+  already documented in W1.1; ADR-0031 is the second adopter, not the
+  convention-establisher).
+- **`backend/alembic/versions/0001_baseline.py`** — baseline migrations
+  are historical and never amended in place; the new trigger is added
+  entirely by migration `0004` and dropped on its downgrade.
+
+#### Scope discipline (per Wave 1 isolation constraint)
+- No changes to `export_jobs` (W1.1 territory), `distributed_locks`
+  (W1.3), or `usage_records` (W1.4). W1.3 / W1.4 each get their own
+  branch + ADR.
+
 ### Phase 3 Wave 1.1 — `export_jobs` partial-unique constraint (2026-06-29, ADR-0030)
 
 #### Added

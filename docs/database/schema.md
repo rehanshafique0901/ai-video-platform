@@ -1133,27 +1133,39 @@ idempotency_keys (
   http_status text,                               -- HTTP status (kept as text for portability)
   expires_at timestamptz NOT NULL,                -- TTL: 24h synchronous / 30d billing-class
   created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, key, resource_type)
+  updated_at timestamptz NOT NULL DEFAULT now(),  -- bumped by tg_idempotency_keys_biu_touch_updated_at on every UPDATE (Phase 3 W1.2, ADR-0031)
+  UNIQUE (tenant_id, key, resource_type),
+  CONSTRAINT chk_idempotency_keys_response_hash_matches_status
+    CHECK ((status = 'in_flight') = (response_hash IS NULL))  -- Phase 3 W1.2, ADR-0031
 )
 ```
 
 **Indexes:** `ix_idempotency_keys_expires_at` (partial: `WHERE status <> 'in_flight'`) for the purge job; `ix_idempotency_keys_resource_type_resource_id` for cache lookups by downstream resource.
 
+**FSM invariant (DB-enforced, Phase 3 W1.2):** `chk_idempotency_keys_response_hash_matches_status` enforces `(status = 'in_flight') = (response_hash IS NULL)` — `response_hash` is NULL iff the row is still in flight, NOT NULL iff the row is terminal (`succeeded` or `failed`). Per ADR-0031, the CHECK is scoped to `response_hash` only (not `response_payload` or `http_status`, both of which may legitimately be NULL on terminal rows — a `204 No Content` `succeeded` row carries no payload; non-HTTP surfaces such as workflow retries carry no `http_status`).
+
 > **Reconciled in 2D (2026-06-29).** Step-A drafted `request_hash`/
 > `response_hash` as `bytea`, `response_status_code` as `int`, included
 > a denormalised `updated_at`, and a CHECK linking `status='in_flight'`
 > to `response_hash IS NULL`. Implementation uses hex-encoded text for
-> hashes (avoids client-side base64/hex driver inconsistencies),
+> hashes (avoids client-side base64/hex driver inconsistencies) and
 > renamed the column to `http_status` and typed it as text (matches
 > our convention of "wire-format strings stay strings until the
-> service layer parses them"), and dropped the redundant `updated_at`
-> (any state transition produces an audit event). The CHECK constraint
-> is enforced in the use-case layer rather than the DB; whether to
-> reintroduce it is a Phase-3 decision (§37). `ON DELETE` on the
-> tenant FK is `CASCADE` (a deleted tenant cannot have stuck
-> in-flight idempotency keys); Step-A's `RESTRICT` would have blocked
-> tenant deletion forever, which is the wrong behaviour for GDPR
-> erasure.
+> service layer parses them"). The 2D reconciliation initially dropped
+> the `updated_at` column on the speculative reasoning that "any state
+> transition produces an audit event"; that reasoning conflated audit
+> replay (offline analytical use) with operational observability (the
+> live "is this key stuck?" query) and is **reversed by Phase 3 W1.2**
+> (ADR-0031, migration `0004_idempotency_keys_invariants`, 2026-06-29):
+> `updated_at` is restored and auto-bumped by
+> `tg_idempotency_keys_biu_touch_updated_at` calling the shared
+> `touch_updated_at()` function (same pattern as 30+ other tables).
+> The CHECK constraint is likewise promoted to the DB by the same
+> migration as `chk_idempotency_keys_response_hash_matches_status`
+> (see §37 Q9). `ON DELETE` on the tenant FK is `CASCADE` (a deleted
+> tenant cannot have stuck in-flight idempotency keys); Step-A's
+> `RESTRICT` would have blocked tenant deletion forever, which is the
+> wrong behaviour for GDPR erasure.
 
 **Use cases (registered as `resource_type`):**
 
@@ -1335,7 +1347,7 @@ The Phase 2D documentation reconciliation deliberately did **not** make any of t
 | 6 | Should `usage_records` add a per-partition partial-unique `(request_id)` index, or rely on `idempotency_keys`? | §18, `INDEX_STRATEGY.md` | rely on `idempotency_keys` |
 | 7 | Should `render_jobs.progress` be retyped from `text` to `numeric(5,2)`? | §17 | leave as text until profiling shows a need |
 | 8 | Should the `(render_job_id, format, quality, orientation)` partial-unique constraint on `export_jobs` be promoted to a DB constraint? | §17 | **Resolved (Phase 3 W1.1, 2026-06-29)** — promoted to partial-unique index `uq_export_jobs_render_job_id_format_quality_orientation` with `WHERE status IN ('queued','running','succeeded')` (ADR-0030, migration `0003_export_jobs_partial_unique`). |
-| 9 | Should `idempotency_keys` reintroduce the `(status='in_flight') = (response_hash IS NULL)` CHECK and an `updated_at` column? | §31 | application invariant only |
+| 9 | Should `idempotency_keys` reintroduce the `(status='in_flight') = (response_hash IS NULL)` CHECK and an `updated_at` column? | §31 | **Resolved (Phase 3 W1.2, 2026-06-29)** — both promoted to DB: CHECK constraint `chk_idempotency_keys_response_hash_matches_status` enforces the FSM invariant; `updated_at timestamptz NOT NULL DEFAULT now()` column added with auto-bump trigger `tg_idempotency_keys_biu_touch_updated_at` calling the shared `touch_updated_at()` function (ADR-0031, migration `0004_idempotency_keys_invariants`). |
 | 10 | Should `distributed_locks` reintroduce a `lease_until > acquired_at` CHECK? | §32 | rely on application logic |
 | 11 | Should `audit_log` reintroduce a top-level `reason` column? | §33 | keep inside `after_json.reason` |
 | 12 | Should `provider_settings` reintroduce a `kind plugin_kind` discriminator? | §27.3 | keep flat namespace |
@@ -1349,7 +1361,7 @@ Per reviewer guidance at the Phase 2D close, the 13 items above should not all b
 
 **Wave 1 — Schema integrity (correctness).** Promote use-case-layer invariants into the DB before they accumulate workarounds.
 - §17 q8: `export_jobs (render_job_id, format, quality, orientation)` DB constraint promotion. **✅ Done — Phase 3 W1.1 (ADR-0030, migration `0003_export_jobs_partial_unique`, 2026-06-29).**
-- §31 q9: `idempotency_keys` CHECK + `updated_at`.
+- §31 q9: `idempotency_keys` CHECK + `updated_at`. **✅ Done — Phase 3 W1.2 (ADR-0031, migration `0004_idempotency_keys_invariants`, 2026-06-29).**
 - §32 q10: `distributed_locks` lease CHECK.
 - §18 q6: `usage_records` per-partition `(request_id)` uniqueness.
 

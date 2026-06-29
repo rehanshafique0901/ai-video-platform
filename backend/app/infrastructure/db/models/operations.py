@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -22,10 +23,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.enums import idempotency_status_enum
-from app.infrastructure.db.mixins import CreatedAtOnlyMixin, UUIDPrimaryKeyMixin
+from app.infrastructure.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 
-class IdempotencyKey(UUIDPrimaryKeyMixin, CreatedAtOnlyMixin, Base):
+class IdempotencyKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "idempotency_keys"
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -49,6 +50,10 @@ class IdempotencyKey(UUIDPrimaryKeyMixin, CreatedAtOnlyMixin, Base):
             "key",
             "resource_type",
             name="uq_idempotency_keys_tenant_id_key_resource_type",
+        ),
+        CheckConstraint(
+            "(status = 'in_flight') = (response_hash IS NULL)",
+            name="chk_idempotency_keys_response_hash_matches_status",
         ),
         Index(
             "ix_idempotency_keys_expires_at",
