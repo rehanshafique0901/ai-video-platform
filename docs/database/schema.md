@@ -1199,11 +1199,15 @@ distributed_locks (
   lease_until timestamptz NOT NULL,               -- auto-expiry if heartbeat lapses
   heartbeat_at timestamptz NOT NULL,
   acquired_at timestamptz NOT NULL DEFAULT now(),
-  metadata jsonb NOT NULL DEFAULT '{}'::jsonb    -- holder-defined (run id, attempt #, etc.)
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,   -- holder-defined (run id, attempt #, etc.)
+  CONSTRAINT chk_distributed_locks_lease_until_after_acquired_at
+    CHECK (lease_until > acquired_at)             -- Phase 3 W1.3, ADR-0032
 )
 ```
 
 **Indexes:** `ix_distributed_locks_lease_until` for the janitor's `lease_until < now()` scan.
+
+**Lease validity invariant (DB-enforced, Phase 3 W1.3):** `chk_distributed_locks_lease_until_after_acquired_at` enforces `lease_until > acquired_at` — every row must carry a lease that extends strictly into the future relative to its acquisition time. Strict greater-than (`>`, not `>=`) rejects the degenerate zero-second lease that a buggy `$lease = 0` or negative-`$lease` call site would produce. Per ADR-0032, the CHECK is scoped to this single predicate only (not `lease_until >= heartbeat_at` or `heartbeat_at >= acquired_at`, which remain future-ADR territory once the heartbeat code is being written and its invariants are concrete). Violations surface as `psycopg.errors.IntegrityError` carrying the constraint name, letting the debugger jump straight to the violated invariant at the call site.
 
 > **Reconciled in 2D (2026-06-29).** Step-A used a surrogate `id uuid PK`
 > with a separate `UNIQUE (lock_key)`. Implementation makes
@@ -1211,10 +1215,21 @@ distributed_locks (
 > the surrogate id added a join column with no consumer). The
 > `created_at` column was renamed to `acquired_at` so its meaning is
 > obvious to the worker reading it. The `lease_until > created_at`
-> CHECK was dropped — every acquisition path computes
-> `now() + $lease`, so a runtime CHECK at the DB just makes failure
-> harder to diagnose without preventing any real bug; whether to add
-> it back is a Phase-3 decision (§37).
+> CHECK was dropped on the speculative reasoning that "every
+> acquisition path computes `now() + $lease`, so a runtime CHECK at
+> the DB just makes failure harder to diagnose without preventing any
+> real bug." That reasoning is **reversed by Phase 3 W1.3**
+> (ADR-0032, migration `0005_distributed_locks_lease`,
+> 2026-06-29): the CHECK is restored as
+> `chk_distributed_locks_lease_until_after_acquired_at` with predicate
+> `lease_until > acquired_at`, named so any future `IntegrityError`
+> carrying it lets the debugger jump straight to the violated
+> invariant. The "harder to diagnose" argument inverts in practice
+> once the CHECK has a descriptive name — silent corruption of the
+> lock table (e.g. a `$lease = 0` call producing
+> `lease_until == acquired_at` that then races with itself) is
+> categorically worse than a surfaced constraint violation at the
+> bug's call site. See §37 Q10.
 
 **Use cases (canonical `lock_key` prefixes):**
 - `render_job:<id>` — exactly one worker renders a job at a time.
@@ -1348,7 +1363,7 @@ The Phase 2D documentation reconciliation deliberately did **not** make any of t
 | 7 | Should `render_jobs.progress` be retyped from `text` to `numeric(5,2)`? | §17 | leave as text until profiling shows a need |
 | 8 | Should the `(render_job_id, format, quality, orientation)` partial-unique constraint on `export_jobs` be promoted to a DB constraint? | §17 | **Resolved (Phase 3 W1.1, 2026-06-29)** — promoted to partial-unique index `uq_export_jobs_render_job_id_format_quality_orientation` with `WHERE status IN ('queued','running','succeeded')` (ADR-0030, migration `0003_export_jobs_partial_unique`). |
 | 9 | Should `idempotency_keys` reintroduce the `(status='in_flight') = (response_hash IS NULL)` CHECK and an `updated_at` column? | §31 | **Resolved (Phase 3 W1.2, 2026-06-29)** — both promoted to DB: CHECK constraint `chk_idempotency_keys_response_hash_matches_status` enforces the FSM invariant; `updated_at timestamptz NOT NULL DEFAULT now()` column added with auto-bump trigger `tg_idempotency_keys_biu_touch_updated_at` calling the shared `touch_updated_at()` function (ADR-0031, migration `0004_idempotency_keys_invariants`). |
-| 10 | Should `distributed_locks` reintroduce a `lease_until > acquired_at` CHECK? | §32 | rely on application logic |
+| 10 | Should `distributed_locks` reintroduce a `lease_until > acquired_at` CHECK? | §32 | **Resolved (Phase 3 W1.3, 2026-06-29)** — promoted to DB as CHECK constraint `chk_distributed_locks_lease_until_after_acquired_at` enforcing `lease_until > acquired_at` (strict greater-than rejects degenerate zero-second leases). Single-predicate by deliberate choice; `lease_until >= heartbeat_at` and other temporal-anchor invariants remain future-ADR territory (ADR-0032, migration `0005_distributed_locks_lease`). |
 | 11 | Should `audit_log` reintroduce a top-level `reason` column? | §33 | keep inside `after_json.reason` |
 | 12 | Should `provider_settings` reintroduce a `kind plugin_kind` discriminator? | §27.3 | keep flat namespace |
 | 13 | Should `workflow_runs` reintroduce `correlation_id`, `paused_at`, `version`, queue-related columns? | §16 | derive correlation from `event_outbox`; pause state via `status='paused'` |
@@ -1362,7 +1377,7 @@ Per reviewer guidance at the Phase 2D close, the 13 items above should not all b
 **Wave 1 — Schema integrity (correctness).** Promote use-case-layer invariants into the DB before they accumulate workarounds.
 - §17 q8: `export_jobs (render_job_id, format, quality, orientation)` DB constraint promotion. **✅ Done — Phase 3 W1.1 (ADR-0030, migration `0003_export_jobs_partial_unique`, 2026-06-29).**
 - §31 q9: `idempotency_keys` CHECK + `updated_at`. **✅ Done — Phase 3 W1.2 (ADR-0031, migration `0004_idempotency_keys_invariants`, 2026-06-29).**
-- §32 q10: `distributed_locks` lease CHECK.
+- §32 q10: `distributed_locks` lease CHECK. **✅ Done — Phase 3 W1.3 (ADR-0032, migration `0005_distributed_locks_lease`, 2026-06-29).**
 - §18 q6: `usage_records` per-partition `(request_id)` uniqueness.
 
 **Wave 2 — Data model evolution (extension).** Add columns and shape changes the application needs as Phase 3 services land. Each one is a clean migration with no behavioural side-effects on existing rows.

@@ -78,7 +78,13 @@ class DistributedLock(Base):
         "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
-    __table_args__ = (Index("ix_distributed_locks_lease_until", "lease_until"),)
+    __table_args__ = (
+        CheckConstraint(
+            "lease_until > acquired_at",
+            name="chk_distributed_locks_lease_until_after_acquired_at",
+        ),
+        Index("ix_distributed_locks_lease_until", "lease_until"),
+    )
 
 
 __all__ = ["IdempotencyKey", "DistributedLock"]
