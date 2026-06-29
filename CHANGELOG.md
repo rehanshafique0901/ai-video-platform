@@ -6,6 +6,73 @@
 
 ## [Unreleased]
 
+### Phase 3 Wave 1.1 — `export_jobs` partial-unique constraint (2026-06-29, ADR-0030)
+
+#### Added
+- **`backend/alembic/versions/0003_export_jobs_partial_unique.py`** — Alembic
+  migration creating the partial-unique index
+  `uq_export_jobs_render_job_id_format_quality_orientation` on
+  `export_jobs (render_job_id, format, quality, orientation)` with
+  `WHERE status IN ('queued','running','succeeded')`. Hand-written rather
+  than via `alembic revision --autogenerate` because autogenerate does not
+  reliably emit partial-unique indexes via `postgresql_where` (it produces
+  a vanilla unique constraint instead). Forward + reverse + idempotency
+  round-trip validated against Supabase Postgres 17.6 + pgvector 0.8.0
+  via `backend/.env.validation`.
+- **`docs/decisions/ADR-0030-export-jobs-partial-unique.md`** — first
+  file-per-ADR under the new `docs/decisions/` directory. Records the
+  promotion of the `(render_job_id, format, quality, orientation)`
+  uniqueness invariant from the use-case layer (where it had no consumer
+  yet) directly to the database, with full rationale, 7 rejected
+  alternatives, 3-tier rollback plan, and 15-item acceptance criteria.
+  ADRs 0001–0029 remain inline in `DECISIONS.md`; all Phase-3-and-later
+  ADRs use the file-per-ADR convention.
+- **`DECISIONS.md`** — one-line cross-link entry for ADR-0030 pointing
+  at the new file (status flips from `Proposed` → `Accepted` in the
+  pre-merge `docs(adr): mark ADR-0030 Accepted` commit).
+
+#### Changed
+- **`backend/app/infrastructure/db/models/jobs.py`** — `ExportJob.__table_args__`
+  extended with the matching `Index(..., unique=True, postgresql_where=text(...))`
+  declaration so the ORM mirrors the migration exactly. Same shape as
+  the existing partial-unique pattern used across the model layer.
+- **`docs/database/schema.md`** — §17 reconciliation note for `export_jobs`
+  flipped from "Phase-3 decision" to "Implemented via ADR-0030 / migration
+  `0003`"; §37 Q8 row marked **Resolved (Phase 3 W1.1, 2026-06-29)**;
+  Wave 1 bullet for §17 q8 marked ✅ Done.
+- **`docs/database/INDEX_STRATEGY.md`** — §8 `export_jobs` row moved
+  **Deferred (Phase 3)** → **Implemented** with full predicate spelled out;
+  §18 reconciliation summary counts updated (indexes 81 → 82,
+  unique constraints 23 → 24, Implemented rows 73 → 74,
+  Deferred (Phase 3) 21 → 20).
+- **`ROADMAP.md`** — Phase 3 wave table W1 row annotated with
+  W1.1 ✅ Complete and the remaining W1.2 / W1.3 / W1.4 split out.
+- **`CONTRIBUTING.md`** — §1 ground rule 2 and §6 documentation policy
+  updated to acknowledge the new `docs/decisions/` file-per-ADR
+  convention (introduced by ADR-0030) while preserving compatibility
+  with the inline ADRs 0001–0029 in `DECISIONS.md`.
+
+#### Validated (live, 2026-06-29)
+- **Pre-upgrade safety check** — `SELECT COUNT(*) FROM export_jobs WHERE
+  status IN ('queued','running','succeeded')` against Supabase returned
+  `0`, clearing the gate for the in-development upgrade path.
+- **Alembic round-trip** — `upgrade head → downgrade -1 → upgrade head`
+  clean; `pg_indexes` diff = exactly one row added on forward, exactly
+  one row removed on reverse; `indexdef` contains the expected
+  `WHERE … status = ANY` predicate.
+- **Schema validator** — `scripts/validate_schema.py` 9/9 (no validator
+  code change; `check_unique_constraints` and `check_indexes` picked up
+  the new `Index(unique=True, postgresql_where=…)` automatically from
+  ORM metadata).
+- **ERD round-trip** — `regenerate_erd.py` + `compare_erd.py` 0 drift
+  (ERD ignores non-FK indexes).
+- **Full CI gate** — `scripts/ci_gate.py` 10/10 local; matching GitHub
+  Actions run on the PR also 10/10 against the pgvector service container.
+
+#### Scope discipline (per Wave 1 isolation constraint)
+- No changes to `idempotency_keys`, `distributed_locks`, or
+  `usage_records`. W1.2 / W1.3 / W1.4 each get their own branch + ADR.
+
 ### Phase 2D — Documentation Reconciliation (2026-06-29, approved by reviewer; no code changes)
 
 #### Verification

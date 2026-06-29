@@ -616,11 +616,19 @@ export_jobs (
 >   `last_downloaded_at`, `file_size_bytes` because the original draft
 >   did not anticipate the user-facing "my downloads" feed and the
 >   storage-quota reconciliation that came out of CR-12.
-> - `export_jobs` `error_code`/`error_message`/`started_at` and the
->   partial-unique `(render_job_id, format, quality, orientation)`
->   constraint were not implemented; the application enforces
->   uniqueness at the use-case layer. Whether this should be promoted
->   to a DB constraint is a Phase-3 decision (§37).
+> - `export_jobs` `error_code`/`error_message`/`started_at` are not
+>   implemented; structured error envelopes live in a JSONB column on
+>   `render_jobs.error` and are not duplicated per export.
+> - The partial-unique `(render_job_id, format, quality, orientation)`
+>   constraint was promoted from the use-case layer to the database in
+>   **Phase 3 W1.1** as `uq_export_jobs_render_job_id_format_quality_orientation`
+>   with `WHERE status IN ('queued','running','succeeded')`
+>   (ADR-0030; migration `0003_export_jobs_partial_unique`; see
+>   `INDEX_STRATEGY.md` §8). `failed`/`canceled` rows are deliberately
+>   excluded so retries after failure are permitted; `succeeded` is
+>   included because `export_jobs` is the canonical artefact row for
+>   that export configuration (`download_count`, `last_downloaded_at`,
+>   `output_media_asset_id` live on it). §37 Q8 is therefore Resolved.
 
 ---
 
@@ -1326,7 +1334,7 @@ The Phase 2D documentation reconciliation deliberately did **not** make any of t
 | 5 | Should the ERD draw cross-cluster FK edges that currently sit at "logical FK" (e.g. `notifications → audit_log`, `audit_log → workflow_runs`)? | `docs/database/ERD.md` | leave as logical (in-text comments) |
 | 6 | Should `usage_records` add a per-partition partial-unique `(request_id)` index, or rely on `idempotency_keys`? | §18, `INDEX_STRATEGY.md` | rely on `idempotency_keys` |
 | 7 | Should `render_jobs.progress` be retyped from `text` to `numeric(5,2)`? | §17 | leave as text until profiling shows a need |
-| 8 | Should the `(render_job_id, format, quality, orientation)` partial-unique constraint on `export_jobs` be promoted to a DB constraint? | §17 | enforce in use-case layer |
+| 8 | Should the `(render_job_id, format, quality, orientation)` partial-unique constraint on `export_jobs` be promoted to a DB constraint? | §17 | **Resolved (Phase 3 W1.1, 2026-06-29)** — promoted to partial-unique index `uq_export_jobs_render_job_id_format_quality_orientation` with `WHERE status IN ('queued','running','succeeded')` (ADR-0030, migration `0003_export_jobs_partial_unique`). |
 | 9 | Should `idempotency_keys` reintroduce the `(status='in_flight') = (response_hash IS NULL)` CHECK and an `updated_at` column? | §31 | application invariant only |
 | 10 | Should `distributed_locks` reintroduce a `lease_until > acquired_at` CHECK? | §32 | rely on application logic |
 | 11 | Should `audit_log` reintroduce a top-level `reason` column? | §33 | keep inside `after_json.reason` |
@@ -1340,7 +1348,7 @@ These are tracked at the same level as ADRs (small, dated, reviewable). Each ite
 Per reviewer guidance at the Phase 2D close, the 13 items above should not all be tackled simultaneously. The order below groups them by their *kind of risk* so Phase 3 PRs stay reviewable:
 
 **Wave 1 — Schema integrity (correctness).** Promote use-case-layer invariants into the DB before they accumulate workarounds.
-- §17 q8: `export_jobs (render_job_id, format, quality, orientation)` DB constraint promotion.
+- §17 q8: `export_jobs (render_job_id, format, quality, orientation)` DB constraint promotion. **✅ Done — Phase 3 W1.1 (ADR-0030, migration `0003_export_jobs_partial_unique`, 2026-06-29).**
 - §31 q9: `idempotency_keys` CHECK + `updated_at`.
 - §32 q10: `distributed_locks` lease CHECK.
 - §18 q6: `usage_records` per-partition `(request_id)` uniqueness.

@@ -120,6 +120,21 @@ class ExportJob(UUIDPrimaryKeyMixin, TimestampMixin, VersionMixin, Base):
             "requested_by_user_id",
             "created_at",
         ),
+        # ADR-0030 (Phase 3 W1.1) — at most one active-or-fulfilled export per
+        # (render_job_id, format, quality, orientation). `failed`/`canceled`
+        # rows are excluded so retries after failure are permitted; `succeeded`
+        # is included because export_jobs is the canonical artefact row
+        # (download_count, last_downloaded_at, output_media_asset_id all live
+        # on it). Mirrors migration 0003_export_jobs_partial_unique.
+        Index(
+            "uq_export_jobs_render_job_id_format_quality_orientation",
+            "render_job_id",
+            "format",
+            "quality",
+            "orientation",
+            unique=True,
+            postgresql_where=text("status IN ('queued','running','succeeded')"),
+        ),
     )
 
 
