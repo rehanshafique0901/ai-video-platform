@@ -314,6 +314,14 @@ The runner is implemented in Python (`ci_gate.py`) so a developer's local invoca
 
 ---
 
+## ADR-0031 — Promote `idempotency_keys` Mutability Tracking and Status↔Response Invariant to the Database
+
+**Status:** Proposed (Phase 3 W1.2). To be flipped to Accepted in the pre-merge `docs(adr): mark ADR-0031 Accepted` commit after live validation passes.
+**File:** [`docs/decisions/ADR-0031-idempotency-keys-invariants.md`](docs/decisions/ADR-0031-idempotency-keys-invariants.md)
+**Summary:** Promotes two long-standing application-layer assumptions about `idempotency_keys` to the database. First, corrects the Phase 2 Step-A mixin misclassification that placed the table under `CreatedAtOnlyMixin` (documented for immutable tables) even though rows transition `in_flight → succeeded`/`failed` — adds `updated_at timestamptz NOT NULL DEFAULT now()` and binds the shared `touch_updated_at()` trigger as `tg_idempotency_keys_biu_touch_updated_at`. Second, enforces the status↔response FSM invariant as `chk_idempotency_keys_response_hash_matches_status CHECK ((status = 'in_flight') = (response_hash IS NULL))`. Both changes ship in a single hand-written migration `0004_idempotency_keys_invariants`. See the ADR file for full Context (two distinct issues), Decision (three coordinated changes), 8 Alternatives Considered, Migration Plan, 3-tier Rollback, Consequences (including the application-layer contract change), and 17-item Acceptance Criteria.
+
+---
+
 ## Decisions Log Format (for future entries)
 
 ```
