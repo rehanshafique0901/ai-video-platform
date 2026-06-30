@@ -223,12 +223,34 @@ Performed in two commits.
 
 4. **Wait for CI to pass** (10/10 stages green on the PR's check run).
 
-5. **Merge via the GitHub UI** (merge commit, not squash — preserves
-   the two-commit structure). Record the merge commit SHA.
-
-6. **Tag the merge commit.**
+5. **Pre-merge checkpoint — verify the status-flip commit is on the
+   branch.** Before clicking Merge, run:
 
    ```powershell
+   git log --oneline main..HEAD
+   ```
+
+   Output must show exactly **two** commits, and the most recent must
+   be `docs(adr): mark ADR-NNNN Accepted`. If only one commit appears
+   (or the most recent is the feature commit), the status-flip is
+   missing — push it first per Section 4.2 and re-run this check
+   before merging. Merging without the status-flip leaves the ADR at
+   `Proposed` on `main` and forces a recovery commit on `main` after
+   the fact, which is recoverable but costs roughly four extra commands
+   (W1.4 hit this on 2026-06-30; see the W1.4 retrospective).
+
+6. **Merge via the GitHub UI** (merge commit, not squash — preserves
+   the two-commit structure). Record the merge commit SHA.
+
+7. **Tag the merge commit.** The working tree must be clean before
+   switching to `main` — any uncommitted change (e.g., a deferred
+   status-flip edit) will block `git checkout main`, and the
+   `git pull origin main --ff-only` that follows would otherwise
+   fast-forward the still-current branch instead of `main`. Verify
+   with `git status` first.
+
+   ```powershell
+   git status                        # working tree must be clean
    git checkout main
    git pull origin main --ff-only
    git tag -a v0.3.<N>-phase3-w1.<X> <merge-sha> `
@@ -236,7 +258,7 @@ Performed in two commits.
    git push origin v0.3.<N>-phase3-w1.<X>
    ```
 
-7. **Branch cleanup.**
+8. **Branch cleanup.**
 
    ```powershell
    git branch -d phase3/wave1.<X>-<short-slug>
@@ -292,13 +314,27 @@ print(cur.fetchone())
 $snippet | python -
 ```
 
-Two failure modes recorded here so the next contributor doesn't
+Three failure modes recorded here so the next contributor doesn't
 re-discover them:
 
 - **`SyntaxError: unterminated string literal`** when using triple-
   quoted SQL inside `python -c "$snippet"` — PowerShell mangles
   consecutive `"` characters during argument parsing. Switch to
   `$snippet | python -` to bypass the argument layer entirely.
+- **Silent variable substitution / `SyntaxError` from
+  `python -c "...$variable..."` (e.g.,
+  `python -c "import x; x.run('$sql')"`).** PowerShell expands
+  `$variable` into the double-quoted argument string *before* `python`
+  is ever launched, so by the time the Python interpreter parses the
+  source it sees the expanded text — any quote, parenthesis, or
+  newline inside `$variable` is now lexed as Python syntax, which
+  typically produces `SyntaxError: unterminated string literal` or
+  worse, a silently-mutated SQL statement. Single-quoted PowerShell
+  strings would suppress expansion but then collide with the inner
+  Python quoting, so the only robust pattern is stdin: build the
+  snippet as a here-string and pipe it (`$snippet | python -`), which
+  bypasses PowerShell's argument-quoting and expansion layers entirely
+  and lets Python read raw bytes from stdin.
 - **`psycopg.ProgrammingError: invalid connection option
   "postgresql+psycopg://..."`** when passing the env file's
   DATABASE_URL straight to `psycopg.connect()` — psycopg3 does not
@@ -393,5 +429,5 @@ Splitting them — codified in `CONTRIBUTING.md` §6 — keeps ADRs
 focused on _why_ a decision was made and runbooks focused on _how_
 it is executed, with neither doc type drifting into the other's job.
 This runbook is the first artefact under the new convention; the
-Wave 1.4 ADR (ADR-0033) will be the first ADR to reference it
-directly.
+Wave 1.4 ADR (ADR-0033) is the first ADR to reference it directly
+(merged as part of `v0.3.4-phase3-w1.4`, 2026-06-30).
