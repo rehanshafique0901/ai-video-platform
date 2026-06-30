@@ -12,6 +12,11 @@ dependencies = [
     "pydantic>=2.9.2",
     "pydantic-settings>=2.6.0",
     "structlog>=24.4.0",
+    # Phase 3 Slice α1 (architecture bootstrap) — added 2026-06-30.
+    "fastapi>=0.115.0",                # HTTP framework + DI + OpenAPI
+    "argon2-cffi>=23.1.0",             # Argon2id password hashing (ADR-0008)
+    "pyjwt[crypto]>=2.9.0",            # JWT issue/verify (ADR-0008)
+    "uvicorn[standard]>=0.32.0",       # ASGI server (local dev + container entry)
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -51,6 +56,9 @@ dev = [
     "pytest==8.3.3",
     "pytest-cov==5.0.0",
     "pytest-asyncio==0.24.0",
+    # Phase 3 Slice α1 — async HTTP client for FastAPI TestClient +
+    # the integration suite's httpx.AsyncClient.
+    "httpx>=0.27.0",
     # Type stubs for libraries the test suite touches.
     "types-PyYAML==6.0.12.20240917",
     # YAML loader used by some CI integrations & schema fixtures.
@@ -166,6 +174,10 @@ markers = [
     "integration: requires a live PostgreSQL + pgvector",
 ]
 asyncio_mode = "auto"
+# Phase 3 Slice α1 — pin the loop scope for async fixtures so the
+# pytest-asyncio deprecation warning ("event loop scope is unset") goes
+# away and behaviour is stable across future pytest-asyncio releases.
+asyncio_default_fixture_loop_scope = "function"
 # Default = run only `unit` so stage 4 stays fast and stages 5–9 own the
 # integration surface. CI can opt in via `pytest -m 'unit or integration'`.
 filterwarnings = [
@@ -220,10 +232,20 @@ source_modules = ["app.infrastructure.db"]
 forbidden_modules = ["app.application", "app.api"]
 
 [[tool.importlinter.contracts]]
+# The intent is "no direct SQLAlchemy / argon2 / pyjwt imports inside
+# routers" — preventing infrastructure types from leaking into HTTP
+# handlers. The composition root (``app.core.container``) is the
+# legitimate bridge: it imports infrastructure to wire the singletons,
+# and ``app.api.v1.deps`` imports the container to expose FastAPI
+# dependency providers. That creates an *indirect* chain
+# (api → core → infrastructure) which is allowed by this contract by
+# design — only *direct* infrastructure imports from inside ``app.api``
+# are forbidden.
 name = "API layer talks to application services, never directly to infrastructure"
 type = "forbidden"
 source_modules = ["app.api"]
 forbidden_modules = ["app.infrastructure"]
+allow_indirect_imports = "True"
 
 [[tool.importlinter.contracts]]
 # Application services orchestrate domain + repositories; they must not be
