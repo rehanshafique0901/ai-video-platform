@@ -499,6 +499,116 @@ def check_credit_ledger_balance_trigger(engine: Engine) -> CheckResult:
     )
 
 
+def check_usage_records_per_partition_unique_indexes(engine: Engine) -> CheckResult:
+    """Phase 3 W1.4 (ADR-0033): per-partition partial-unique (request_id) indexes.
+
+    Asserts that every child partition of ``usage_records`` carries an
+    index named ``uq_<child>_request_id`` with ``indisunique = true`` and
+    the expected ``WHERE (request_id IS NOT NULL)`` partial predicate.
+
+    Why this is a standalone check rather than a row in the bulk index
+    snapshot: ``load_snapshot`` deliberately excludes partition children
+    from its bulk index query (see the ``NOT EXISTS (SELECT 1 FROM
+    pg_inherits ...)`` clause in the indexes CTE) to avoid hundreds of
+    per-child round-trips against Supabase. For the 99% case (indexes
+    declared at parent level and propagated by PostgreSQL native
+    inheritance) parent-only visibility is sufficient. The W1.4
+    per-child unique indexes are the 1% case — they exist only on
+    children by PostgreSQL design (the partition-key rule forbids
+    declaring them at parent level for ``(request_id)`` because it
+    omits the ``occurred_at`` partition key), and would be invisible
+    to ``check_indexes`` without this targeted scan.
+
+    This check is a CI-visibility addition compensating for the
+    bulk-snapshot performance optimisation; it is not a workaround for
+    a PostgreSQL limitation, and it is not a substitute for ORM
+    declaration (which is impossible by PostgreSQL design — see
+    ADR-0033 §Implementation Notes).
+    """
+    expected_index_pattern = "uq_<child>_request_id"
+    expected_predicate = "WHERE (request_id IS NOT NULL)"
+
+    with engine.connect() as conn:
+        children = [
+            row[0]
+            for row in conn.execute(
+                sa.text(
+                    """
+                    SELECT c.relname
+                    FROM pg_inherits i
+                    JOIN pg_class c ON c.oid = i.inhrelid
+                    JOIN pg_class p ON p.oid = i.inhparent
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE p.relname = 'usage_records'
+                      AND n.nspname = 'public'
+                    ORDER BY c.relname
+                    """
+                )
+            ).all()
+        ]
+        present = {
+            row[0]: row[1]
+            for row in conn.execute(
+                sa.text(
+                    """
+                    SELECT t.relname AS child, pg_get_indexdef(ix.indexrelid) AS def
+                    FROM pg_index ix
+                    JOIN pg_class ic ON ic.oid = ix.indexrelid
+                    JOIN pg_class t  ON t.oid  = ix.indrelid
+                    JOIN pg_inherits i ON i.inhrelid = t.oid
+                    JOIN pg_class p ON p.oid = i.inhparent
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE p.relname = 'usage_records'
+                      AND n.nspname = 'public'
+                      AND ix.indisunique = true
+                      AND ic.relname = 'uq_' || t.relname || '_request_id'
+                    """
+                )
+            ).all()
+        }
+
+    missing = [c for c in children if c not in present]
+    bad_predicate = [c for c, defn in present.items() if "request_id IS NOT NULL" not in defn]
+
+    details: list[str]
+    if not children:
+        # Defensive: if there are no children, the table is unpartitioned or
+        # the migration that created partitions has not run. Surface this as
+        # a failure rather than silently passing on an empty set.
+        details = [
+            "FAIL: no usage_records partition children found "
+            "(baseline migration 0001 not applied?)"
+        ]
+        passed = False
+    elif missing:
+        details = [
+            f"Missing per-partition unique indexes on {len(missing)} of "
+            f"{len(children)} partition(s): {missing}",
+            f"Expected name pattern: {expected_index_pattern}",
+            f"Expected predicate:    {expected_predicate}",
+        ]
+        passed = False
+    elif bad_predicate:
+        details = [
+            f"Indexes present but wrong predicate on: {bad_predicate}",
+            f"Expected predicate: {expected_predicate}",
+        ]
+        passed = False
+    else:
+        details = [
+            f"OK: {len(children)}/{len(children)} usage_records partition(s) "
+            f"carry uq_<child>_request_id with partial predicate "
+            f"{expected_predicate}",
+        ]
+        passed = True
+
+    return CheckResult(
+        name="usage_records per-partition (request_id) unique indexes",
+        passed=passed,
+        details=details,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -520,6 +630,9 @@ def run_all_checks(engine: Engine) -> ValidationReport:
     report.checks.append(check_immutable_triggers(engine))
     report.checks.append(check_pgvector_columns(engine))
     report.checks.append(check_credit_ledger_balance_trigger(engine))
+    # W1.4 (ADR-0033): per-child unique indexes that load_snapshot's bulk
+    # query elides for performance. See the check's docstring for rationale.
+    report.checks.append(check_usage_records_per_partition_unique_indexes(engine))
     return report
 
 

@@ -144,7 +144,7 @@ The partition key was renamed from `started_at` to `occurred_at` in the implemen
 | `ix_usage_records_request_id` | B-tree | Implemented | Vendor request id lookup |
 | `user_id_occurred_at` | composite | **Deferred (Phase 3)** | Per-user usage queries — tenant index already covers admin views; add if per-user dashboards ship |
 | `project_id_occurred_at` | composite | **Deferred (Phase 3)** | Per-project usage queries — same rationale |
-| `uq_usage_records_<part>_request_id` | unique per partition | **Deferred (Phase 3)** | Idempotency is currently enforced via `idempotency_keys`; promote per partition if needed (`schema.md` §37 q6) |
+| `uq_usage_records_<part>_request_id` | unique per partition (partial) | **Implemented (Phase 3 W1.4)** | Per-child partial-unique on `(request_id) WHERE request_id IS NOT NULL`, named `uq_<child>_request_id` (e.g. `uq_usage_records_y2025m12_request_id`). PostgreSQL forbids parent-level unique indexes whose key omits the partition key (`occurred_at`), so migration `0007_usage_records_request_id_unique` creates one index per child via a `DO $$` loop over `pg_inherits`. The future-partition contract — whatever creates new `usage_records` partitions must add the matching `uq_<child>_request_id` — is enforced at CI by `backend/scripts/validate_schema.py::check_usage_records_per_partition_unique_indexes`. Broader `(provider, request_id)` semantics remain documented at the architectural layer (`schema.md` §18, §31; `API_CONTRACT.md`; `ARCHITECTURE.md` §8k.1) and are neither implemented nor superseded by W1.4 — see ADR-0033 §Future Considerations. |
 | `brin_usage_records_<part>_occurred_at` | BRIN | **Deferred (Phase 3)** | Add per-partition after the first month of telemetry |
 
 Notes:
