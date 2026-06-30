@@ -64,7 +64,10 @@ if ($Stages) { $args += @("--stages", $Stages) }
 
 # Stream Python output through directly so the user sees the same
 # progress they'd see in CI logs. `python` is preferred over `py` so we
-# pick up the active venv if one is activated.
+# pick up the active venv if one is activated. ci_gate.py loads
+# DATABASE_URL from backend/.env.validation on its own (via _load_env),
+# so we deliberately do NOT source the env file into the PowerShell
+# session here.
 python (Join-Path $BackendRoot "scripts\ci_gate.py") @args
 $gateExit = $LASTEXITCODE
 
