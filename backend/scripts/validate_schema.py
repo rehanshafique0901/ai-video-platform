@@ -17,9 +17,12 @@ upgrade/downgrade/re-upgrade cycle) and validates:
   7. The ``vector`` column type appears only on the approved tables
      (``library_assets.embedding`` and ``agent_memory.embedding``).
 
-The script writes a JSON summary to ``schema_validation_report.json`` and
-prints a human-readable summary to stdout. Exit code is non-zero if any
-required check failed.
+The script writes a JSON summary to ``.validation/schema_validation_report.json``
+(or to the path provided as ``argv[1]``) and prints a human-readable
+summary to stdout. The ``.validation/`` directory is git-ignored and
+matches the location the CI gate writes to, so standalone and CI runs
+no longer leave untracked files at the repo root. Exit code is
+non-zero if any required check failed.
 """
 
 from __future__ import annotations
@@ -637,7 +640,9 @@ def run_all_checks(engine: Engine) -> ValidationReport:
 
 
 def main(argv: list[str]) -> int:
-    out_path = Path(argv[1]) if len(argv) > 1 else Path("schema_validation_report.json")
+    out_path = (
+        Path(argv[1]) if len(argv) > 1 else Path(".validation") / "schema_validation_report.json"
+    )
     engine = sa.create_engine(DATABASE_URL, future=True)
     report = run_all_checks(engine)
 
@@ -649,6 +654,7 @@ def main(argv: list[str]) -> int:
             print(f"        {d}")
     print()
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
     print(f"Wrote {out_path.resolve()}")
     return 0 if report.all_passed else 1

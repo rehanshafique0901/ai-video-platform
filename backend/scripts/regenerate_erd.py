@@ -9,7 +9,10 @@ Usage:
     python scripts/regenerate_erd.py [output.md]
 
 The script writes a Mermaid ``erDiagram`` block listing every base table plus
-its foreign-key relationships, ordered alphabetically for stable diffs.
+its foreign-key relationships, ordered alphabetically for stable diffs. The
+default output path is ``.validation/erd_generated.md`` (git-ignored and
+matching the CI gate's output location); pass an explicit path as ``argv[1]``
+to override.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ def _is_partition_child(table_name: str) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    out_path = Path(argv[1]) if len(argv) > 1 else Path("erd_generated.md")
+    out_path = Path(argv[1]) if len(argv) > 1 else Path(".validation") / "erd_generated.md"
     engine = sa.create_engine(DATABASE_URL, future=True)
     # Use pg_catalog directly — information_schema joins over constraint_column_usage
     # are very slow on Supabase (statement_timeout = 2 min) once partition children
@@ -121,6 +124,7 @@ def main(argv: list[str]) -> int:
         seen.add(key)
         lines.append(f"  {dst} ||--o{{ {src} : {src_col}")
     lines.append("```")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Wrote {out_path.resolve()} ({len(tables)} tables, {len(seen)} FKs)")
     return 0
