@@ -129,6 +129,8 @@ For every PR that changes architecture:
 
 **ADR convention change.** ADR-0030 (`docs/decisions/ADR-0030-export-jobs-partial-unique.md`) is the record of the switch from "ADRs are inline sections in `DECISIONS.md`" to "ADRs are standalone files under `docs/decisions/`, cross-linked from `DECISIONS.md`." See ADR-0030 §Context for the rationale and the migration policy for older ADRs.
 
+**ADRs vs Runbooks (v0.3.3-infra).** ADRs explain **why** an architectural decision was made — context, alternatives, consequences. Runbooks explain **how** a repeatable engineering procedure is executed — step lists, commands, recovery actions. New ADRs should reference the relevant runbook in `docs/engineering/` rather than duplicating its steps; new runbooks should reference the relevant ADR(s) for justification. The first runbook (`docs/engineering/RUNBOOK_WAVE.md`) codifies the Phase 3 Wave process that W1.1–W1.3 followed by hand and that W1.4 onwards will execute against directly. The Wave 1.4 ADR (ADR-0033) will be the first ADR to reference the runbook in place of inlining operational steps.
+
 ---
 
 ## 7. Security Checklist (per PR)

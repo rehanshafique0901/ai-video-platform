@@ -334,6 +334,13 @@ def main(argv: list[str]) -> int:
     db_available = (
         bool(os.environ.get("DATABASE_URL")) or (BACKEND_ROOT / ".env.validation").exists()
     )
+    # Populate DATABASE_URL from backend/.env.validation if present. Without
+    # this, stages 5-9 would silently fall back to alembic.ini's localhost URL.
+    # _load_env.load() is idempotent and resolves via sys.path[0] (backend/scripts).
+    if db_available and not os.environ.get("DATABASE_URL"):
+        from _load_env import load as _load_validation_env
+
+        _load_validation_env()
     if not db_available:
         print(
             _c(

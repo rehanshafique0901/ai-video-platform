@@ -6,6 +6,135 @@
 
 ## [Unreleased]
 
+### Phase 3 Engineering Checkpoint — `v0.3.3-infra` workflow cleanup (2026-06-30)
+
+Non-feature release between W1.3 and W1.4 removing three recurring
+engineering friction points discovered while shipping W1.1–W1.3, plus
+the first engineering runbook. **Success metric:** W1.4 must require
+fewer manual steps than W1.3.
+
+#### Added
+- **`backend/alembic/versions/0006_widen_alembic_version_num.py`** —
+  Alembic migration widening `alembic_version.version_num` from the
+  default `VARCHAR(32)` to `VARCHAR(255)`. The 32-char ceiling was hit
+  by W1.3's natural revision ID `0005_distributed_locks_lease_check`
+  (34 chars), which had to be renamed in-place to
+  `0005_distributed_locks_lease` (28 chars) to fit. The widen removes
+  the ceiling globally so W1.4's natural slug
+  `0007_usage_records_request_id_unique` (35 chars) and every future
+  Wave migration can use descriptive names without abbreviation
+  gymnastics. The migration's own revision ID
+  (`0006_widen_alembic_version_num`, 30 chars) fits the pre-existing
+  limit, so it applies cleanly; the widen DDL and the row insert
+  happen in the same `upgrade()` transaction, so no chicken-and-egg.
+  Hand-written rather than via `alembic revision --autogenerate`
+  because autogenerate does not emit DDL against system tables like
+  `alembic_version`.
+- **`docs/engineering/RUNBOOK_WAVE.md`** — first entry in a new
+  `docs/engineering/` directory for repeatable engineering procedures.
+  Six sections: Pre-flight, Development, Verification, Release,
+  Recovery, Lessons Learned. Documents the Phase 3 Wave process that
+  W1.1–W1.3 executed by hand (with minor per-Wave variation) so W1.4
+  onwards can simply reference the runbook rather than have its ADR
+  re-describe operational steps. Per `CONTRIBUTING.md` §6, ADRs
+  answer WHY a decision was made; runbooks answer HOW it is executed.
+
+#### Changed
+- **`backend/scripts/ci_gate.py`** — stages 5–9 now load
+  `DATABASE_URL` from `backend/.env.validation` automatically. The
+  previous code path checked the FILE'S existence for the
+  `db_available` flag but never actually loaded variables from it, so
+  the `alembic`, `validate_schema`, and `regenerate_erd` subprocesses
+  inherited an empty env and silently fell back to `alembic.ini`'s
+  localhost URL — failing to reach Supabase. The 6-line fix imports
+  the existing `_load_env.load()` function (already in
+  `backend/scripts/_load_env.py` and used by every Step B validation
+  script since Phase 2) and calls it when `db_available` but
+  `DATABASE_URL` is not yet exported. Idempotent; safe to re-run; no
+  behavioral change in GitHub Actions CI (where `DATABASE_URL` is set
+  by the service container, so the conditional short-circuits).
+- **`backend/scripts/run_ci_gate.ps1`** — header comment near the
+  Python invocation clarifies that env loading happens inside
+  `ci_gate.py` (no PowerShell-level `.env.validation` sourcing
+  required). No behavioral change; the comment exists at the
+  call-site so future contributors don't add redundant PowerShell
+  env-load logic. Single source of truth for env loading is Python.
+- **`.gitignore`** — replaced the partial Cursor ignore
+  (`.cursor/state/` + `.cursor/cache/`, lines 114–116) with `.cursor/`
+  (whole directory, single rule). The partial ignore left
+  `.cursor/rules/`, `.cursor/automations/`, and any future
+  Cursor-managed subdirectory exposed to `git add -A` sweeps, which
+  caused a pre-commit incident during W1.3's amend cycle. No
+  `.cursor/` content has ever been intentionally tracked in practice;
+  if a specific rule ever needs sharing,
+  `git add -f .cursor/rules/<file>` works for the deliberate case.
+- **`CONTRIBUTING.md`** — §6 Documentation Policy extended with an
+  "ADRs vs Runbooks (v0.3.3-infra)" paragraph codifying the
+  convention: ADRs are for WHY (context, alternatives, consequences);
+  runbooks are for HOW (step lists, commands, recovery actions).
+  Cross-references `docs/engineering/RUNBOOK_WAVE.md` and notes that
+  the W1.4 ADR (ADR-0033) will be the first to reference the runbook
+  in place of inlining operational steps.
+- **`ROADMAP.md`** — small engineering-checkpoint annotation between
+  the Phase 3 wave table's W1 row and the surrounding "each wave
+  produces its own ADR(s)" sentence, recording the `v0.3.3-infra`
+  release and pointing at the new runbook. The Wave table itself is
+  unchanged (the checkpoint is not a Wave).
+
+#### Validated (live, 2026-06-30)
+- **Pre-fix reproduction** — confirmed that the v0.3.2 `ci_gate.py`,
+  when run from a shell where `DATABASE_URL` is unset, fails stage 5
+  (`alembic upgrade head`) with `psycopg.OperationalError` despite
+  `backend/.env.validation` being present. This was the original
+  W1.2 symptom that required a manual PowerShell env-load workaround.
+- **Post-fix reproduction** — same shell, no env vars set, no manual
+  PowerShell loader: `scripts/ci_gate.py` reaches 10/10 stages green
+  with `DATABASE_URL` loaded from `backend/.env.validation`
+  automatically. The success metric — *will W1.4 require fewer manual
+  steps than W1.3?* — is satisfied: zero manual steps for env
+  loading.
+- **Alembic round-trip** — `alembic upgrade head` (applies 0006,
+  widens column); inspection of `\d alembic_version` confirms
+  `version_num` is now `character varying(255)`; `alembic downgrade -1`
+  returns the column to `character varying(32)`; `alembic upgrade head`
+  re-applies cleanly (idempotency proven).
+- **`.gitignore` enforcement** — `git status` after the new ignore is
+  in place no longer lists `.cursor/` as untracked; `git add -A` no
+  longer stages anything under `.cursor/`.
+- **Full CI gate** — `scripts/ci_gate.py` 10/10 local; matching
+  GitHub Actions run on the PR also 10/10 against the pgvector
+  service container.
+
+#### Not modified (scope discipline)
+- **`backend/app/infrastructure/db/models/*.py`** — no ORM changes.
+  `alembic_version` is Alembic's own bookkeeping table and is not
+  modelled in the ORM (it is explicitly whitelisted out of the
+  schema validator's table-parity check).
+- **`docs/database/schema.md`** — no changes (`alembic_version` is
+  intentionally not documented there; it is build infrastructure,
+  not application data).
+- **`docs/database/INDEX_STRATEGY.md`** — no changes (no new indexes
+  or unique constraints; the column-type widen does not affect index
+  counts).
+- **`docs/database/ERD.md`** — no changes (ERD does not include
+  `alembic_version`).
+- **`DECISIONS.md`** — no new ADR. This is a workflow cleanup, not
+  an architectural decision; the rationale lives in this CHANGELOG
+  entry and in `docs/engineering/RUNBOOK_WAVE.md` §6 Lessons Learned.
+- **`backend/alembic/versions/0001_baseline.py` through
+  `0005_distributed_locks_lease.py`** — none amended in place; the
+  column widen is added entirely by `0006` and reverted on its
+  `downgrade()`.
+
+#### Scope discipline (per the v0.3.3-infra PR scope rule)
+- Every changed file either implements one of the five engineering
+  improvements (env-load fix, alembic widen, gitignore, runbook,
+  ADRs-vs-runbooks convention) or documents the release (this
+  CHANGELOG entry, the ROADMAP annotation).
+- No feature work. No schema changes other than the
+  `alembic_version` column widen. No API changes. No refactors. No
+  opportunistic cleanup. No "while we're here" edits.
+
 ### Phase 3 Wave 1.3 — `distributed_locks` lease CHECK (2026-06-29, ADR-0032)
 
 #### Added

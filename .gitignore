@@ -111,9 +111,14 @@ alembic.local.ini
 .netrwhist
 *.iml
 
-# Cursor — keep workspace rules under .cursor/rules/, ignore session/state files
-.cursor/state/
-.cursor/cache/
+# Cursor IDE — ignore the entire .cursor/ directory. The previous partial
+# ignore (.cursor/state/ + .cursor/cache/) left workspace rules/automations
+# exposed to `git add -A` sweeps, which caused a pre-commit incident during
+# Phase 3 W1.3 (see docs/engineering/RUNBOOK_WAVE.md §6.2). No .cursor/
+# content has been intentionally tracked in practice; if a specific rule
+# ever needs sharing, `git add -f .cursor/rules/<file>` works for the
+# one-off case.
+.cursor/
 
 # -----------------------------------------------------------------------------
 # Operating system noise
