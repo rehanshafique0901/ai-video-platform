@@ -6,6 +6,189 @@
 
 ## [Unreleased]
 
+### Phase 3 Wave 1.4 — `usage_records` per-partition `(request_id)` uniqueness (ADR-0033) (2026-06-30)
+
+Wave-closing item for Phase 3 Wave 1: promotes a per-partition
+partial-unique `(request_id) WHERE request_id IS NOT NULL` index to
+every child partition of `usage_records`, resolving `schema.md` §37 q6.
+First migration-coupled ADR to reference `docs/engineering/RUNBOOK_WAVE.md`
+in place of inlining operational steps (per `CONTRIBUTING.md` §6,
+established at `v0.3.3-infra`). **Wave 1 of Phase 3 closes with this
+release (`v0.3.4-phase3-w1.4`).**
+
+#### Added
+- **`backend/alembic/versions/0007_usage_records_request_id_unique.py`** —
+  hand-written single revision (`revision = "0007_usage_records_request_id_unique"`,
+  `down_revision = "0006_widen_alembic_version_num"`). Upgrade body
+  iterates `pg_inherits` for all current children of `usage_records`
+  (26 monthly + 1 DEFAULT today) and creates one partial-unique index
+  per child named `uq_<child>_request_id` (e.g.
+  `uq_usage_records_y2025m12_request_id`,
+  `uq_usage_records_default_request_id`) with predicate
+  `(request_id) WHERE request_id IS NOT NULL`. Idempotent via
+  `IF NOT EXISTS`. Downgrade mirrors with `DROP INDEX IF EXISTS`.
+  Hand-written rather than via `alembic revision --autogenerate`
+  because autogenerate cannot express per-child partition-level DDL
+  and would not preserve the partial predicate. The per-child
+  mechanic is PostgreSQL's standard and correct pattern for
+  unique-on-non-partition-key constraints (the parent-level form
+  `CREATE UNIQUE INDEX ON usage_records (request_id)` is rejected
+  because the unique key omits the `occurred_at` partition key) —
+  not a workaround. The 35-char revision ID fits the `VARCHAR(255)`
+  ceiling established by `0006_widen_alembic_version_num` (v0.3.3-infra).
+- **`docs/decisions/ADR-0033-usage-records-request-id-unique.md`** — new
+  ADR (fourth file-per-ADR adopter; first to reference
+  `RUNBOOK_WAVE.md` in §Migration Plan rather than inlining operational
+  steps). Documents the architectural-review process that preceded the
+  ADR, the rejected alternatives (`(provider, request_id)` scope
+  expansion deferred to a future separate decision; `(model_id,
+  request_id)` invention with no repository support; documentation-only
+  closure inconsistent with wave-era planning artifacts; top-level
+  parent index too weak; `ON ONLY` + `ATTACH PARTITION` rejected by
+  the same partition-key rule), the per-child mechanic, the deliberate
+  ORM-absence, the validator-extension rationale, the future-partition
+  contract, and a Future Considerations section preserving the broader
+  architectural pattern for a separate later decision.
+- **`backend/scripts/validate_schema.py::check_usage_records_per_partition_unique_indexes`** —
+  new ~120-LoC check function and `run_all_checks` wiring. Scans
+  `pg_inherits` for all `usage_records` children and asserts each
+  carries `uq_<child>_request_id` with `indisunique = true` and the
+  expected `WHERE (request_id IS NOT NULL)` partial predicate. This
+  is a CI-visibility addition compensating for the
+  `load_snapshot()` bulk-index query that deliberately excludes
+  partition children (`NOT EXISTS (SELECT 1 FROM pg_inherits ...)`
+  for performance — Supabase round-trip count would otherwise scale
+  with partition count). Not a workaround for a PostgreSQL
+  limitation; not a substitute for ORM declaration (which is
+  impossible by PostgreSQL design). The check passes when
+  27/27 partition children carry the expected index after
+  `alembic upgrade head`, fails on missing children, missing
+  indexes, or wrong predicate.
+
+#### Changed
+- **`docs/database/schema.md`** §18 reconciliation note: amended to
+  record the §37 q6 resolution with the architectural-review
+  conservative wording — "The Phase 3 wave-planning artifacts
+  consistently anticipate a `request_id`-based W1.4 implementation.
+  Earlier architectural documents describe provider-scoped idempotency
+  at the application level. W1.4 implements the scope reflected in
+  the Phase 3 planning artifacts without attempting to reconcile that
+  broader architectural question." The Step-A `(provider, request_id)`
+  design is explicitly described as neither implemented nor
+  superseded by W1.4; any future move is reserved for a separate
+  decision informed by CR-12 implementation evidence (ADR-0033
+  §Future Considerations). The §18 schema box, the §18 indexes line,
+  and the §31 CR-12 use-case table row remain unchanged — column
+  shape and broader app-layer idempotency are not altered by this
+  wave.
+- **`docs/database/schema.md`** §37 Q6 row: flipped from `rely on
+  idempotency_keys` to **Resolved (Phase 3 W1.4, 2026-06-30)** with
+  full constraint details, mirroring the Q8/Q9/Q10 resolved-row
+  shape established by W1.1/W1.2/W1.3.
+- **`docs/database/schema.md`** §37 Wave 1 epilogue: §18 q6 bullet
+  marked **✅ Done — Phase 3 W1.4**, closing the Wave 1 quartet.
+- **`docs/database/INDEX_STRATEGY.md`** line 147: status flipped from
+  **Deferred (Phase 3)** to **Implemented (Phase 3 W1.4)**; rationale
+  expanded to document the per-child mechanic, the PostgreSQL
+  partition-key rule, the future-partition contract enforced by the
+  validator check, and the explicit non-supersession of broader
+  `(provider, request_id)` architectural semantics.
+- **`ROADMAP.md`** Wave 1 row: W1.4 annotated **✅ Complete** with
+  full ADR + migration cross-reference; "**Wave 1 closes with this
+  tag (`v0.3.4-phase3-w1.4`).**" sentence appended.
+- **`DECISIONS.md`**: one-line cross-link entry for ADR-0033 appended
+  after the ADR-0032 entry, sorted by ADR number. Status initially
+  `Proposed`; flipped to `Accepted` on the pre-merge status-flip
+  commit.
+- **`backend/app/infrastructure/db/models/usage.py`** —
+  `UsageRecord.__table_args__` gains a multi-line inline comment near
+  the existing `Index("ix_usage_records_request_id", "request_id")`
+  declaration documenting that the per-child unique indexes are added
+  by migration `0007` and intentionally have no ORM counterpart
+  (PostgreSQL's partition-key rule makes a parent-level
+  `Index(unique=True, postgresql_where=...)` impossible for
+  `(request_id)` because the key omits the `occurred_at` partition
+  key, and the children themselves are not ORM-modelled). The
+  comment points at ADR-0033 §Implementation Notes and at the
+  validator check. No `Index` or `CheckConstraint` declaration is
+  added to the ORM.
+
+#### Validated
+- **Pre-upgrade safety SELECT** against live Supabase: `SELECT
+  request_id, count(*) FROM usage_records WHERE request_id IS NOT NULL
+  GROUP BY request_id HAVING count(*) > 1` returned zero rows
+  (expected — the table is empty in every current environment; run
+  for audit-trail completeness and to prove the production-rollback
+  variant is not required).
+- `alembic upgrade head` from `0006_widen_alembic_version_num` →
+  `0007_usage_records_request_id_unique` applied cleanly; `pg_indexes`
+  shows 27 new unique partial indexes (one per child) named per the
+  `uq_<child>_request_id` pattern with `indexdef` containing the
+  expected `WHERE (request_id IS NOT NULL)` predicate.
+- `alembic downgrade -1` reverted cleanly; `pg_indexes` shows the 27
+  indexes removed; `ix_usage_records_request_id` (the parent's
+  non-unique propagating index) unaffected.
+- `alembic upgrade head` re-applied cleanly (idempotency proven via
+  `IF NOT EXISTS` guards).
+- `python scripts/validate_schema.py` reported **all checks PASS**
+  with the new `check_usage_records_per_partition_unique_indexes`
+  reporting `27/27 usage_records partition(s) carry uq_<child>_request_id`.
+- `python scripts/regenerate_erd.py` + `python scripts/compare_erd.py`
+  reported 0 drift (per-child unique indexes are invisible to the ERD
+  by design — it tracks entities and FKs, not indexes).
+- `python scripts/ci_gate.py` reported **10/10 PASSED** locally
+  against Supabase from a cold shell — `RUNBOOK_WAVE.md` referenced
+  per ADR-0033 §Migration Plan, success-metric satisfied: W1.4
+  required fewer manual steps than W1.3 (no env-load preamble, no
+  migration-ID length gymnastics, no `.cursor/` accidents, no
+  inline operational-steps duplication in the ADR).
+- GitHub Actions on the PR: 10/10 green.
+
+#### Not modified
+- `backend/alembic/versions/0001_baseline.py` (no in-place edits to
+  merged migrations; the new indexes are owned entirely by `0007`).
+- `backend/alembic/versions/0003_export_jobs_partial_unique.py` (W1.1
+  territory).
+- `backend/alembic/versions/0004_idempotency_keys_invariants.py` (W1.2
+  territory).
+- `backend/alembic/versions/0005_distributed_locks_lease.py` (W1.3
+  territory).
+- `backend/alembic/versions/0006_widen_alembic_version_num.py`
+  (`v0.3.3-infra` territory).
+- `docs/database/ERD.md` (per-child unique indexes are invisible to
+  ERD by design — entities + FKs only).
+- `docs/database/schema.md` §18 schema box (lines 638–668), §18
+  indexes line (line 673), §31 use-case table row (line 1175) —
+  column shape and broader app-layer idempotency are unchanged by
+  this wave.
+- `ARCHITECTURE.md` §8k.1 (CR-12 domain spec), `API_CONTRACT.md`
+  line 233 (webhook handlers) — broader architectural pattern
+  remains documented; W1.4 neither implements nor supersedes it.
+- `backend/app/application/`, `backend/app/api/`,
+  `backend/app/infrastructure/ai/` — CR-12 (Usage Recorder
+  middleware named in `schema.md` §31 / `ARCHITECTURE.md` §8k.1) is
+  not built; W1.4 establishes the DB-level invariant in advance of
+  the producer and does not anticipate the producer's design.
+- `CONTRIBUTING.md` (file-per-ADR + ADRs-vs-Runbooks conventions
+  established in earlier releases; W1.4 is the first migration-coupled
+  ADR to exercise the runbook reference convention).
+- `pyproject.toml`, dependency manifests.
+
+#### Scope discipline
+- One PR, one branch (`phase3/wave1.4-usage-records-request-id-unique`),
+  one Alembic revision (`0007`), one ADR (ADR-0033), one validator
+  check function. `git diff main...HEAD` touches **only** the files
+  enumerated above. No opportunistic refactors, no unrelated cleanup,
+  no W2 work; the `v0.3.3-infra` discipline rule held.
+- ADR-0033 deliberately reserves provider-scoped DB-level enforcement
+  for a separate later decision rather than expanding W1.4 scope —
+  preserves the wave-era documented implementation shape exactly,
+  preserves the architectural pattern documented elsewhere unchanged,
+  and preserves the historical record's accuracy by neither
+  rewriting earlier documents nor inventing supersession claims.
+
+---
+
 ### Phase 3 Engineering Checkpoint — `v0.3.3-infra` workflow cleanup (2026-06-30)
 
 Non-feature release between W1.3 and W1.4 removing three recurring

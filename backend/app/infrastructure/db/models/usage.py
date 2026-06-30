@@ -47,6 +47,23 @@ class UsageRecord(Base):
         Index("ix_usage_records_model_id_occurred_at", "model_id", "occurred_at"),
         Index("ix_usage_records_workflow_run_id", "workflow_run_id"),
         Index("ix_usage_records_request_id", "request_id"),
+        # Phase 3 W1.4 (ADR-0033): a per-child partial-unique index
+        # `uq_<child>_request_id ON <child> (request_id) WHERE request_id
+        # IS NOT NULL` is added to every partition by migration
+        # `0007_usage_records_request_id_unique`. The unique index is
+        # intentionally NOT declared here: PostgreSQL forbids unique
+        # indexes on a partitioned parent unless the unique key includes
+        # every partition-key column, so a SQLAlchemy
+        # `Index(..., unique=True, postgresql_where=...)` for
+        # `(request_id)` at this level would fail at CREATE time. The
+        # children themselves are not ORM-modelled (they are created by
+        # raw SQL in the baseline migration's `DO $$` block), so there is
+        # no per-child ORM target either. CI visibility for the per-child
+        # indexes is provided by
+        # `backend/scripts/validate_schema.py::check_usage_records_per_partition_unique_indexes`,
+        # which scans `pg_inherits` and asserts each child carries the
+        # expected index with `indisunique = true`. See ADR-0033
+        # §Implementation Notes — ORM declaration intentionally absent.
         {"postgresql_partition_by": "RANGE (occurred_at)"},
     )
 

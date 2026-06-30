@@ -697,7 +697,23 @@ CREATE TABLE usage_records (
 > The per-partition `(provider, request_id)` uniqueness from the Step-A
 > draft is **not implemented** — application-level idempotency uses
 > `idempotency_keys` (§31). Whether to add a partial-unique `request_id`
-> index per partition is a Phase-3 decision (§37).
+> index per partition was the open §37 q6 decision.
+>
+> **Resolved (Phase 3 W1.4, 2026-06-30, ADR-0033, migration
+> `0007_usage_records_request_id_unique`).** The Phase 3 wave-planning
+> artifacts consistently anticipate a `request_id`-based W1.4
+> implementation. Earlier architectural documents describe
+> provider-scoped idempotency at the application level. W1.4 implements
+> the scope reflected in the Phase 3 planning artifacts — single-column
+> partial-unique `(request_id) WHERE request_id IS NOT NULL` per child
+> partition (`uq_<child>_request_id`) — without attempting to reconcile
+> that broader architectural question. The Step-A `(provider, request_id)`
+> design remains documented at the architectural layer (this section, §31,
+> `API_CONTRACT.md`, `ARCHITECTURE.md` §8k.1) and is neither implemented
+> nor superseded by W1.4. Any future move to provider-scoped DB-level
+> enforcement is reserved for a separate architectural decision and
+> migration informed by CR-12 implementation evidence — see ADR-0033
+> §Future Considerations.
 
 ---
 
@@ -1359,7 +1375,7 @@ The Phase 2D documentation reconciliation deliberately did **not** make any of t
 | 3 | Should `cost_reconciliations` be append-only (forbid UPDATE/DELETE via the `reject_mutation` trigger)? | §19, baseline migration `_IMMUTABLE_TABLES` | keep mutable; finance corrections are audit-logged |
 | 4 | Should the `auth_role` enum (declared but unused — Phase 4 will own auth/RBAC) be removed now or kept dormant? | `app/infrastructure/db/enums.py`, baseline migration | keep dormant until Phase 4 |
 | 5 | Should the ERD draw cross-cluster FK edges that currently sit at "logical FK" (e.g. `notifications → audit_log`, `audit_log → workflow_runs`)? | `docs/database/ERD.md` | leave as logical (in-text comments) |
-| 6 | Should `usage_records` add a per-partition partial-unique `(request_id)` index, or rely on `idempotency_keys`? | §18, `INDEX_STRATEGY.md` | rely on `idempotency_keys` |
+| 6 | Should `usage_records` add a per-partition partial-unique `(request_id)` index, or rely on `idempotency_keys`? | §18, `INDEX_STRATEGY.md` | **Resolved (Phase 3 W1.4, 2026-06-30)** — promoted to DB as per-partition partial-unique indexes named `uq_<child>_request_id` enforcing `(request_id) WHERE request_id IS NOT NULL` on every child partition of `usage_records` (26 monthly + DEFAULT today). Single-column `(request_id)` per the Phase 3 wave-planning artifacts; the broader `(provider, request_id)` shape from §18 Step-A draft remains documented at the architectural layer (§18, §31, `API_CONTRACT.md`, `ARCHITECTURE.md` §8k.1) without being implemented or superseded by this wave — see ADR-0033 §Future Considerations. Per-child mechanic required by PostgreSQL's partition-key rule for unique indexes; CI visibility for the per-child indexes provided by `backend/scripts/validate_schema.py::check_usage_records_per_partition_unique_indexes` (ADR-0033, migration `0007_usage_records_request_id_unique`). |
 | 7 | Should `render_jobs.progress` be retyped from `text` to `numeric(5,2)`? | §17 | leave as text until profiling shows a need |
 | 8 | Should the `(render_job_id, format, quality, orientation)` partial-unique constraint on `export_jobs` be promoted to a DB constraint? | §17 | **Resolved (Phase 3 W1.1, 2026-06-29)** — promoted to partial-unique index `uq_export_jobs_render_job_id_format_quality_orientation` with `WHERE status IN ('queued','running','succeeded')` (ADR-0030, migration `0003_export_jobs_partial_unique`). |
 | 9 | Should `idempotency_keys` reintroduce the `(status='in_flight') = (response_hash IS NULL)` CHECK and an `updated_at` column? | §31 | **Resolved (Phase 3 W1.2, 2026-06-29)** — both promoted to DB: CHECK constraint `chk_idempotency_keys_response_hash_matches_status` enforces the FSM invariant; `updated_at timestamptz NOT NULL DEFAULT now()` column added with auto-bump trigger `tg_idempotency_keys_biu_touch_updated_at` calling the shared `touch_updated_at()` function (ADR-0031, migration `0004_idempotency_keys_invariants`). |
@@ -1378,7 +1394,7 @@ Per reviewer guidance at the Phase 2D close, the 13 items above should not all b
 - §17 q8: `export_jobs (render_job_id, format, quality, orientation)` DB constraint promotion. **✅ Done — Phase 3 W1.1 (ADR-0030, migration `0003_export_jobs_partial_unique`, 2026-06-29).**
 - §31 q9: `idempotency_keys` CHECK + `updated_at`. **✅ Done — Phase 3 W1.2 (ADR-0031, migration `0004_idempotency_keys_invariants`, 2026-06-29).**
 - §32 q10: `distributed_locks` lease CHECK. **✅ Done — Phase 3 W1.3 (ADR-0032, migration `0005_distributed_locks_lease`, 2026-06-29).**
-- §18 q6: `usage_records` per-partition `(request_id)` uniqueness.
+- §18 q6: `usage_records` per-partition `(request_id)` uniqueness. **✅ Done — Phase 3 W1.4 (ADR-0033, migration `0007_usage_records_request_id_unique`, 2026-06-30).**
 
 **Wave 2 — Data model evolution (extension).** Add columns and shape changes the application needs as Phase 3 services land. Each one is a clean migration with no behavioural side-effects on existing rows.
 - §16 q13: `workflow_runs` correlation_id / paused_at / version / queue columns.
