@@ -62,7 +62,11 @@ class RenderJob(UUIDPrimaryKeyMixin, TimestampMixin, VersionMixin, Base):
     status: Mapped[str] = mapped_column(render_status_enum, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    progress: Mapped[float] = mapped_column(Text, nullable=False, server_default=text("'0.00'"))
+    # Stored as text (decimal-as-text, 0.00..100.00) per schema.md §17 —
+    # see §37 Q7 for the retype-to-numeric(5,2) question, deferred until
+    # profiling shows a need. The prior ``Mapped[float]`` annotation was
+    # a drift bug: it lied about the runtime type SQLAlchemy loads.
+    progress: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'0.00'"))
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     output_media_asset_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
