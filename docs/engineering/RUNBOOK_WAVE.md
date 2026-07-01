@@ -431,3 +431,134 @@ it is executed, with neither doc type drifting into the other's job.
 This runbook is the first artefact under the new convention; the
 Wave 1.4 ADR (ADR-0033) is the first ADR to reference it directly
 (merged as part of `v0.3.4-phase3-w1.4`, 2026-06-30).
+
+---
+
+## Section 7 — Cross-cutting practices
+
+Applies to both Wave-style work (single architectural decision +
+migration) and Slice-style work (application-layer feature, no
+migration — e.g. Phase 3 α-slices). Slice-style work follows
+Sections 1, 3, 4, 5, and 6 unchanged; only Section 2 is Wave-specific.
+
+Adoption context and rationale for each item below live in
+`docs/engineering/PHASE3_AUTH_RETROSPECTIVE.md` §5.7. Treat this
+section as instructions.
+
+### 7.1 Checkpoint discipline for larger PRs
+
+Any PR expected to exceed **~20 files** or **~1000 net LOC** must be
+split into internal checkpoints _before_ implementation begins. The
+split is decided during pre-flight (Section 1) and recorded in the
+pre-flight document, not discovered mid-implementation.
+
+Rules:
+
+1. **Each checkpoint must reach local CI-green** (`python scripts/ci_gate.py`
+   → `Result: PASSED`) before the next checkpoint begins.
+2. **Checkpoint boundaries follow layer boundaries** where possible:
+   interfaces → adapters → use case → HTTP router. This lets each
+   checkpoint be reviewed as a coherent unit even before the full
+   PR is opened.
+3. **All checkpoints ship in the same PR.** Checkpoints are an
+   implementation-time discipline, not a release-time one — the PR
+   is still a single squash-merge on the GitHub side.
+
+### 7.2 Bottom-up test ordering
+
+When a slice adds or extends a repository AND builds new use cases
+on top of it, tests must be **written and run in this order**:
+
+1. **Repository integration tests first.** Locks the persistence
+   contract against a real database. If the fake and the real
+   adapter diverge, this is where it surfaces — before any use case
+   depends on it.
+2. **Use-case unit tests second.** Uses in-memory fakes on the port
+   surface. If these fail, the failure is guaranteed to be in the
+   use case, not the repository.
+3. **HTTP integration tests last.** Exercises DI, exception handlers,
+   middleware, and DTOs end-to-end. If these fail, the failure is
+   guaranteed to be in the wiring, not the use case or repository.
+
+Rationale: each layer is only added to the test suite once the layer
+beneath it is already green. A failure at layer N cannot be blamed on
+layer N-1 if layer N-1 was already green. This narrows the debugging
+target dramatically.
+
+### 7.3 Commit and tag messages on Windows PowerShell 5.1
+
+Windows PowerShell 5.1 (the default `powershell.exe` on Windows 10/11)
+writes a UTF-8 BOM when you use `Out-File -Encoding utf8`. That BOM
+shows up as an invisible `` (U+FEFF) at the start of git commit
+subject lines and tag annotations, which most tools handle correctly
+but some render as a leading `﻿` box.
+
+The `-Encoding utf8NoBOM` value is only available on PowerShell 6+.
+On PowerShell 5.1, use the .NET `WriteAllText` method with an
+explicit no-BOM UTF-8 encoder:
+
+```powershell
+$msg = @"
+<commit or tag subject>
+
+<body paragraph one>
+
+<body paragraph two>
+"@
+
+[System.IO.File]::WriteAllText(
+    "$PWD\msg.txt",
+    $msg,
+    (New-Object System.Text.UTF8Encoding $false)   # $false = no BOM
+)
+
+git commit -F msg.txt          # for commits
+# or
+git tag -a v<X>.<Y>.<Z> -F msg.txt   # for annotated tags
+
+Remove-Item msg.txt
+```
+
+**Do not** use bash-style heredocs on PowerShell:
+
+```
+# BROKEN on PowerShell:
+git commit -m "$(cat <<'EOF'
+...
+EOF
+)"
+```
+
+PowerShell doesn't parse `<<'EOF'`; the entire construct is passed to
+`git` as a literal string.
+
+### 7.4 Post-merge hygiene: OneDrive interference
+
+If the repository lives inside a OneDrive-synced folder (e.g.
+`C:\Users\<user>\OneDrive\...`), `git branch -d` and
+`git push origin --delete` may print interactive prompts:
+
+```
+Deletion of directory '.git/refs/heads/<prefix>' failed.
+Should I try again? (y/n)
+```
+
+The **git operation itself has already succeeded** — the message
+`Deleted branch <name> (was <sha>)` is printed immediately above the
+prompt. OneDrive is holding the empty refs directory open for
+re-sync, which blocks git's cleanup of the (now-empty) parent
+directory.
+
+Answer `n` to each prompt. Then confirm state:
+
+```powershell
+git tag -l "v<X>.<Y>*"                            # expected tag present
+git branch -a | Select-String "<branch-fragment>" # empty
+git ls-remote --tags origin | Select-String "<tag>" # remote tag present
+git log -3 --oneline --graph
+```
+
+**Root cause:** OneDrive syncs `.git` internals it should not touch.
+Move the repository out of any syncing folder (e.g. `C:\dev\<repo>`)
+at the next natural pause; the corruption risk grows with repository
+age.
