@@ -94,8 +94,15 @@ class ITokenIssuer(ABC):
         ...
 
     @abstractmethod
-    def verify_access(self, token: str) -> TokenClaims:
-        """Decode + validate an access token. Raises ``UnauthorizedError`` on any failure."""
+    def verify_access(self, token: str, *, allow_expired: bool = False) -> TokenClaims:
+        """Decode + validate an access token. Raises ``UnauthorizedError`` on any failure.
+
+        ``allow_expired`` (α2b): if True, an otherwise-valid token whose
+        ``exp`` has passed is accepted. Signature, ``kind == 'access'``,
+        and the presence of ``sub`` / ``sid`` / ``fam`` claims are still
+        strictly enforced. Only ``LogoutSession`` sets this — every
+        other consumer MUST use the default (``False``).
+        """
         ...
 
     @abstractmethod

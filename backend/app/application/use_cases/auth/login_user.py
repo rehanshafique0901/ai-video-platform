@@ -28,10 +28,10 @@ practice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import structlog
 
+from app.application.interfaces.clock import IClock
 from app.application.interfaces.security import IPasswordHasher, IssuedTokens, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.auth.errors import InvalidCredentialsError
@@ -57,6 +57,7 @@ class LoginUser:
         hasher: IPasswordHasher,
         token_issuer: ITokenIssuer,
         dummy_password_hash: str,
+        clock: IClock,
     ) -> None:
         self._uow = uow
         self._hasher = hasher
@@ -65,6 +66,7 @@ class LoginUser:
         # burn path. Must be a real Argon2id digest so ``verify`` takes
         # the same wall-time as the wrong-password branch.
         self._dummy_password_hash = dummy_password_hash
+        self._clock = clock
 
     async def execute(
         self,
@@ -110,7 +112,7 @@ class LoginUser:
                 raise InvalidCredentialsError("invalid email or password")
 
             # ---------- Happy path ----------
-            now = datetime.now(UTC)
+            now = self._clock.now()
             tokens = self._token_issuer.issue_for_login(user)
 
             session = await self._uow.sessions.add(

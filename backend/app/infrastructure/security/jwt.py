@@ -51,9 +51,28 @@ class JWTService:
         merged: dict[str, Any] = {**(claims or {}), "fam": str(family_id)}
         return self._encode("refresh", subject, merged, self._refresh_ttl)
 
-    def verify(self, token: str, expected_kind: TokenKind) -> dict[str, Any]:
+    def verify(
+        self,
+        token: str,
+        expected_kind: TokenKind,
+        *,
+        allow_expired: bool = False,
+    ) -> dict[str, Any]:
+        """Decode + validate a JWT.
+
+        ``allow_expired`` (α2b): when True, PyJWT skips the ``exp``
+        check. Signature + ``kind`` are still enforced. Used exclusively
+        by ``LogoutSession`` so a user with an already-expired access
+        token can still terminate their session (see
+        ``AUTH_TOKEN_LIFECYCLE.md`` §Logout for rationale).
+        """
         try:
-            payload: dict[str, Any] = jwt.decode(token, self._secret, algorithms=[self._algorithm])
+            payload: dict[str, Any] = jwt.decode(
+                token,
+                self._secret,
+                algorithms=[self._algorithm],
+                options={"verify_exp": not allow_expired},
+            )
         except jwt.ExpiredSignatureError as e:
             raise UnauthorizedError("token expired") from e
         except jwt.InvalidTokenError as e:

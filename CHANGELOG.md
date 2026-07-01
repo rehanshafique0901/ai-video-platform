@@ -6,6 +6,80 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α2b — Auth (refresh + logout) (2026-07-01)
+
+Completes the authentication lifecycle started in α2a. Adds refresh
+token rotation with family-level reuse detection, session revocation
+via logout, and the `IClock` port used by both new use cases.
+Delivered as two internal checkpoints (α2b.1: `ISessionRepository`
+extensions + `RefreshSession`; α2b.2: `verify_access(allow_expired)` +
+`LogoutSession` + router wiring). **No migration, no ADR** — a direct
+application of the α2a auth foundation.
+
+#### Added
+- **`IClock` port** (`app/application/interfaces/clock.py`) and
+  `SystemClock` implementation (`app/infrastructure/clock.py`). All
+  auth use cases (`RegisterUser`, `LoginUser`, `RefreshSession`,
+  `LogoutSession`) now take an injected clock instead of calling
+  `datetime.now(UTC)` inline. `FakeClock` in the unit fakes supports
+  a frozen `fixed_at` + `tick(seconds)` for deterministic time-based
+  tests.
+- **`ISessionRepository.get_by_hash / revoke / list_family`** —
+  three new methods on the α2a port. `revoke` uses a compare-and-swap
+  clause (`WHERE revoked_at IS NULL`) so the first revoker wins and
+  the original `revoked_at` timestamp is preserved for audit through
+  all subsequent no-op calls. `list_family` powers the family sweep on
+  reuse detection. `get_by_hash` returns revoked rows too, matching
+  the use case's need to inspect `revoked_at` as the reuse signal.
+- **`RefreshSession` use case** (`app/application/use_cases/auth/`) —
+  orchestrates the full rotation flow: JWT verify → SHA-256 hash lookup
+  → sid consistency check (A12) → reuse detection with full-family
+  revocation → user liveness check → CAS-revoke old row → mint fresh
+  tokens preserving `family_id` → insert new row. Every failure mode
+  raises the same client-facing `InvalidRefreshTokenError` for
+  anti-enumeration; server-side logs carry the specific reason.
+- **`LogoutSession` use case** — CAS-revokes the session identified by
+  the access token's `sid` claim. **Accepts expired access tokens**
+  (documented prominently in the class docstring and in
+  `docs/engineering/AUTH_TOKEN_LIFECYCLE.md`): forcing a refresh before
+  logout would defeat the "I am done" intent. Signature and `kind` are
+  still strictly enforced. Idempotent: second logout returns 204 and
+  preserves the original `revoked_at`.
+- **`verify_access(allow_expired: bool = False)`** — new kwarg on
+  `ITokenIssuer`, threaded through `JWTService.verify` via PyJWT's
+  `options={"verify_exp": False}`. Only `LogoutSession` sets it; every
+  other consumer keeps the strict default.
+- **`InvalidRefreshTokenError`** (`app/application/use_cases/auth/errors.py`) —
+  subclass of `UnauthorizedError` used by both `RefreshSession` and
+  `LogoutSession` for uniform 401 envelopes on every non-happy path.
+- **`RefreshRequest` DTO** + `BearerAccessTokenDep` (in `app/api/v1/`) —
+  the FastAPI dependency parses `Authorization: Bearer <token>`,
+  raising 401 for missing / malformed headers.
+- **Two new endpoints** — `POST /api/v1/auth/refresh` (200 with the
+  rotated pair) and `POST /api/v1/auth/logout` (204 No Content).
+- **`docs/engineering/AUTH_TOKEN_LIFECYCLE.md`** — operational spec
+  covering the session state machine, endpoint sequence diagrams, the
+  Refresh Family Example (visualising why reuse detection nukes the
+  whole family), invariants, and the structured-log event catalogue
+  including which events carry `security_event=True` for SIEM alerting.
+- **Extended tests** — `test_token_issuer.py` +2 (`allow_expired`
+  accepts stale / still rejects tampered), `test_refresh_session.py`
+  (13 unit tests), `test_logout_session.py` (8 unit tests),
+  `test_clock.py` (1 unit test), `test_session_repository.py` +5
+  integration tests (get_by_hash / revoke CAS / list_family),
+  `test_auth.py` +9 integration tests (refresh happy path, reuse
+  detection, garbage token, access-token-as-refresh, sid mismatch,
+  logout happy path, logout idempotent, missing header, malformed
+  header, refresh-token-as-logout).
+
+#### Changed
+- `RegisterUser` and `LoginUser` constructors now take an `IClock`
+  parameter. All timestamp assignments (`created_at`, `updated_at`,
+  `last_login_at`, `issued_at`, `last_used_at`) go through the clock.
+  `FakeTokenIssuer` and `FakeSessionRepository` extended for the new
+  port surface.
+- Version bumped to `0.4.2-phase3-alpha2b-dev` in `app/main.py`.
+
 ### Phase 3 Slice α2a — Auth (register + login) (2026-07-01)
 
 First real business capability shipped on top of the α1 architecture

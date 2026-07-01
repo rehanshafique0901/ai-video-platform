@@ -63,6 +63,19 @@ class LoginRequest(BaseModel):
         return v.lower()
 
 
+class RefreshRequest(BaseModel):
+    """POST /api/v1/auth/refresh body.
+
+    Refresh tokens are opaque strings from the client's perspective —
+    no length or shape validation beyond a permissive upper bound. The
+    ``RefreshSession`` use case owns cryptographic validation.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    refresh_token: str = Field(min_length=1, max_length=4096)
+
+
 # ---- Responses --------------------------------------------------------
 
 

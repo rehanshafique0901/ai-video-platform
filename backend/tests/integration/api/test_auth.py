@@ -1,4 +1,4 @@
-"""Integration tests for ``/api/v1/auth/register`` and ``/api/v1/auth/login``.
+"""Integration tests for ``/api/v1/auth/*`` (register, login, refresh, logout).
 
 End-to-end: through the middleware stack, exception handlers, DI
 container, use cases, repositories, and the real database. Each test
@@ -188,3 +188,175 @@ async def test_responses_include_request_id_in_meta(client: AsyncClient) -> None
     )
     assert r.status_code == 201, r.text
     assert r.json()["meta"]["request_id"]
+
+
+# ---- α2b: refresh ----------------------------------------------------
+
+
+async def _register(client: AsyncClient) -> tuple[str, dict]:
+    """Register a fresh user; return (email, data payload)."""
+    email = _fresh_email()
+    r = await client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "correct horse battery staple", "name": "R"},
+    )
+    assert r.status_code == 201, r.text
+    return email, r.json()["data"]
+
+
+@pytest.mark.integration
+async def test_refresh_happy_path_rotates_tokens_and_preserves_family(
+    client: AsyncClient, settings
+) -> None:
+    _, reg = await _register(client)
+    original_refresh = reg["refresh_token"]
+    original_fam = jwt.decode(
+        reg["access_token"],
+        settings.jwt_secret.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
+    )["fam"]
+
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": original_refresh})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["access_token"] and data["refresh_token"]
+    # Rotated tokens differ from the originals.
+    assert data["refresh_token"] != original_refresh
+    assert data["access_token"] != reg["access_token"]
+    # Family preserved, sid rotated.
+    new_access_claims = jwt.decode(
+        data["access_token"],
+        settings.jwt_secret.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
+    )
+    assert new_access_claims["fam"] == original_fam
+    old_sid = jwt.decode(
+        reg["access_token"],
+        settings.jwt_secret.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
+    )["sid"]
+    assert new_access_claims["sid"] != old_sid
+
+
+@pytest.mark.integration
+async def test_refresh_reuse_detection_revokes_family(client: AsyncClient) -> None:
+    """Replaying an already-rotated refresh token must invalidate every
+    session in the family."""
+    _, reg = await _register(client)
+    original_refresh = reg["refresh_token"]
+
+    # First refresh succeeds.
+    ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": original_refresh})
+    assert ok.status_code == 200
+    new_refresh = ok.json()["data"]["refresh_token"]
+
+    # Replay: same original token → 401.
+    replay = await client.post("/api/v1/auth/refresh", json={"refresh_token": original_refresh})
+    assert replay.status_code == 401
+    assert replay.json()["error"]["code"] == "UNAUTHENTICATED"
+
+    # The freshly rotated token was also revoked by the family sweep.
+    victim = await client.post("/api/v1/auth/refresh", json={"refresh_token": new_refresh})
+    assert victim.status_code == 401
+
+
+@pytest.mark.integration
+async def test_refresh_with_garbage_token_returns_401(client: AsyncClient) -> None:
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt"})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "UNAUTHENTICATED"
+    assert r.json()["error"]["message"] == "invalid refresh token"
+
+
+@pytest.mark.integration
+async def test_refresh_with_access_token_returns_401(client: AsyncClient) -> None:
+    """Sending an access token to /refresh must fail (wrong ``kind`` claim)."""
+    _, reg = await _register(client)
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": reg["access_token"]})
+    assert r.status_code == 401
+
+
+@pytest.mark.integration
+async def test_refresh_sid_mismatch_returns_401(client: AsyncClient, settings) -> None:
+    """A12: refresh JWT whose ``sid`` doesn't match the row → 401."""
+    from datetime import UTC, datetime, timedelta
+
+    _, reg = await _register(client)
+    # Decode the real refresh, tamper the ``sid`` to a random UUID,
+    # re-sign with the same secret so the signature is valid.
+    original = jwt.decode(
+        reg["refresh_token"],
+        settings.jwt_secret.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
+    )
+    tampered_payload = {**original, "sid": str(uuid4())}
+    tampered_payload["exp"] = int(
+        (datetime.now(UTC) + timedelta(days=1)).timestamp()
+    )  # ensure not expired
+    tampered = jwt.encode(
+        tampered_payload,
+        settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
+    # Note: hash lookup will miss because the tampered JWT string is
+    # different from the stored hash's preimage. Either branch (hash
+    # miss OR sid mismatch) yields the same 401 — both are correct.
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": tampered})
+    assert r.status_code == 401
+    assert r.json()["error"]["message"] == "invalid refresh token"
+
+
+# ---- α2b: logout -----------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_logout_happy_path_returns_204_and_revokes_session(
+    client: AsyncClient,
+) -> None:
+    _, reg = await _register(client)
+    r = await client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {reg['access_token']}"},
+    )
+    assert r.status_code == 204
+    assert r.content == b""
+
+    # The refresh token issued alongside the now-revoked session must
+    # also be rejected (session row is revoked).
+    followup = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": reg["refresh_token"]}
+    )
+    assert followup.status_code == 401
+
+
+@pytest.mark.integration
+async def test_logout_is_idempotent(client: AsyncClient) -> None:
+    _, reg = await _register(client)
+    headers = {"Authorization": f"Bearer {reg['access_token']}"}
+    r1 = await client.post("/api/v1/auth/logout", headers=headers)
+    r2 = await client.post("/api/v1/auth/logout", headers=headers)
+    assert r1.status_code == r2.status_code == 204
+
+
+@pytest.mark.integration
+async def test_logout_missing_authorization_header_returns_401(client: AsyncClient) -> None:
+    r = await client.post("/api/v1/auth/logout")
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "UNAUTHENTICATED"
+
+
+@pytest.mark.integration
+async def test_logout_malformed_authorization_header_returns_401(client: AsyncClient) -> None:
+    r = await client.post("/api/v1/auth/logout", headers={"Authorization": "NotBearer xyz"})
+    assert r.status_code == 401
+
+
+@pytest.mark.integration
+async def test_logout_with_refresh_token_returns_401(client: AsyncClient) -> None:
+    """Sending a refresh token to /logout must fail (wrong kind)."""
+    _, reg = await _register(client)
+    r = await client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {reg['refresh_token']}"},
+    )
+    assert r.status_code == 401

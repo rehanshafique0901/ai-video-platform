@@ -11,6 +11,7 @@ from app.application.use_cases.auth.errors import (
 from app.application.use_cases.auth.register_user import RegisterUser
 
 from ._fakes import (
+    FakeClock,
     FakePasswordHasher,
     FakeRoleRepository,
     FakeSessionRepository,
@@ -29,11 +30,13 @@ def _make_use_case(
     sessions: FakeSessionRepository | None = None,
     roles: FakeRoleRepository | None = None,
     token_issuer: FakeTokenIssuer | None = None,
+    clock: FakeClock | None = None,
 ) -> tuple[RegisterUser, FakeUnitOfWork, FakePasswordHasher, FakeTokenIssuer]:
     uow = FakeUnitOfWork(users=users, tenants=tenants, sessions=sessions, roles=roles)
     h = hasher or FakePasswordHasher()
     ti = token_issuer or FakeTokenIssuer()
-    uc = RegisterUser(uow=uow, hasher=h, token_issuer=ti)
+    ck = clock or FakeClock()
+    uc = RegisterUser(uow=uow, hasher=h, token_issuer=ti, clock=ck)
     return uc, uow, h, ti
 
 
