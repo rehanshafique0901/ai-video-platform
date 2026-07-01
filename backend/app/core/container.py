@@ -29,12 +29,16 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.auth.login_user import LoginUser
+from app.application.use_cases.auth.logout_session import LogoutSession
+from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.core.config import Settings
+from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
@@ -48,6 +52,7 @@ _password_hasher: PasswordHasher | None = None
 _jwt_service: JWTService | None = None
 _token_issuer: AuthTokenIssuer | None = None
 _dummy_password_hash: str | None = None
+_clock: SystemClock | None = None
 
 
 def init(settings: Settings) -> None:
@@ -58,7 +63,7 @@ def init(settings: Settings) -> None:
     call ``reset()`` first.
     """
     global _engine, _session_factory, _password_hasher, _jwt_service
-    global _token_issuer, _dummy_password_hash
+    global _token_issuer, _dummy_password_hash, _clock
     if _engine is not None:
         return
     _engine = make_engine(settings.database_url)
@@ -80,6 +85,7 @@ def init(settings: Settings) -> None:
     # attacker learned it, it would not help them since the hash is
     # never a real user's password.
     _dummy_password_hash = _password_hasher.hash(secrets.token_urlsafe(32))
+    _clock = SystemClock()
 
 
 async def shutdown() -> None:
@@ -94,13 +100,14 @@ async def shutdown() -> None:
 def reset() -> None:
     """Test-only: clear all singletons so the next ``init`` rebuilds them."""
     global _engine, _session_factory, _password_hasher, _jwt_service
-    global _token_issuer, _dummy_password_hash
+    global _token_issuer, _dummy_password_hash, _clock
     _engine = None
     _session_factory = None
     _password_hasher = None
     _jwt_service = None
     _token_issuer = None
     _dummy_password_hash = None
+    _clock = None
 
 
 def _require_init() -> None:
@@ -147,6 +154,12 @@ def get_dummy_password_hash() -> str:
     return _dummy_password_hash
 
 
+def get_clock() -> IClock:
+    _require_init()
+    assert _clock is not None
+    return _clock
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency: yield one ``AsyncSession`` per request.
 
@@ -184,6 +197,7 @@ def get_register_user_use_case() -> RegisterUser:
         uow=get_unit_of_work(),
         hasher=get_password_hasher(),
         token_issuer=get_token_issuer(),
+        clock=get_clock(),
     )
 
 
@@ -193,4 +207,21 @@ def get_login_user_use_case() -> LoginUser:
         hasher=get_password_hasher(),
         token_issuer=get_token_issuer(),
         dummy_password_hash=get_dummy_password_hash(),
+        clock=get_clock(),
+    )
+
+
+def get_refresh_session_use_case() -> RefreshSession:
+    return RefreshSession(
+        uow=get_unit_of_work(),
+        token_issuer=get_token_issuer(),
+        clock=get_clock(),
+    )
+
+
+def get_logout_session_use_case() -> LogoutSession:
+    return LogoutSession(
+        uow=get_unit_of_work(),
+        token_issuer=get_token_issuer(),
+        clock=get_clock(),
     )

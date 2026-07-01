@@ -138,6 +138,46 @@ def test_verify_rejects_wrong_kind() -> None:
 
 
 @pytest.mark.unit
+def test_verify_access_allow_expired_accepts_a_stale_token() -> None:
+    """α2b LogoutSession contract: an expired but signature-valid
+    access token is accepted when ``allow_expired=True``."""
+    # ttl = -1 → the token is stale the instant it's minted.
+    issuer = _make_issuer(access_ttl=-1)
+    user = _make_user()
+    tokens = issuer.issue_for_login(user)
+
+    # Strict verification must reject the stale token.
+    with pytest.raises(UnauthorizedError):
+        issuer.verify_access(tokens.access_token)
+
+    # Relaxed verification (logout path) must accept it and still
+    # return typed claims with a real sid.
+    claims = issuer.verify_access(tokens.access_token, allow_expired=True)
+    assert claims.subject == user.id
+    assert claims.session_id == tokens.session_id
+    assert claims.family_id == tokens.family_id
+
+
+@pytest.mark.unit
+def test_verify_access_allow_expired_still_rejects_bad_signature() -> None:
+    """``allow_expired=True`` relaxes ONLY the ``exp`` check —
+    signature and kind must still verify."""
+    issuer = _make_issuer(access_ttl=-1)
+    user = _make_user()
+    tokens = issuer.issue_for_login(user)
+
+    tampered = tokens.access_token + "x"  # corrupt the signature
+
+    with pytest.raises(UnauthorizedError):
+        issuer.verify_access(tampered, allow_expired=True)
+
+    # And a refresh token must never be accepted as an access token,
+    # even when ``allow_expired`` relaxes ``exp``.
+    with pytest.raises(UnauthorizedError):
+        issuer.verify_access(tokens.refresh_token, allow_expired=True)
+
+
+@pytest.mark.unit
 def test_verify_rejects_token_missing_sid_claim() -> None:
     """A token minted without the sid/fam claims must be rejected as invalid."""
     # Craft one manually using JWTService without the AuthTokenIssuer's sid/fam.

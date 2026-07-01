@@ -19,6 +19,7 @@ from types import TracebackType
 from typing import Self
 from uuid import UUID, uuid4
 
+from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
     IRoleRepository,
     ISessionRepository,
@@ -71,10 +72,21 @@ class FakePasswordHasher(IPasswordHasher):
 
 
 class FakeTokenIssuer(ITokenIssuer):
-    """Emits deterministic-ish tokens; hash is real SHA-256 for realism."""
+    """Emits deterministic-ish tokens; hash is real SHA-256 for realism.
+
+    α2b: the fake also keeps an in-memory registry of every issued
+    (token, claims) pair so ``verify_access`` / ``verify_refresh`` can
+    round-trip without invoking real JWT parsing. Tests that want to
+    simulate a signature-invalid / expired / tampered token simply
+    pass a string the fake has never seen — it raises ``UnauthorizedError``
+    exactly like the real ``AuthTokenIssuer`` would.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, UUID]] = []  # (mode, family_id)
+        # Instance-level (not class-level) so state cannot leak across
+        # tests via a shared class dict.
+        self._claims_by_token: dict[str, TokenClaims] = {}
 
     def issue_for_login(self, user: User) -> IssuedTokens:
         return self._issue(user, family_id=uuid4(), mode="login")
@@ -82,11 +94,33 @@ class FakeTokenIssuer(ITokenIssuer):
     def issue_for_rotation(self, user: User, family_id: UUID) -> IssuedTokens:
         return self._issue(user, family_id, mode="rotation")
 
-    def verify_access(self, token: str) -> TokenClaims:  # pragma: no cover — α2b
-        raise NotImplementedError
+    def verify_access(self, token: str, *, allow_expired: bool = False) -> TokenClaims:
+        # α2b.2: ``allow_expired`` is accepted for port conformance but
+        # has no effect on the fake — the in-memory claim registry has
+        # no concept of expiry. Tests that specifically exercise the
+        # expired-access-with-logout path use the real ``AuthTokenIssuer``.
+        return self._verify(token)
 
-    def verify_refresh(self, token: str) -> TokenClaims:  # pragma: no cover — α2b
-        raise NotImplementedError
+    def verify_refresh(self, token: str) -> TokenClaims:
+        return self._verify(token)
+
+    def _verify(self, token: str) -> TokenClaims:
+        claims = self._claims_by_token.get(token)
+        if claims is None:
+            from app.core.errors import UnauthorizedError
+
+            raise UnauthorizedError("invalid token")
+        return claims
+
+    def _register(self, tokens: IssuedTokens, subject: UUID) -> None:
+        claims = TokenClaims(
+            subject=subject,
+            session_id=tokens.session_id,
+            family_id=tokens.family_id,
+            expires_at=tokens.refresh_expires_at,
+        )
+        self._claims_by_token[tokens.access_token] = claims
+        self._claims_by_token[tokens.refresh_token] = claims
 
     def _issue(self, user: User, family_id: UUID, mode: str) -> IssuedTokens:
         self.calls.append((mode, family_id))
@@ -95,7 +129,7 @@ class FakeTokenIssuer(ITokenIssuer):
         access = f"access.{user.id}.{session_id}"
         refresh = f"refresh.{user.id}.{session_id}.{family_id}"
         refresh_hash = hashlib.sha256(refresh.encode()).hexdigest()
-        return IssuedTokens(
+        tokens = IssuedTokens(
             access_token=access,
             refresh_token=refresh,
             refresh_token_hash=refresh_hash,
@@ -104,6 +138,8 @@ class FakeTokenIssuer(ITokenIssuer):
             issued_at=now,
             refresh_expires_at=now + timedelta(days=30),
         )
+        self._register(tokens, subject=user.id)
+        return tokens
 
 
 # ---- Repositories (in-memory) -----------------------------------------
@@ -164,10 +200,59 @@ class FakeTenantRepository(ITenantRepository):
 @dataclass
 class FakeSessionRepository(ISessionRepository):
     _rows: dict[UUID, Session] = field(default_factory=dict)
+    revoke_calls: list[UUID] = field(default_factory=list)
+    list_family_calls: list[UUID] = field(default_factory=list)
 
     async def add(self, session: Session) -> Session:
         self._rows[session.id] = session
         return session
+
+    async def get_by_hash(self, token_hash: str) -> Session | None:
+        # Linear scan — fine for unit tests (families are small).
+        # Returns revoked rows too, matching the real repo's contract
+        # (the caller uses revoked_at != None as the reuse signal).
+        for row in self._rows.values():
+            if row.token_hash == token_hash:
+                return row
+        return None
+
+    async def revoke(self, session_id: UUID, at: datetime) -> bool:
+        self.revoke_calls.append(session_id)
+        row = self._rows.get(session_id)
+        if row is None or row.revoked_at is not None:
+            return False  # CAS loser: unknown row or already revoked
+        import dataclasses
+
+        self._rows[session_id] = dataclasses.replace(row, revoked_at=at)
+        return True
+
+    async def list_family(self, family_id: UUID) -> list[Session]:
+        self.list_family_calls.append(family_id)
+        return [row for row in self._rows.values() if row.family_id == family_id]
+
+
+# ---- Clock ------------------------------------------------------------
+
+
+@dataclass
+class FakeClock(IClock):
+    """Freezable clock.
+
+    Default (``fixed_at is None``) returns real wall-clock time — safe
+    for tests that don't care about the exact instant. Tests that DO
+    care pass a specific ``fixed_at`` and optionally ``tick`` it.
+    """
+
+    fixed_at: datetime | None = None
+
+    def now(self) -> datetime:
+        if self.fixed_at is not None:
+            return self.fixed_at
+        return datetime.now(UTC)
+
+    def tick(self, seconds: int) -> None:
+        assert self.fixed_at is not None, "cannot tick a clock in wall-clock mode"
+        self.fixed_at = self.fixed_at + timedelta(seconds=seconds)
 
 
 @dataclass

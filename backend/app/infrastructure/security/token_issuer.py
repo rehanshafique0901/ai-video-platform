@@ -61,8 +61,8 @@ class AuthTokenIssuer(ITokenIssuer):
     def issue_for_rotation(self, user: User, family_id: UUID) -> IssuedTokens:
         return self._issue(user, family_id=family_id)
 
-    def verify_access(self, token: str) -> TokenClaims:
-        payload = self._jwt.verify(token, "access")
+    def verify_access(self, token: str, *, allow_expired: bool = False) -> TokenClaims:
+        payload = self._jwt.verify(token, "access", allow_expired=allow_expired)
         return _payload_to_claims(payload)
 
     def verify_refresh(self, token: str) -> TokenClaims:

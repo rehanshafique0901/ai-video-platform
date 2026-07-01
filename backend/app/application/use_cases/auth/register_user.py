@@ -51,11 +51,12 @@ from __future__ import annotations
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
 import structlog
 
+from app.application.interfaces.clock import IClock
 from app.application.interfaces.security import IPasswordHasher, IssuedTokens, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.auth.errors import (
@@ -95,10 +96,12 @@ class RegisterUser:
         uow: IUnitOfWork,
         hasher: IPasswordHasher,
         token_issuer: ITokenIssuer,
+        clock: IClock,
     ) -> None:
         self._uow = uow
         self._hasher = hasher
         self._token_issuer = token_issuer
+        self._clock = clock
 
     async def execute(
         self,
@@ -109,6 +112,7 @@ class RegisterUser:
         user_agent: str | None = None,
     ) -> RegisterUserResult:
         password_hash = self._hasher.hash(password)
+        now = self._clock.now()
 
         async with self._uow:
             # Step 0 — global email-uniqueness pre-check. See class
@@ -126,7 +130,7 @@ class RegisterUser:
                     details={"email_domain": _email_domain(email)},
                 )
 
-            tenant = await self._create_tenant_with_retry(name)
+            tenant = await self._create_tenant_with_retry(name, now=now)
 
             user_id = uuid4()
             try:
@@ -140,8 +144,8 @@ class RegisterUser:
                         email_verified_at=None,
                         last_login_at=None,
                         # DB defaults populate these on flush.
-                        created_at=datetime.now(UTC),
-                        updated_at=datetime.now(UTC),
+                        created_at=now,
+                        updated_at=now,
                         version=1,
                     )
                 )
@@ -191,13 +195,15 @@ class RegisterUser:
             user=persisted_user, tenant=tenant, session=session, tokens=tokens
         )
 
-    async def _create_tenant_with_retry(self, display_name: str) -> Tenant:
+    async def _create_tenant_with_retry(self, display_name: str, *, now: datetime) -> Tenant:
         """Insert a Tenant, retrying on slug collision with fresh random suffixes.
 
         Each attempt runs inside a SAVEPOINT (see ``TenantRepository.add``)
         so a collision rolls back only that attempt; the outer UoW
         transaction stays alive for the subsequent user / role / session
-        inserts.
+        inserts. ``now`` is passed in so every entity built during the
+        use-case run shares the same timestamp (clock stability under
+        test).
         """
         base_slug = _slugify(display_name)
         last_error: ConflictError | None = None
@@ -214,8 +220,8 @@ class RegisterUser:
                         slug=candidate,
                         plan_tier="free",
                         # DB defaults populate these on flush.
-                        created_at=datetime.now(UTC),
-                        updated_at=datetime.now(UTC),
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
             except ConflictError as e:

@@ -108,16 +108,60 @@ class ITenantRepository(ABC):
 
 
 class ISessionRepository(ABC):
-    """Persistence surface for ``sessions`` (α2a: insert-only).
+    """Persistence surface for ``sessions``.
 
-    α2b extends this interface with ``get_by_hash``, ``revoke``, and
-    ``list_family``. Rotation and replay detection are use-case
-    concerns; the port stays narrow.
+    α2a shipped ``add`` only. α2b extends the port with:
+
+    * ``get_by_hash`` — lookup by ``sha256(refresh_jwt)`` for refresh
+      flow. Returns the row **regardless** of ``revoked_at``: the caller
+      distinguishes "no such token" (None) from "token was revoked"
+      (row present with ``revoked_at != NULL``). The latter is the
+      reuse-detection signal.
+    * ``revoke`` — set ``revoked_at`` on a single row using an atomic
+      compare-and-swap (only revokes if ``revoked_at IS NULL``). Returns
+      True on the first revoke, False for the already-revoked / missing
+      case. Enables logout idempotency + preserves the original logout
+      timestamp when the client double-calls.
+    * ``list_family`` — enumerate every row sharing a ``family_id``.
+      Used by reuse-detection to revoke a whole rotation family after
+      one token in it is replayed.
+
+    Rotation orchestration lives in ``RefreshSession``; the port stays
+    a persistence surface.
     """
 
     @abstractmethod
     async def add(self, session: Session) -> Session:
         """Insert a new sessions row and return the persisted entity."""
+        ...
+
+    @abstractmethod
+    async def get_by_hash(self, token_hash: str) -> Session | None:
+        """Return the session whose ``token_hash`` matches (revoked or not), or ``None``.
+
+        Callers MUST inspect ``revoked_at`` to decide whether the token
+        is currently valid or is a reuse-signal.
+        """
+        ...
+
+    @abstractmethod
+    async def revoke(self, session_id: UUID, at: datetime) -> bool:
+        """Compare-and-swap revoke. Returns True iff this call did the revoke.
+
+        SQL shape: ``UPDATE sessions SET revoked_at = :at
+        WHERE id = :sid AND revoked_at IS NULL``. Returning False means
+        the row was already revoked (double-logout, race loser, or the
+        row does not exist) — safe no-op for the caller.
+        """
+        ...
+
+    @abstractmethod
+    async def list_family(self, family_id: UUID) -> list[Session]:
+        """Return every session row sharing ``family_id`` (revoked or not).
+
+        Order is unspecified. Used exclusively by reuse-detection; hot
+        paths (refresh happy path) never hit this method.
+        """
         ...
 
 

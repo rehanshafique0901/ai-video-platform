@@ -12,6 +12,7 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.domain.identity.user import User
 
 from ._fakes import (
+    FakeClock,
     FakePasswordHasher,
     FakeSessionRepository,
     FakeTokenIssuer,
@@ -42,11 +43,17 @@ def _make_use_case(
     users: FakeUserRepository | None = None,
     hasher: FakePasswordHasher | None = None,
     dummy_hash: str = _DUMMY,
+    clock: FakeClock | None = None,
 ) -> tuple[LoginUser, FakeUnitOfWork, FakePasswordHasher]:
     h = hasher or FakePasswordHasher()
     uow = FakeUnitOfWork(users=users, sessions=FakeSessionRepository())
+    ck = clock or FakeClock()
     uc = LoginUser(
-        uow=uow, hasher=h, token_issuer=FakeTokenIssuer(), dummy_password_hash=dummy_hash
+        uow=uow,
+        hasher=h,
+        token_issuer=FakeTokenIssuer(),
+        dummy_password_hash=dummy_hash,
+        clock=ck,
     )
     return uc, uow, h
 
