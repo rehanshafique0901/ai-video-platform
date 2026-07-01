@@ -12,7 +12,7 @@
 | 2 | Database — Step A: Design Docs | **APPROVED (Rev 2, 2026-06-28)** |
 | 2 | Database — Step B: Models & Migration | **✅ APPROVED 2026-06-28** — live validation green (9/9 checks, ERD clean); ADR-0027 added |
 | 2C | CI Quality Gate | **🟦 IMPLEMENTATION COMPLETE — awaiting reviewer sign-off** — 10/10 stages wired; gate green end-to-end (ADR-0028) |
-| 3 | Authentication | not started |
+| 3 | Authentication | **🟦 IN PROGRESS** — α1 (arch bootstrap) ✅ 2026-06-30 (v0.4.0), α2a (auth: register + login) ✅ 2026-07-01, α2b (refresh + logout) next |
 | 4 | Backend APIs | not started |
 | 5 | Frontend | not started |
 | 6 | AI Pipeline | not started |

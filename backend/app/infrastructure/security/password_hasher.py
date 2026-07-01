@@ -3,6 +3,12 @@
 Thin wrapper around ``argon2-cffi``. OWASP-default parameters; the
 ``needs_rehash`` helper enables opportunistic upgrades on next login
 when those parameters tighten in a future release of argon2-cffi.
+
+Slice α2a declares this class as an implementation of the
+``IPasswordHasher`` port (``app.application.interfaces.security``) so
+use cases can depend on the port rather than this concrete class,
+which keeps them fast under unit tests (a fake hasher can substitute
+Argon2's ~300 ms verify with a constant-time string comparison).
 """
 
 from __future__ import annotations
@@ -10,8 +16,10 @@ from __future__ import annotations
 from argon2 import PasswordHasher as _Argon2Hasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 
+from app.application.interfaces.security import IPasswordHasher
 
-class PasswordHasher:
+
+class PasswordHasher(IPasswordHasher):
     """Argon2id hasher using argon2-cffi's OWASP-aligned defaults."""
 
     def __init__(self) -> None:
