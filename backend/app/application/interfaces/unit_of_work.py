@@ -1,8 +1,18 @@
 """Port: Unit of Work — transaction boundary abstraction.
 
-A concrete implementation lives in
-``app.infrastructure.uow.sqlalchemy_unit_of_work``. Use cases depend
-only on this interface so they remain free of SQLAlchemy.
+Use cases depend on this ABC so they remain free of SQLAlchemy. The
+concrete implementation lives in ``app.infrastructure.uow``.
+
+Slice α2a: the UoW exposes typed repository attributes
+(``users`` / ``tenants`` / ``sessions`` / ``roles``) which are
+populated by the concrete ``__aenter__`` from the same
+``AsyncSession`` the UoW itself owns. Use cases therefore never see a
+SQLAlchemy session; they call ``async with uow: await uow.users.add(...)``.
+
+The attributes are declared without defaults: subclasses are
+responsible for initialising them in ``__aenter__``. Access before
+entering the context raises ``AttributeError`` at runtime and is
+flagged by mypy as unreachable in the "with" block only.
 """
 
 from __future__ import annotations
@@ -11,6 +21,13 @@ from abc import ABC, abstractmethod
 from types import TracebackType
 from typing import Self
 
+from app.application.interfaces.repositories import (
+    IRoleRepository,
+    ISessionRepository,
+    ITenantRepository,
+    IUserRepository,
+)
+
 
 class IUnitOfWork(ABC):
     """Async context manager that owns one transactional boundary.
@@ -18,12 +35,21 @@ class IUnitOfWork(ABC):
     Usage::
 
         async with uow:
-            # ... do work via uow.session ...
+            user = await uow.users.get_by_email(email)
+            ...
             await uow.commit()
 
     Exit without an explicit ``commit()`` (or with an exception) rolls
     back. ``__aexit__`` always closes the underlying session.
     """
+
+    # Repository attributes — populated by the concrete UoW's
+    # ``__aenter__`` from the session it owns. Types intentionally use
+    # the ports so use cases never see infrastructure classes.
+    users: IUserRepository
+    tenants: ITenantRepository
+    sessions: ISessionRepository
+    roles: IRoleRepository
 
     async def __aenter__(self) -> Self:
         return self

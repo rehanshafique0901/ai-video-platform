@@ -6,6 +6,146 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α2a — Auth (register + login) (2026-07-01)
+
+First real business capability shipped on top of the α1 architecture
+scaffold. Delivers the password-auth happy path — `POST /api/v1/auth/register`
+and `POST /api/v1/auth/login` — end-to-end through the layered
+architecture (domain → application → infrastructure → API). Split from
+the original combined α2 plan into α2a (register + login) + α2b
+(refresh + logout) per the pre-flight review for reviewability. **No
+migration, no ADR** (no new architectural trade-off — the plan is a
+direct application of ADR-0008 + the α1 DI pattern).
+
+#### Added
+- **Domain layer** — `app/domain/identity/{user,tenant,session}.py`.
+  Frozen dataclasses with `slots=True`, zero ORM inheritance, zero
+  framework dependencies. Enforced by import-linter contract #1.
+- **Two new application ports** (`app/application/interfaces/security.py`):
+  `IPasswordHasher`, `ITokenIssuer`, plus the `IssuedTokens` and
+  `TokenClaims` value objects. Existed to keep unit tests fast (Argon2id
+  fake substitution) and to lock the seam for future token-scheme
+  swaps (PASETO, opaque tokens).
+- **Extended `IUserRepository`** — new methods `get_by_email`,
+  `get_by_id`, `add`, `update_last_login`. α1 methods
+  (`count`, `exists_by_id`) preserved per the pre-flight review.
+- **Three new repository ports** — `ITenantRepository` (add /
+  get_by_id / exists_by_slug), `ISessionRepository` (add only in α2a;
+  extended in α2b), `IRoleRepository` (assign_role_by_code, idempotent
+  via ON CONFLICT DO NOTHING).
+- **UoW attribute-style repos** — `IUnitOfWork` now exposes
+  `.users`, `.tenants`, `.sessions`, `.roles` populated by the
+  concrete UoW on `__aenter__`, so use cases call
+  `await uow.users.add(...)` without ever seeing SQLAlchemy classes.
+- **Two application use cases** — `RegisterUser` (application-level
+  global email-uniqueness pre-check → auto-creates a self-service
+  tenant per signup with slug-collision retry → inserts the user →
+  assigns the `owner` role → issues tokens → persists the initial
+  session), `LoginUser` (get-by-email → constant-time Argon2 verify
+  → issue tokens with fresh family/session ids → persist session →
+  bump `last_login_at`).
+
+  *Note on the email-uniqueness pre-check:* the auto-tenant-per-signup
+  design (Decision 1A) defeats the DB per-tenant unique constraint on
+  `(tenant_id, email)` for the "same email registered twice"
+  scenario — each signup arrives at a different `tenant_id` so the
+  constraint always sees a distinct pair. Without an application-layer
+  pre-check, re-registration would silently create a second orphan
+  tenant under the same email. `RegisterUser` therefore calls
+  `users.get_by_email(email)` inside the same UoW before creating the
+  tenant and raises `EmailAlreadyRegisteredError` on a hit. Race
+  window between the pre-check and insert is acceptable for α2a; a
+  later hardening pass may add an application-level lock table or
+  rate-limit if this proves exploitable in practice.
+
+  *Note on the role assignment:* the pre-flight originally called for
+  `user + owner`. On implementation this proved to conflate two
+  orthogonal concepts — the `roles` table (workspace permissions,
+  seeded with `owner, admin, editor, viewer, billing, support`) vs
+  the `auth_role` ENUM in `schema.md` §0.1 (plan tiers). `user` lives
+  on the ENUM, not the table. Assigning `owner` alone captures the
+  intended semantics ("creator owns the tenant they just created");
+  "any authenticated user" is enforced by JWT validity, not by a
+  role row. Documented in the `RegisterUser` class docstring.
+- **Anti-enumeration login path** — `LoginUser` burns one Argon2
+  verify against a startup-computed dummy hash when the email is
+  unknown or the account is OAuth-only, so wall-time is
+  indistinguishable from the wrong-password branch (OWASP ASVS L2 §2.6.3).
+- **`AuthTokenIssuer`** (`app/infrastructure/security/token_issuer.py`) —
+  wraps the α1 `JWTService` + SHA-256 + up-front `session_id` /
+  `family_id` generation into one call. Emits `sid` (session id) and
+  `fam` (family id) claims on **both** access and refresh tokens so
+  α2b `LogoutSession` can revoke a precise session row from the access
+  token alone (no need to accept the refresh token in the logout body).
+- **DTOs** (`app/api/v1/schemas/auth.py`) — Pydantic v2 request /
+  response models. Request DTOs strip whitespace and lowercase the
+  email before it ever reaches the use case (canonical `CITEXT` values).
+  `UserPublic` explicitly enumerates public fields — `password_hash`
+  cannot leak through DTO drift because it isn't declared.
+- **Router** (`app/api/v1/routers/auth.py`) — two POST endpoints,
+  mounted under `/api/v1`. Envelope response per API_CONTRACT §1.1.
+  Zero try/except — errors surface via the α1 exception-handler chain.
+- **DI wiring** — `app.core.container` grows a
+  `get_token_issuer` singleton, a pre-computed
+  `get_dummy_password_hash` (Argon2 cost paid once at process start,
+  not per request), and two use-case factories
+  (`get_register_user_use_case`, `get_login_user_use_case`).
+- **New unit tests** (~19 across three files):
+  `test_register_user.py`, `test_login_user.py`,
+  `test_token_issuer.py`. All auth use-case tests use in-memory fakes
+  (`tests/unit/application/use_cases/auth/_fakes.py`) — total unit-suite
+  runtime stays sub-second because Argon2id verify is stubbed with a
+  string comparison.
+- **New integration tests** — `test_tenant_repository.py`,
+  `test_session_repository.py`, `test_role_repository.py`; extended
+  `test_user_repository.py` with α2a method coverage; new
+  `tests/integration/api/test_auth.py` (9 scenarios covering register /
+  login happy paths, duplicate email → 409, short password → 422,
+  email lowercasing, `sid`/`fam` claim presence in JWT, anti-enumeration
+  message equality, distinct families per device).
+- **Integration test client fixture rebind** —
+  `tests/integration/conftest.py::client` now overrides
+  `container.get_session` and `container.get_unit_of_work` so mutation
+  handlers run inside the test's SAVEPOINT connection. Nothing persists
+  across tests; the shared Supabase instance stays clean.
+- **New runtime dependency** — `email-validator>=2.2,<3` (required by
+  Pydantic `EmailStr` at DTO parse time).
+- **Fifth `import-linter` contract** — "Application use_cases never
+  import infrastructure or api". Locks the layered boundary the
+  moment the layer is introduced.
+
+#### Changed
+- **`app/main.py`** — imports and mounts `auth.router` under
+  `/api/v1`; health router stays at the root path (API_CONTRACT §2
+  designates `/healthz` + `/readyz` as public, versionless). App
+  version bumped `0.4.0-phase3-alpha1-dev → 0.4.1-phase3-alpha2a-dev`.
+- **`app/infrastructure/security/password_hasher.py`** — now declares
+  `class PasswordHasher(IPasswordHasher)` (implements the new port).
+  No runtime behaviour change.
+- **`app/infrastructure/uow/sqlalchemy_unit_of_work.py`** — `__aenter__`
+  populates the four repository attributes from the session it owns.
+
+#### Deferred (Slice α2b)
+- `POST /api/v1/auth/refresh` — token rotation with reuse detection.
+- `POST /api/v1/auth/logout` — precise per-`sid` revocation using the
+  claim shipped in α2a.
+- `ISessionRepository` extensions: `get_by_hash`, `revoke`,
+  `list_family`. Kept out of α2a intentionally per the pre-flight
+  review — repositories in α2a cover only the α2a use cases.
+- `IClock` port — introduced in α2b where `RefreshSession` needs it
+  for the session-row `expires_at` computation.
+
+#### Deferred (Slice α3+)
+- Email verification (`/auth/email/verify`, `/auth/email/resend`) — α3.
+- Password reset (`/auth/password/forgot`, `/auth/password/reset`) — α4.
+- Google OAuth (PKCE) — α5.
+- RBAC enforcement at endpoint boundaries — α6.
+- OCC retry on `LoginUser.update_last_login` — retained as a deferred
+  optimisation; add only if concurrent-login contention becomes
+  observable.
+
+---
+
 ### Phase 3 Wave 1.4 — `usage_records` per-partition `(request_id)` uniqueness (ADR-0033) (2026-06-30)
 
 Wave-closing item for Phase 3 Wave 1: promotes a per-partition

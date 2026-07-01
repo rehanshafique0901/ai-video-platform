@@ -1,0 +1,112 @@
+"""``/api/v1/auth/*`` HTTP router (Slice α2a: register + login).
+
+The router is deliberately thin. It:
+
+1. Deserialises the request DTO (Pydantic validates + lowercases the
+   email before we see it).
+2. Reads the caller's IP + user-agent for audit persistence.
+3. Delegates to the use case injected via ``RegisterUserDep`` /
+   ``LoginUserDep`` (both come from ``app.core.container`` under the
+   hood — see ``app.api.v1.deps``).
+4. Maps the use-case result into the wire DTO and wraps it in the
+   API_CONTRACT §1.1 envelope.
+5. Sets the HTTP status code (201 for register, 200 for login).
+
+Errors raised by the use case (all ``ApplicationError`` subclasses)
+are caught by the FastAPI exception handlers registered in
+``app.core.errors`` and translated to the standard error envelope.
+The router itself contains no try / except.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Request, status
+from fastapi.responses import JSONResponse
+
+from app.api.v1.deps import LoginUserDep, RegisterUserDep
+from app.api.v1.schemas.auth import (
+    AuthTokensPayload,
+    LoginRequest,
+    RegisterRequest,
+    UserPublic,
+)
+from app.application.use_cases.auth.login_user import LoginUserResult
+from app.application.use_cases.auth.register_user import RegisterUserResult
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _envelope(payload: AuthTokensPayload, request: Request) -> dict[str, Any]:
+    request_id = getattr(request.state, "request_id", "")
+    return {"data": payload.model_dump(mode="json"), "meta": {"request_id": request_id}}
+
+
+def _to_payload(user_id: Any, tokens_bundle: Any, user: Any) -> AuthTokensPayload:
+    """Adapt a use-case result into the wire DTO."""
+    return AuthTokensPayload(
+        user=UserPublic(
+            id=user.id,
+            tenant_id=user.tenant_id,
+            email=user.email,
+            display_name=user.display_name,
+            email_verified_at=user.email_verified_at,
+            created_at=user.created_at,
+        ),
+        access_token=tokens_bundle.access_token,
+        refresh_token=tokens_bundle.refresh_token,
+    )
+
+
+@router.post("/register")
+async def register(
+    body: RegisterRequest,
+    request: Request,
+    use_case: RegisterUserDep,
+) -> JSONResponse:
+    result: RegisterUserResult = await use_case.execute(
+        email=body.email,
+        password=body.password,
+        name=body.name,
+        ip=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    payload = _to_payload(result.user.id, result.tokens, result.user)
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content=_envelope(payload, request),
+    )
+
+
+@router.post("/login")
+async def login(
+    body: LoginRequest,
+    request: Request,
+    use_case: LoginUserDep,
+) -> JSONResponse:
+    result: LoginUserResult = await use_case.execute(
+        email=body.email,
+        password=body.password,
+        ip=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    payload = _to_payload(result.user.id, result.tokens, result.user)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=_envelope(payload, request),
+    )
+
+
+def _client_ip(request: Request) -> str | None:
+    """Return the caller IP, honouring a common reverse-proxy header if present.
+
+    Storing IP is best-effort for audit: TrustedHost + X-Forwarded-For
+    handling for production land in a later slice (behind an ADR). For
+    α2a we take the first value of ``X-Forwarded-For`` if set, otherwise
+    ``request.client.host``.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip() or None
+    return request.client.host if request.client else None

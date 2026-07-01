@@ -17,6 +17,11 @@ dependencies = [
     "argon2-cffi>=23.1.0",             # Argon2id password hashing (ADR-0008)
     "pyjwt[crypto]>=2.9.0",            # JWT issue/verify (ADR-0008)
     "uvicorn[standard]>=0.32.0",       # ASGI server (local dev + container entry)
+    # Phase 3 Slice α2a (auth: register + login) — added 2026-07-01.
+    # Pydantic ``EmailStr`` requires this package at runtime; it validates
+    # e-mail address structure per RFC 5321/5322 + IDN. Used by the auth
+    # request DTOs in ``app/api/v1/schemas/auth.py``.
+    "email-validator>=2.2.0,<3",
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -255,3 +260,18 @@ name = "Application layer never imports the API layer"
 type = "forbidden"
 source_modules = ["app.application"]
 forbidden_modules = ["app.api"]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α2a — introduced when ``app.application.use_cases`` first
+# appears. Use cases must depend only on domain entities + ports
+# (``app.application.interfaces``) + ``app.core.errors``. Direct imports
+# from ``app.infrastructure`` (concrete SQLAlchemy repositories, argon2,
+# pyjwt) or ``app.api`` (HTTP concerns) would invert the layered model.
+# The composition root (``app.core.container``) still bridges them —
+# that indirection is by design and is not caught by this ``forbidden``
+# contract because the use-case module itself does not import
+# infrastructure.
+name = "Application use_cases never import infrastructure or api"
+type = "forbidden"
+source_modules = ["app.application.use_cases"]
+forbidden_modules = ["app.infrastructure", "app.api"]

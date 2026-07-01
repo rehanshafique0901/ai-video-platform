@@ -3,16 +3,32 @@
 Wraps one ``AsyncSession`` lifetime so use cases never see SQLAlchemy
 directly. Exit without an explicit commit rolls back automatically;
 ``__aexit__`` always closes the session.
+
+Slice α2a extends ``__aenter__`` to populate the four repository
+attributes declared on ``IUnitOfWork`` — ``users``, ``tenants``,
+``sessions``, ``roles`` — so use cases can call e.g.
+``await uow.users.add(entity)`` without ever knowing the concrete
+repository classes exist.
 """
 
 from __future__ import annotations
 
 from types import TracebackType
-from typing import Self
+from typing import Self, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.application.interfaces.repositories import (
+    IRoleRepository,
+    ISessionRepository,
+    ITenantRepository,
+    IUserRepository,
+)
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.infrastructure.repositories.role_repository import RoleRepository
+from app.infrastructure.repositories.session_repository import SessionRepository
+from app.infrastructure.repositories.tenant_repository import TenantRepository
+from app.infrastructure.repositories.user_repository import UserRepository
 
 
 class SqlAlchemyUnitOfWork(IUnitOfWork):
@@ -32,6 +48,14 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
     async def __aenter__(self) -> Self:
         self._session = self._session_factory()
         self._committed = False
+        # Populate the repository attributes declared on IUnitOfWork.
+        # The ``cast`` calls tell mypy the concrete impls satisfy the ABCs
+        # (which they do by inheritance) — the runtime type is the
+        # concrete class, but callers see only the port surface.
+        self.users = cast(IUserRepository, UserRepository(self._session))
+        self.tenants = cast(ITenantRepository, TenantRepository(self._session))
+        self.sessions = cast(ISessionRepository, SessionRepository(self._session))
+        self.roles = cast(IRoleRepository, RoleRepository(self._session))
         return self
 
     async def __aexit__(
