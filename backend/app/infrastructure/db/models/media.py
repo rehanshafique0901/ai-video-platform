@@ -28,7 +28,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 try:
     from pgvector.sqlalchemy import Vector
 except ImportError:  # pragma: no cover — guarded for environments without pgvector installed
-    Vector = None
+    # ``Vector`` is a real type when pgvector resolves (e.g. pgvector>=0.5 ships
+    # resolvable typings); the ImportError branch is a runtime-only shim so mypy
+    # shouldn't police the reassignment. The narrow ignore covers both the
+    # "cannot assign to a type" [misc] and the None-vs-type [assignment] surface.
+    Vector = None  # type: ignore[assignment,misc]
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.enums import media_kind_enum, media_source_enum, storage_backend_enum
