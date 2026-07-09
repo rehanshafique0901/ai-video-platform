@@ -5,6 +5,13 @@
 against a real Postgres BEFORE the ``RefreshSession`` use case is
 written — if the repository contract is wrong, we want to know at the
 persistence layer, not while debugging orchestration.
+
+α3 adds coverage for ``get_by_id`` — the sid-driven lookup used by
+``get_current_user`` on the authenticated-request path. Same
+"returns revoked rows too" caller-decides contract as
+``get_by_hash``; the dep interprets ``revoked_at`` / ``expires_at``
+to distinguish ``session_revoked`` from ``session_expired`` in its
+structured log.
 """
 
 from __future__ import annotations
@@ -169,3 +176,57 @@ async def test_list_family_returns_all_rows_regardless_of_revocation(
 
     empty = await repo.list_family(uuid4())
     assert empty == []
+
+
+# ---- α3: get_by_id ---------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_get_by_id_returns_live_row(session: AsyncSession) -> None:
+    """R1 — happy path: an unrevoked row is returned unchanged."""
+    _, user_id = await _seed_user(session)
+    repo = SessionRepository(session)
+
+    entity = _make_entity(user_id, token_hash="a3" + "1" * 62)
+    await repo.add(entity)
+
+    hit = await repo.get_by_id(entity.id)
+    assert hit is not None
+    assert hit.id == entity.id
+    assert hit.user_id == user_id
+    assert hit.revoked_at is None
+
+
+@pytest.mark.integration
+async def test_get_by_id_returns_revoked_rows_too(session: AsyncSession) -> None:
+    """R2 — revoked rows are still returned; the dep decides how to react.
+
+    Filtering revoked rows here would collapse "sid_missing_session" and
+    "session_revoked" into a single ``None`` return, and the dep could
+    no longer distinguish the two in its structured log (which matters
+    for SIEM alerting — one is tamper-flavoured, the other is not).
+    """
+    _, user_id = await _seed_user(session)
+    repo = SessionRepository(session)
+
+    revoked = _make_entity(user_id, token_hash="a3" + "2" * 62, revoked_at=datetime.now(UTC))
+    await repo.add(revoked)
+
+    hit = await repo.get_by_id(revoked.id)
+    assert hit is not None
+    assert hit.revoked_at is not None
+
+
+@pytest.mark.integration
+async def test_get_by_id_returns_none_for_unknown_id(session: AsyncSession) -> None:
+    """R3 — an unknown UUID surfaces as ``None``.
+
+    Distinguished from "revoked row present" so the dep can emit
+    ``reason=sid_missing_session`` (security_event=True; a valid-JWT
+    sid must correspond to *some* row unless the token was tampered).
+    """
+    await _seed_user(session)  # proves the DB is live
+    repo = SessionRepository(session)
+
+    miss = await repo.get_by_id(uuid4())
+    assert miss is None

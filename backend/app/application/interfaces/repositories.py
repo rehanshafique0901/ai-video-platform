@@ -145,6 +145,21 @@ class ISessionRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_by_id(self, session_id: UUID) -> Session | None:
+        """Return the session row for ``session_id`` (revoked or not), or ``None``.
+
+        Introduced by Slice α3 (``get_current_user``). Access tokens
+        carry ``sid`` directly in the JWT, so the request-authentication
+        path has no token hash to look up by; the sid claim is the
+        natural key. Returns revoked rows too, mirroring
+        :meth:`get_by_hash` — the caller decides how to interpret
+        ``revoked_at`` and ``expires_at`` (α3 dep distinguishes
+        ``session_revoked`` vs ``session_expired`` in its structured
+        log; both surface as the same generic 401 client-side).
+        """
+        ...
+
+    @abstractmethod
     async def revoke(self, session_id: UUID, at: datetime) -> bool:
         """Compare-and-swap revoke. Returns True iff this call did the revoke.
 

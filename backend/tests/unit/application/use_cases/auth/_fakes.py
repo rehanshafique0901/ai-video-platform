@@ -216,6 +216,11 @@ class FakeSessionRepository(ISessionRepository):
                 return row
         return None
 
+    async def get_by_id(self, session_id: UUID) -> Session | None:
+        # α3: sid-driven lookup for ``get_current_user``. Returns
+        # revoked rows too, matching the real repo's contract.
+        return self._rows.get(session_id)
+
     async def revoke(self, session_id: UUID, at: datetime) -> bool:
         self.revoke_calls.append(session_id)
         row = self._rows.get(session_id)

@@ -11,6 +11,14 @@
   idempotent no-op (matches the port contract).
 * ``list_family`` — enumerate every row for a rotation family. Used by
   the reuse-detection path in ``RefreshSession``.
+
+α3 extends the adapter with:
+
+* ``get_by_id`` — sid-driven lookup for ``get_current_user`` (the
+  authenticated-request dep). Access tokens carry ``sid`` directly,
+  so the request-authentication path has no token hash to look up by.
+  Returns revoked rows too, mirroring ``get_by_hash``'s caller-decides
+  contract.
 """
 
 from __future__ import annotations
@@ -65,6 +73,15 @@ class SessionRepository(ISessionRepository):
 
     async def get_by_hash(self, token_hash: str) -> SessionEntity | None:
         stmt = select(SessionRow).where(SessionRow.token_hash == token_hash)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
+    async def get_by_id(self, session_id: UUID) -> SessionEntity | None:
+        # α3: sid-driven lookup for ``get_current_user``. Returns revoked
+        # rows too so the dep can distinguish ``session_revoked`` from
+        # ``session_expired`` in its structured log.
+        stmt = select(SessionRow).where(SessionRow.id == session_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None

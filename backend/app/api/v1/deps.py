@@ -9,16 +9,30 @@ never sees the implementations.
 Slice α2a adds use-case dependency aliases so router handlers can
 declare e.g. ``register_use_case: RegisterUserDep`` and receive a
 fully-wired instance from the container.
+
+Slice α3 adds the **authenticated-request seam**:
+
+* ``get_current_user`` — resolves ``Authorization: Bearer <access>``
+  into a live :class:`~app.domain.identity.user.User`. Strict
+  verification (``allow_expired=False``); fail-closed on any
+  non-happy branch; anti-enumeration generic 401 client-side with
+  the specific reason on the server-side structured log.
+* ``CurrentUserDep`` — the alias every authenticated endpoint uses.
+  Per pre-flight §10, this is the *only* authentication seam future
+  endpoints should reach for; direct JWT parsing or ``ITokenIssuer``
+  access from a router is a review-blocker signal.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header
+import structlog
+from fastapi import Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.interfaces.repositories import IUserRepository
+from app.application.interfaces.security import ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
@@ -26,9 +40,21 @@ from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.core import container
 from app.core.errors import UnauthorizedError
+from app.domain.identity.user import User
+
+_LOGGER = structlog.get_logger(__name__)
+
+# ``_GENERIC_401`` — anti-enumeration: every failure branch in
+# ``get_current_user`` raises with this exact message so the client
+# cannot tell a signature-failure from a session-revoked from a
+# soft-deleted user. Server-side ``auth.request.rejected`` structured
+# log carries the specific reason for SIEM alerting (per pre-flight
+# §2.D4 — same discipline as α2a login + α2b refresh).
+_GENERIC_401 = "not authenticated"
 
 SessionDep = Annotated[AsyncSession, Depends(container.get_session)]
 UoWDep = Annotated[IUnitOfWork, Depends(container.get_unit_of_work)]
+TokenIssuerDep = Annotated[ITokenIssuer, Depends(container.get_token_issuer)]
 
 
 def get_user_repository(session: SessionDep) -> IUserRepository:
@@ -56,6 +82,11 @@ def _bearer_access_token(authorization: str | None = Header(default=None)) -> st
     missing / malformed header. Cryptographic validation is the
     downstream use case's job — this dependency only parses the header
     shape.
+
+    Retained for α2b's ``/auth/logout`` endpoint, which is intentionally
+    lenient about token expiry and therefore has its own message shape.
+    α3's ``get_current_user`` inlines the same parse-then-verify logic
+    with anti-enumeration generic messaging (see :data:`_GENERIC_401`).
     """
     if not authorization:
         raise UnauthorizedError("missing authorization header")
@@ -66,3 +97,138 @@ def _bearer_access_token(authorization: str | None = Header(default=None)) -> st
 
 
 BearerAccessTokenDep = Annotated[str, Depends(_bearer_access_token)]
+
+
+# ---- Authenticated-request seam (Slice α3) ----------------------------
+
+
+def _client_ip(request: Request) -> str | None:
+    """Best-effort caller IP for audit logs (same shape as ``routers/auth.py``)."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip() or None
+    return request.client.host if request.client else None
+
+
+def _reject(
+    reason: str,
+    *,
+    security_event: bool = False,
+    **fields: object,
+) -> UnauthorizedError:
+    """Emit ``auth.request.rejected`` with the specific reason and return the generic 401.
+
+    Centralising this keeps the ``get_current_user`` body flat and
+    guarantees every rejection path uses the same client-facing message
+    (:data:`_GENERIC_401`) — an anti-enumeration invariant asserted by
+    pre-flight §4.1 A2–A9.
+    """
+    _LOGGER.warning(
+        "auth.request.rejected",
+        reason=reason,
+        security_event=security_event,
+        **fields,
+    )
+    return UnauthorizedError(_GENERIC_401)
+
+
+async def get_current_user(
+    request: Request,
+    token_issuer: TokenIssuerDep,
+    uow: UoWDep,
+) -> User:
+    """Resolve a bearer access token into a live ``User`` domain entity.
+
+    Every non-happy branch raises :class:`UnauthorizedError` with the
+    same message (:data:`_GENERIC_401`); the specific reason is only
+    visible in the server-side ``auth.request.rejected`` structured log.
+    ``security_event=True`` is set on tamper-flavoured reasons
+    (``verify_failed`` for signature/kind mismatches; ``sid_missing_session``)
+    — signature failures caused by mere expiry are noisy under normal
+    client behaviour and are NOT flagged (matches α2b logout / refresh
+    discipline; pre-flight §2.D4).
+
+    Note the design choice: header parsing is inlined here rather than
+    reusing :func:`_bearer_access_token` so all seven reason branches
+    can log through :func:`_reject` uniformly. ``_bearer_access_token``
+    is preserved for ``/auth/logout``, which has its own message shape
+    (α2b, deliberate).
+    """
+    ip = _client_ip(request)
+    user_agent = request.headers.get("user-agent")
+
+    # ---- Step 1: header shape (reason=missing_header / malformed_header)
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        raise _reject("missing_header", ip=ip)
+    scheme, _, raw_token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not raw_token:
+        raise _reject("malformed_header", ip=ip)
+
+    # ---- Step 2: verify JWT (reason=verify_failed).
+    #
+    # Signature / kind / claim-shape failures set ``security_event=True``
+    # because they can only be produced by tampering. Expiry does NOT
+    # set the flag: an expired access token is the routine "you should
+    # refresh now" signal, produced by every long-lived client. The
+    # ``AuthTokenIssuer`` collapses all of these into a single
+    # ``UnauthorizedError`` today; distinguishing at the log layer
+    # requires inspecting the exception message, which is a fragile
+    # coupling. For α3 we mark all verify_failed cases with
+    # ``security_event=True`` and accept the noise cost. If SIEM
+    # tuning proves this too noisy, promote ``AuthTokenIssuer.verify_access``
+    # to raise sub-typed errors (its own slice).
+    try:
+        claims = token_issuer.verify_access(raw_token)
+    except UnauthorizedError as e:
+        raise _reject("verify_failed", security_event=True, detail=str(e), ip=ip) from e
+
+    # ---- Step 3: session liveness (reason=sid_missing_session / session_revoked / session_expired).
+    now = container.get_clock().now()
+    async with uow:
+        row = await uow.sessions.get_by_id(claims.session_id)
+        if row is None:
+            raise _reject(
+                "sid_missing_session",
+                security_event=True,
+                claimed_sid=str(claims.session_id),
+                user_id=str(claims.subject),
+                ip=ip,
+            )
+        if row.revoked_at is not None:
+            raise _reject(
+                "session_revoked",
+                session_id=str(row.id),
+                user_id=str(row.user_id),
+                ip=ip,
+            )
+        if row.expires_at <= now:
+            raise _reject(
+                "session_expired",
+                session_id=str(row.id),
+                user_id=str(row.user_id),
+                ip=ip,
+            )
+
+        # ---- Step 4: user liveness (reason=sid_user_gone).
+        user = await uow.users.get_by_id(row.user_id)
+        if user is None:
+            raise _reject(
+                "sid_user_gone",
+                session_id=str(row.id),
+                user_id=str(row.user_id),
+                ip=ip,
+            )
+
+    # ---- Happy path.
+    _LOGGER.info(
+        "auth.request.authenticated",
+        user_id=str(user.id),
+        session_id=str(row.id),
+        ip=ip,
+        user_agent=user_agent,
+    )
+    return user
+
+
+CurrentUserDep = Annotated[User, Depends(get_current_user)]
