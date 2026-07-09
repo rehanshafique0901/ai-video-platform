@@ -176,6 +176,36 @@ class FakeUserRepository(IUserRepository):
     async def update_last_login(self, user_id: UUID, at: datetime) -> None:
         self.last_login_updates[user_id] = at
 
+    async def update_profile(
+        self,
+        user_id: UUID,
+        expected_version: int,
+        display_name: str,
+    ) -> User | None:
+        # α4 additions — mirrors the concrete ``UserRepository.update_profile``
+        # contract: None on version mismatch OR missing user; unchanged
+        # entity on same-value no-op; version-bumped entity on real change.
+        # The fake stores every user under ``_rows[user_id]`` regardless of
+        # soft-delete state (the fake has no ``deleted_at`` concept — it
+        # models the post-filter view), so "user gone" here means "not in
+        # the dict".
+        user = self._rows.get(user_id)
+        if user is None or user.version != expected_version:
+            return None
+        if user.display_name == display_name:
+            return user  # same-value no-op — no state change
+
+        import dataclasses
+
+        updated = dataclasses.replace(
+            user,
+            display_name=display_name,
+            version=user.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._rows[user_id] = updated
+        return updated
+
 
 @dataclass
 class FakeTenantRepository(ITenantRepository):

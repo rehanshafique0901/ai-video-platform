@@ -8,12 +8,19 @@ sibling ports needed for register + login:
 
 * ``ITenantRepository`` — schema §1
 * ``ISessionRepository`` — schema §4 (α2a needs ``add`` only; α2b
-  extends with ``get_by_hash`` / ``revoke`` / ``list_family``)
+  extends with ``get_by_hash`` / ``revoke`` / ``list_family``; α3
+  extends with ``get_by_id``)
 * ``IRoleRepository``   — schema §5 (α2a needs ``assign_role_by_code``)
+
+Slice α4 extends ``IUserRepository`` with ``update_profile`` — the
+version-fenced targeted mutation that underpins ``PATCH /users/me``
+and (per α4 pre-flight §10 exit criteria) becomes the canonical
+example of an optimistic-concurrency repository CAS.
 
 Per the approved review: repositories answer persistence questions
 only. Orchestration (token rotation, replay detection, family
-revocation) lives in the use cases, not in these interfaces.
+revocation, same-value no-op detection) lives in the use cases, not
+in these interfaces.
 """
 
 from __future__ import annotations
@@ -76,6 +83,64 @@ class IUserRepository(ABC):
     @abstractmethod
     async def update_last_login(self, user_id: UUID, at: datetime) -> None:
         """Set ``users.last_login_at = :at`` for the given user."""
+        ...
+
+    # ---- α4 additions ---------------------------------------------------
+
+    @abstractmethod
+    async def update_profile(
+        self,
+        user_id: UUID,
+        expected_version: int,
+        display_name: str,
+    ) -> User | None:
+        """Version-fenced profile mutation for ``PATCH /users/me``.
+
+        Performs a compare-and-swap on ``users.version``. In α4 the only
+        patchable field is ``display_name``; when later slices add more
+        patchable fields (see α4 pre-flight §1.3 non-goals for the
+        explicit deferral list), they extend this signature with
+        keyword-only optional args rather than introducing a parallel
+        method.
+
+        Args:
+            user_id: The user whose profile is being updated. The
+                caller (``UpdateUserProfile`` use case) has already
+                established that this ``user_id`` corresponds to the
+                authenticated caller — this repository does NOT
+                enforce authorization.
+            expected_version: The ``version`` value the caller last
+                observed on the ``User`` entity. Used as the CAS fence.
+            display_name: The new ``display_name`` value. The caller
+                is responsible for whitespace stripping and length
+                validation (Pydantic ``UpdateUserProfileRequest`` in
+                the API layer). This method treats it as opaque.
+
+        Returns:
+            * The updated :class:`~app.domain.identity.user.User` entity
+              (with ``version`` incremented, ``updated_at`` bumped) on
+              a successful real change.
+            * The **unchanged** :class:`User` entity (``version``
+              preserved, ``updated_at`` unchanged) on the same-value
+              no-op path — when ``display_name`` already equals the
+              current row's value. Per α4 pre-flight §D6a
+              version-increment invariant: no write, no version bump,
+              no dirty replication log. The use case surfaces this
+              distinction in structured logs but the wire response
+              looks identical to a real change.
+            * ``None`` when EITHER the version fence fails OR no live
+              (non-soft-deleted) row exists with ``user_id``. Per α4
+              §A10, these two outcomes are deliberately
+              indistinguishable at the repository boundary — the use
+              case raises :class:`ConflictError` for both, the API
+              surfaces both as ``412 VERSION_CONFLICT``, and the
+              anti-enumeration posture from α3 is preserved.
+
+        This method is the canonical example of the α4 version-fenced
+        repository CAS pattern (pre-flight §10 exit criterion 4). All
+        future targeted mutations on versioned aggregates follow this
+        shape: ``(id, expected_version, ...changes) -> Entity | None``.
+        """
         ...
 
 
