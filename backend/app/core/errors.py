@@ -60,6 +60,35 @@ class ValidationFailedError(ApplicationError):
     http_status = status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
+class VersionConflictError(ApplicationError):
+    """Optimistic-concurrency version fence rejected the write.
+
+    Introduced by α4 (``PATCH /users/me``). Raised when a mutation
+    endpoint's ``expected_version`` does not match the persisted
+    ``version`` — either because a concurrent writer updated the row,
+    or because the row was soft-deleted between authentication and
+    the write. Both outcomes are deliberately indistinguishable at
+    this boundary (α4 pre-flight §A10) to preserve the anti-
+    enumeration posture established in α3: a client MUST NOT be able
+    to distinguish "your version is stale" from "your account no
+    longer exists" from a mere 412 response.
+
+    Wire-level shape (per α4 §D6):
+
+        HTTP 412 Precondition Failed
+        {
+            "error": {
+                "code": "VERSION_CONFLICT",
+                "message": "Resource has been modified.",
+                ...
+            }
+        }
+    """
+
+    code = "VERSION_CONFLICT"
+    http_status = status.HTTP_412_PRECONDITION_FAILED
+
+
 def _envelope(code: str, message: str, details: dict[str, Any], request_id: str) -> dict[str, Any]:
     return {
         "error": {
