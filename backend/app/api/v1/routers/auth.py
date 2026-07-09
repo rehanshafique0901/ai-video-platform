@@ -42,8 +42,8 @@ from app.api.v1.schemas.auth import (
     LoginRequest,
     RefreshRequest,
     RegisterRequest,
-    UserPublic,
 )
+from app.api.v1.schemas.users import UserPublic
 from app.application.use_cases.auth.login_user import LoginUserResult
 from app.application.use_cases.auth.refresh_session import RefreshSessionResult
 from app.application.use_cases.auth.register_user import RegisterUserResult

@@ -6,20 +6,19 @@ receives a canonical value. The response DTOs match API_CONTRACT §3.1
 exactly — ``{ user, access_token, refresh_token }`` — wrapped in the
 success envelope from §1.1.
 
-``UserPublic`` intentionally omits ``password_hash`` and any internal
-audit column. Pydantic v2 with explicit fields (not ``model_config``
-``exclude``) gives compile-time safety: adding a new sensitive field to
-the domain ``User`` entity does *not* leak into the response unless the
-DTO is edited to include it.
+``UserPublic`` moved to :mod:`app.api.v1.schemas.users` in α3.3 so that
+user-shaped and auth-shaped DTOs live in separate modules. It is still
+imported here because :class:`AuthTokensPayload` (the register / login
+response body) embeds it.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.api.v1.schemas.users import UserPublic
 
 # ---- Requests ---------------------------------------------------------
 
@@ -77,17 +76,6 @@ class RefreshRequest(BaseModel):
 
 
 # ---- Responses --------------------------------------------------------
-
-
-class UserPublic(BaseModel):
-    """Public projection of ``User``. ``password_hash`` is intentionally absent."""
-
-    id: UUID
-    tenant_id: UUID
-    email: str
-    display_name: str
-    email_verified_at: datetime | None
-    created_at: datetime
 
 
 class AuthTokensPayload(BaseModel):
