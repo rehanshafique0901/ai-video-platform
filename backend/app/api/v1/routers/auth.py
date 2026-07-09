@@ -57,7 +57,16 @@ def _envelope(payload: AuthTokensPayload, request: Request) -> dict[str, Any]:
 
 
 def _to_payload(user_id: Any, tokens_bundle: Any, user: Any) -> AuthTokensPayload:
-    """Adapt a use-case result into the wire DTO."""
+    """Adapt a use-case result into the wire DTO.
+
+    α4: :class:`UserPublic` gained ``updated_at`` + ``version`` (see
+    ``schemas/users.py`` module docstring). Both are additive additions
+    to the existing register / login / refresh response bodies —
+    clients that ignored unknown fields (per JSON API best practice)
+    are unaffected. The values give the caller everything they need
+    to issue a subsequent ``PATCH /users/me`` without a preliminary
+    ``GET /users/me`` round-trip.
+    """
     return AuthTokensPayload(
         user=UserPublic(
             id=user.id,
@@ -66,6 +75,8 @@ def _to_payload(user_id: Any, tokens_bundle: Any, user: Any) -> AuthTokensPayloa
             display_name=user.display_name,
             email_verified_at=user.email_verified_at,
             created_at=user.created_at,
+            updated_at=user.updated_at,
+            version=user.version,
         ),
         access_token=tokens_bundle.access_token,
         refresh_token=tokens_bundle.refresh_token,

@@ -53,5 +53,11 @@ async def get_me(request: Request, current_user: CurrentUserDep) -> JSONResponse
         display_name=current_user.display_name,
         email_verified_at=current_user.email_verified_at,
         created_at=current_user.created_at,
+        # α4 additions to UserPublic — see schemas/users.py module
+        # docstring. `version` gives the client its next-PATCH fence
+        # without a separate round-trip; `updated_at` lets the client
+        # implement "last modified" UX.
+        updated_at=current_user.updated_at,
+        version=current_user.version,
     )
     return JSONResponse(content=_envelope(payload, request))

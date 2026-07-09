@@ -120,11 +120,21 @@ async def test_me_happy_path_returns_public_projection(client: AsyncClient) -> N
     data = body["data"]
     assert data == reg["user"]
 
-    # Sensitive-field non-leak (H2).
+    # Sensitive-field non-leak (H2). ``password_hash`` and
+    # ``last_login_at`` remain internal per ``schemas/users.py`` module
+    # docstring — the former is a secret, the latter an internal audit
+    # signal not part of the public identity projection.
     assert "password_hash" not in data
     assert "last_login_at" not in data
-    assert "updated_at" not in data
-    assert "version" not in data
+
+    # α4 additions to :class:`UserPublic`: ``version`` and
+    # ``updated_at`` are now exposed so clients can round-trip the
+    # optimistic-concurrency fence with ``PATCH /users/me`` (§D5, §Q1)
+    # and drive "last modified" UX (§A12). Type checks — the exact
+    # values are asserted in H15+ (happy-path PATCH) and by the
+    # ``data == reg["user"]`` cross-endpoint equality above.
+    assert isinstance(data["version"], int) and data["version"] >= 1
+    assert isinstance(data["updated_at"], str) and data["updated_at"]
 
 
 # ---- H3–H6 — malformed / missing bearer -------------------------------
