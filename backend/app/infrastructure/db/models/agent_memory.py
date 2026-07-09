@@ -22,8 +22,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 try:
     from pgvector.sqlalchemy import Vector
-except ImportError:  # pragma: no cover
-    Vector = None
+except ImportError:  # pragma: no cover — guarded for environments without pgvector installed
+    # See media.py for the rationale — mypy resolves ``Vector`` as a real type
+    # from pgvector>=0.5, so the None fallback needs a narrow ignore.
+    Vector = None  # type: ignore[assignment,misc]
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
