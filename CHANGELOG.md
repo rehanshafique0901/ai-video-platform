@@ -76,6 +76,54 @@ mutable field is `display_name`.
   `users.version` moves only when a persisted field actually changes —
   never on auth, reads, identical PATCHes, or failed mutations.
 
+### Phase 3 Slice α3 — Authenticated-request seam + `GET /users/me` (2026-07-09)
+
+The read-path foundation for every authenticated endpoint, and the
+predecessor to α4's write path. Introduces the `get_current_user`
+dependency that resolves a bearer access token into a live `User` domain
+entity, and proves the seam end-to-end with the first authenticated
+business endpoint, `GET /api/v1/users/me`. **No migration** —
+application-layer only.
+
+#### Added
+- **`get_current_user` dependency + `CurrentUserDep` alias**
+  (`app/api/v1/deps.py`) — resolves `Authorization: Bearer <access>` →
+  `User`. Strict verification (`allow_expired=False`), sid-driven
+  session-liveness check, soft-delete-aware user lookup. Emits an
+  anti-enumeration 401 with a single generic message for every failure
+  mode; the server-side structured log carries the specific reason.
+- **`GET /api/v1/users/me`** (`app/api/v1/routers/users.py`, a new router
+  registered under the `/api/v1` prefix) — returns `UserPublic` for the
+  authenticated caller. The first endpoint to consume `CurrentUserDep`.
+- **`ISessionRepository.get_by_id`** — sid → session read used by the
+  dependency for the session-liveness check (the one port-surface
+  addition α3 introduces).
+- **`app/api/v1/schemas/users.py`** — new schema module re-exporting
+  `UserPublic` so the users router does not import an auth-named module.
+- **Structured-log events** — `auth.request.authenticated` (INFO, happy
+  path) and `auth.request.rejected` (WARN, `reason=` field, with the
+  `security_event` flag on tamper-flavoured reasons).
+- **Tests** — unit coverage for `get_current_user` (every rejection
+  branch) and HTTP integration for `GET /users/me` (200 happy path + the
+  401 surfaces).
+- **`docs/engineering/AUTH_TOKEN_LIFECYCLE.md` §3.5** — authenticated-request
+  path appendix (`bearer → verify_access → session-liveness →
+  user-liveness → User`).
+
+#### Changed
+- Version bumped to `0.4.3-phase3-alpha3` in `app/main.py`.
+- **`docs/engineering/RUNBOOK_WAVE.md` §7.5** — "no file-sync-hosted
+  repositories" codified after the OneDrive → `C:\dev\ai-video-platform`
+  migration (2026-07-09).
+- **`ROADMAP.md`** — Phase 3 row updated with the α3 status line.
+
+#### Fixed
+- **`render_jobs.progress` type-hint drift** (`chore(orm)`, PR #12, merge
+  `d30fb3a`) — the ORM annotation was `Mapped[float]` while the column is
+  `text`; corrected to `Mapped[str]` to match what SQLAlchemy actually
+  loads. Carried as a debt from the α2 trilogy and closed here in its own
+  dedicated PR. No migration.
+
 ### Phase 3 Slice α2b — Auth (refresh + logout) (2026-07-01)
 
 Completes the authentication lifecycle started in α2a. Adds refresh
