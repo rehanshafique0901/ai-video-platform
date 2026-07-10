@@ -434,12 +434,15 @@ config). α3 does not need to fix anything from this trilogy to proceed.
 
 ### 8.2 Cosmetic / quality-of-life
 * **`chore(orm) render_jobs.progress`** type-hint drift
-  (`Mapped[float]` vs actual `Mapped[str]`). Small dedicated PR,
-  no migration.
-* **Move repo out of OneDrive** to `C:\dev\ai-video-platform` or
-  similar. Not urgent, but the `.git`-deletion prompts during branch
-  cleanup are a leading indicator of future corruption. Do it at the
-  natural pause after the ORM chore, before α3 branch is cut.
+  (`Mapped[float]` → correct `Mapped[str]`). **Resolved** in PR #12
+  (`f555a7e`, merge `d30fb3a`) during the α3 window — a small dedicated
+  PR, no migration. `jobs.py` now annotates `progress: Mapped[str]` to
+  match the `text` column, with an inline comment recording the prior
+  drift bug.
+* **Move repo out of OneDrive** — **Resolved** 2026-07-09: migrated to
+  `C:\dev\ai-video-platform`. Codified as a permanent workflow rule in
+  `RUNBOOK_WAVE.md` §7.5 ("no file-sync-hosted repositories"). The
+  `.git`-deletion prompts that motivated it no longer occur.
 * **Pytest-asyncio deprecation warning** (§5.3). Leave visible until
   the day it becomes an error, then upgrade.
 * **`app.core.container` unit coverage** sits at 43% — the factory
