@@ -37,6 +37,7 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
@@ -225,3 +226,16 @@ def get_logout_session_use_case() -> LogoutSession:
         token_issuer=get_token_issuer(),
         clock=get_clock(),
     )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α4)
+# ---------------------------------------------------------------------
+
+
+def get_update_user_profile_use_case() -> UpdateUserProfile:
+    """Factory: a fresh ``UpdateUserProfile`` use case bound to a new UoW.
+
+    See pre-flight §4.1 (composition root wiring) and §12 step 8.
+    """
+    return UpdateUserProfile(uow=get_unit_of_work())

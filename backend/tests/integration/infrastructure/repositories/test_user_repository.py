@@ -5,6 +5,8 @@ that rolls back on teardown, so no rows persist. α2a extends the
 suite with the new port surface (``get_by_email`` / ``get_by_id`` /
 ``add`` / ``update_last_login``); α1 smoke tests
 (``count`` / ``exists_by_id``) are kept per the pre-flight review.
+α4 adds the version-fenced CAS (``update_profile``) that underpins
+``PATCH /users/me`` (R1–R3, see pre-flight §5.2).
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError
@@ -227,3 +229,124 @@ async def test_update_last_login_sets_column(session: AsyncSession) -> None:
         await session.execute(select(User.last_login_at).where(User.id == entity.id))
     ).scalar_one()
     assert persisted_last is not None
+
+
+# ---- α4 additions — update_profile version-fenced CAS (R1–R3) ---------
+#
+# These exercise the compare-and-swap that underpins PATCH /users/me
+# (pre-flight §5.2), directly through the ORM ``session`` fixture for a
+# focused failure signal. The full-stack path is covered by
+# ``test_users_me.py`` H15–H24. Trigger interactions:
+#   * touch_updated_at fires on real UPDATEs but uses now() =
+#     transaction_timestamp(), constant within the SAVEPOINT fixture's
+#     transaction — so R1 asserts ``updated_at`` presence, not strict
+#     ordering (same weakening as the HTTP-layer H15).
+#   * bump_version fires only ``IF NEW.version = OLD.version``; the CAS
+#     sets ``NEW.version = OLD.version + 1`` explicitly, so the trigger
+#     skips (no double bump). R1's ``version == 2`` assertion also
+#     proves this.
+
+
+async def _seed_user_for_update(
+    session: AsyncSession, display_name: str = "Original"
+) -> UserEntity:
+    """Persist a fresh user via ``repo.add`` and return the DB-populated entity.
+
+    Reuses :func:`_seed_tenant` for the parent tenant. The returned
+    entity carries the DB-generated ``created_at`` / ``updated_at`` /
+    ``version`` (1) so the CAS fence has a real starting version.
+    """
+    tenant_id = await _seed_tenant(session)
+    repo = UserRepository(session)
+    now = datetime.now(UTC)
+    entity = UserEntity(
+        id=uuid4(),
+        tenant_id=tenant_id,
+        email=f"upd-{uuid4()}@example.com",
+        password_hash="$argon2id$fake",
+        display_name=display_name,
+        email_verified_at=None,
+        last_login_at=None,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    return await repo.add(entity)
+
+
+@pytest.mark.integration
+async def test_r1_update_profile_happy_path_bumps_version(session: AsyncSession) -> None:
+    """R1: real row shows the new ``display_name`` and ``version+1``
+    after a successful CAS; a fresh ``get_by_id`` confirms the mutation
+    is persisted (not just returned by ``RETURNING``); ``version == 2``
+    proves the ``bump_version`` trigger did not double-bump."""
+    seeded = await _seed_user_for_update(session, display_name="Original")
+    assert seeded.version == 1
+
+    repo = UserRepository(session)
+    updated = await repo.update_profile(
+        user_id=seeded.id,
+        expected_version=1,
+        display_name="Updated",
+    )
+
+    assert updated is not None
+    assert updated.id == seeded.id
+    assert updated.display_name == "Updated"
+    assert updated.version == 2, (
+        "expected version=2 after a single CAS; version>2 would mean the "
+        "bump_version trigger double-bumped after the application-side +1"
+    )
+    assert updated.updated_at is not None  # presence, not strict ordering — see header
+
+    fetched = await repo.get_by_id(seeded.id)
+    assert fetched is not None
+    assert fetched.display_name == "Updated"
+    assert fetched.version == 2
+
+
+@pytest.mark.integration
+async def test_r2_update_profile_version_mismatch_returns_none(session: AsyncSession) -> None:
+    """R2: a stale ``expected_version`` yields ``None`` (the caller then
+    raises ``VersionConflictError`` → 412). The row is exactly the
+    pre-call state — no partial write, no silent bump."""
+    seeded = await _seed_user_for_update(session, display_name="Untouched")
+
+    repo = UserRepository(session)
+    result = await repo.update_profile(
+        user_id=seeded.id,
+        expected_version=99,  # real version is 1
+        display_name="Would-Be Change",
+    )
+    assert result is None
+
+    fetched = await repo.get_by_id(seeded.id)
+    assert fetched is not None
+    assert fetched.display_name == "Untouched"
+    assert fetched.version == 1
+
+
+@pytest.mark.integration
+async def test_r3_update_profile_on_soft_deleted_row_returns_none(session: AsyncSession) -> None:
+    """R3: a soft-deleted row (``deleted_at IS NOT NULL``) is not
+    updateable even with the correct version — the ``deleted_at IS NULL``
+    filter on the fetch + UPDATE guarantees this. Upstream this collapses
+    to 412 ``VERSION_CONFLICT``, indistinguishable from a stale-version
+    race (A10, anti-enumeration)."""
+    seeded = await _seed_user_for_update(session, display_name="AboutToBeDeleted")
+
+    # Soft-delete directly via ORM — UserRepository has no delete method
+    # in α4; this keeps the test focused on update_profile's behaviour
+    # against an already-soft-deleted row.
+    await session.execute(
+        update(User).where(User.id == seeded.id).values(deleted_at=datetime.now(UTC))
+    )
+    await session.flush()
+
+    repo = UserRepository(session)
+    result = await repo.update_profile(
+        user_id=seeded.id,
+        expected_version=1,
+        display_name="Change Attempt",
+    )
+    assert result is None

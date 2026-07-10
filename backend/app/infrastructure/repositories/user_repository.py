@@ -2,6 +2,10 @@
 
 α1 shipped ``count`` + ``exists_by_id`` (kept per the α2a review).
 α2a adds ``get_by_email``, ``get_by_id``, ``add``, ``update_last_login``.
+α4 adds ``update_profile`` — the version-fenced targeted mutation
+underpinning ``PATCH /users/me``. Its CAS-on-``version`` shape is the
+canonical example future versioned-aggregate writes (see α4 pre-flight
+§10) follow.
 
 All queries filter ``deleted_at IS NULL`` — soft-deleted rows never
 surface. ``add`` maps the frozen domain ``User`` into an ORM row and
@@ -95,6 +99,67 @@ class UserRepository(IUserRepository):
             .values(last_login_at=at)
         )
         await self._session.execute(stmt)
+
+    # ---- α4 additions --------------------------------------------------
+
+    async def update_profile(
+        self,
+        user_id: UUID,
+        expected_version: int,
+        display_name: str,
+    ) -> UserEntity | None:
+        # Step 1 — version-fenced fetch. If no live row matches BOTH
+        # the user_id AND the expected_version, we return None without
+        # a write. Per α4 §A10 the "not found" and "version mismatch"
+        # outcomes are deliberately indistinguishable here (both
+        # surface as 412 VERSION_CONFLICT at the API boundary).
+        fetch = (
+            select(UserRow)
+            .where(UserRow.id == user_id)
+            .where(UserRow.version == expected_version)
+            .where(UserRow.deleted_at.is_(None))
+        )
+        row = (await self._session.execute(fetch)).scalar_one_or_none()
+        if row is None:
+            return None
+
+        # Step 2 — same-value no-op (α4 §D8 + §D6a). The row exists,
+        # the version matches, but ``display_name`` already equals the
+        # target value. Return the unchanged entity — no UPDATE, no
+        # version bump, no ``updated_at`` bump, no dirty replication
+        # log. The wire response looks identical to a real change;
+        # only the server-side structured log distinguishes the two.
+        if row.display_name == display_name:
+            return _row_to_entity(row)
+
+        # Step 3 — real change. The CAS filter (``version = :expected``)
+        # in the WHERE clause is what guarantees atomicity: if a
+        # concurrent writer bumped the version between step 1 and
+        # step 3, ``RETURNING`` yields zero rows and we return None.
+        # The row lock granted by UPDATE plus MVCC snapshot
+        # re-evaluation is sufficient — no explicit ``FOR UPDATE``
+        # needed for this low-contention aggregate. If contention
+        # ever becomes real (admin edits, batch operations), add
+        # ``.with_for_update()`` to the step-1 fetch.
+        #
+        # ``RETURNING(UserRow)`` (Postgres) delivers the post-UPDATE
+        # row in the same round-trip, so we observe the incremented
+        # ``version`` and server-side ``updated_at`` (from
+        # ``func.now()``) without a follow-up SELECT.
+        upd = (
+            update(UserRow)
+            .where(UserRow.id == user_id)
+            .where(UserRow.version == expected_version)
+            .where(UserRow.deleted_at.is_(None))
+            .values(
+                display_name=display_name,
+                version=UserRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(UserRow)
+        )
+        updated_row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _row_to_entity(updated_row) if updated_row is not None else None
 
 
 def _row_to_entity(row: UserRow) -> UserEntity:

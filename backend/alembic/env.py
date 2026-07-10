@@ -11,9 +11,9 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from app.infrastructure.db import models  # noqa: F401  - registers every model
 from app.infrastructure.db.base import metadata as target_metadata
 
@@ -29,16 +29,12 @@ if DATABASE_URL:
     config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 
-def include_object(obj, name, type_, reflected, compare_to):  # noqa: ANN001
+def include_object(obj, name, type_, reflected, compare_to):
     """Skip Postgres partition children from autogenerate (handled manually)."""
-    if type_ == "table" and name.startswith((
-        "usage_records_y",
-        "analytics_events_y",
-        "event_log_y",
-        "audit_log_y",
-    )):
-        return False
-    return True
+    return not (
+        type_ == "table"
+        and name.startswith(("usage_records_y", "analytics_events_y", "event_log_y", "audit_log_y"))
+    )
 
 
 def run_migrations_offline() -> None:

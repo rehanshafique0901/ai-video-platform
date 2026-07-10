@@ -38,6 +38,7 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core import container
 from app.core.errors import UnauthorizedError
 from app.domain.identity.user import User
@@ -73,6 +74,12 @@ LoginUserDep = Annotated[LoginUser, Depends(container.get_login_user_use_case)]
 
 RefreshSessionDep = Annotated[RefreshSession, Depends(container.get_refresh_session_use_case)]
 LogoutSessionDep = Annotated[LogoutSession, Depends(container.get_logout_session_use_case)]
+
+# ---- Use-case dependencies (Slice α4) ---------------------------------
+
+UpdateUserProfileDep = Annotated[
+    UpdateUserProfile, Depends(container.get_update_user_profile_use_case)
+]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:
