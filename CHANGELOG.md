@@ -6,6 +6,76 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α4 — Authenticated profile update (`PATCH /users/me`) (2026-07-10)
+
+The first authenticated **mutation**, and the write-path counterpart to
+α3's read-path `CurrentUserDep` pattern. Establishes the canonical
+authenticated mutation flow — `CurrentUserDep` → DTO validation →
+optimistic-concurrency check → domain mutation → versioned repository
+CAS → updated representation — that every future write endpoint copies.
+**No migration** (the `users.version` column and its `bump_version` /
+`touch_updated_at` triggers already exist from α1). In α4 the only
+mutable field is `display_name`.
+
+#### Added
+- **`IUserRepository.update_profile(user_id, expected_version, display_name)`**
+  — a targeted, version-fenced mutation. The concrete `UserRepository`
+  implementation runs a SQL compare-and-swap
+  (`UPDATE … WHERE id = ? AND version = ? AND deleted_at IS NULL …
+  RETURNING`) so optimistic-concurrency violations are detected
+  atomically at the DB layer (no TOCTOU). A same-value target
+  short-circuits before any `UPDATE` — no write, no `version` bump, no
+  `updated_at` bump. Returns the updated entity on change, the unchanged
+  entity on a no-op, and `None` on a version mismatch or a soft-deleted
+  row (the two collapse deliberately — anti-enumeration).
+- **`UpdateUserProfile` use case** (`app/application/use_cases/users/`,
+  a new user-management package distinct from `auth/`) — orchestrates
+  the update, distinguishes real change from same-value no-op by
+  comparing the returned version, raises `VersionConflictError` when the
+  repository returns `None`, and emits the audit log. Field **names**
+  only in logs, never submitted values.
+- **`VersionConflictError`** (`app/core/errors.py`) — `ApplicationError`
+  subclass, `code = "VERSION_CONFLICT"`, HTTP 412. Rendered by the
+  existing centralized exception handler.
+- **`UpdateUserProfileRequest` DTO** (`app/api/v1/schemas/users.py`) —
+  `extra="forbid"`, required `display_name` (1–200, whitespace-stripped,
+  non-null), required `version` (≥ 1). This is the 422 rejection
+  surface.
+- **`PATCH /api/v1/users/me`** endpoint (`app/api/v1/routers/users.py`)
+  — the canonical mutation reference. 200 with the updated `UserPublic`
+  on success (never 204); 412 `VERSION_CONFLICT` on a stale fence; 422
+  on body validation; 401 on any α3 auth-rejection branch. Container
+  factory `get_update_user_profile_use_case` + `UpdateUserProfileDep`
+  wire it through the composition root; a shared `_to_public` helper
+  projects the domain `User` for both `GET` and `PATCH`.
+- **Structured-log events** — `user.profile.updated` (INFO:
+  `changed_fields`, `previous_version`, `new_version`) and
+  `user.profile.update_rejected` (WARN for `version_mismatch`, INFO for
+  `same_value_noop`).
+- **Tests** — 8 unit tests for `UpdateUserProfile`
+  (`tests/unit/application/use_cases/users/test_update_profile.py`),
+  10 HTTP integration tests (H15–H24 in `test_users_me.py`) covering the
+  happy path, 401/412/422 surfaces, same-value no-op, PATCH→GET
+  round-trip, and a sequential-CAS race, and 3 repository integration
+  tests (R1–R3 appended to `test_user_repository.py`) for the CAS happy
+  path, version mismatch, and soft-deleted-row guard.
+- **`docs/api/AUTH_ENDPOINTS.md`** — new §7.1 (`PATCH /users/me`) and §9
+  (Canonical Authenticated Mutation Flow); §7 `UserPublic` example
+  updated to show `version` + `updated_at`.
+
+#### Changed
+- **`UserPublic`** (`app/api/v1/schemas/users.py`) gains `version: int`
+  and `updated_at: datetime`. Additive — every response returning a
+  `UserPublic` (register, login, refresh, `GET /me`, `PATCH /me`) now
+  carries both. `version` is the optimistic-concurrency fence clients
+  round-trip with `PATCH /me`; `updated_at` supports "last modified" UX.
+  `routers/auth.py::_to_payload` and `routers/users.py::get_me` updated
+  to populate them.
+- Version bumped to `0.4.4-phase3-alpha4-dev` in `app/main.py`.
+- **Version-increment invariant** established project-wide:
+  `users.version` moves only when a persisted field actually changes —
+  never on auth, reads, identical PATCHes, or failed mutations.
+
 ### Phase 3 Slice α2b — Auth (refresh + logout) (2026-07-01)
 
 Completes the authentication lifecycle started in α2a. Adds refresh
