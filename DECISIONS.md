@@ -338,6 +338,14 @@ The runner is implemented in Python (`ci_gate.py`) so a developer's local invoca
 
 ---
 
+## ADR-0034 — Authenticated Endpoint Pattern (`CurrentUserDep` + Optimistic-Concurrency Mutation)
+
+**Status:** Proposed (Phase 3, α3–α4; flips to Accepted on merge of the ADR PR). Documents patterns already shipped in α3 (PR #13/#14, merge `02185cf`) and α4 (PR #15, merge `1462307`).
+**File:** [`docs/decisions/ADR-0034-authenticated-endpoint-pattern.md`](docs/decisions/ADR-0034-authenticated-endpoint-pattern.md)
+**Summary:** Promotes two coupled application-layer patterns from "implemented convention" to recorded decision. **D1 — Authentication seam:** every authenticated endpoint resolves the caller through exactly one FastAPI dependency, `get_current_user` / `CurrentUserDep` (verify bearer access token → sid session-liveness → soft-delete-aware user hydrate → domain `User`), with an anti-enumeration 401 for every failure mode; endpoints MUST NOT parse JWTs or touch `ITokenIssuer` / `ISessionRepository` for auth (`GET /users/me` is the canonical read). **D2 — Authenticated mutation:** the canonical flow `CurrentUserDep → DTO validation (extra="forbid") → optimistic-concurrency check → use case → versioned repository CAS → updated representation`, where the client-supplied `version` is a required optimistic-concurrency fence, the repository update is a single DB-level compare-and-swap (`UPDATE … WHERE id = ? AND version = ? AND deleted_at IS NULL … RETURNING`, no TOCTOU), a stale `version` or soft-deleted row both collapse to `412 VERSION_CONFLICT` (anti-enumeration), a same-value write short-circuits before any write, and the project-wide **version-increment invariant** holds (`version` moves only when a persisted field actually changes). `PATCH /users/me` is the canonical mutation reference. First application-layer (non-migration) ADR stored as a standalone file. See the ADR file for full Context, Decision (D1 + D2), 7 Alternatives Considered, Consequences, Pattern Reference, and Future Extensions.
+
+---
+
 ## Decisions Log Format (for future entries)
 
 ```
