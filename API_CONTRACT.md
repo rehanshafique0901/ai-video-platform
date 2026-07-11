@@ -52,7 +52,7 @@ Error:
 | Users | `/users/me`, `/users/{id}` (admin) |
 | Projects | `/projects`, `/projects/{id}` |
 | Project Versions (CR-6) | `/projects/{id}/versions`, `/projects/{id}/versions/{version_id}` |
-| Scenes | `/projects/{id}/scenes`, `/scenes/{id}` |
+| Scenes | `/projects/{id}/scenes`, `/projects/{id}/scenes/{scene_id}`, `/projects/{id}/scenes/{scene_id}/move` |
 | Prompts | `/projects/{id}/prompts`, `/prompts/{id}` |
 | AI — Script | `/ai/script` |
 | AI — Storyboard | `/ai/storyboard` |
@@ -166,6 +166,63 @@ POST   /projects/{id}/autosave         explicit autosave snapshot
 > `?folder_id` / `?tag` / `?query` list filters remain deferred to later
 > slices. `ProjectPublic` omits `current_version_id` and `duration_seconds`
 > (managed by later slices). See `docs/domain/PROJECT_AGGREGATE.md`.
+
+#### 3.2.1 Scenes (Phase 3 α5c)
+
+```
+POST   /projects/{project_id}/scenes                 create (append)
+GET    /projects/{project_id}/scenes                 list (ordered, un-paginated)
+GET    /projects/{project_id}/scenes/{scene_id}
+PATCH  /projects/{project_id}/scenes/{scene_id}      partial, version-fenced content update
+POST   /projects/{project_id}/scenes/{scene_id}/move version-fenced reorder
+DELETE /projects/{project_id}/scenes/{scene_id}      soft delete
+```
+
+> **Shipped in Phase 3 α5c (Scene CRUD + reorder).** Scenes are nested
+> under a project; the physical `Project → Storyboard → Scene` hierarchy is
+> hidden — a single **implicit default storyboard** is auto-created on the
+> first scene, so `storyboard_id` never appears on the wire. All six
+> endpoints are authenticated (`CurrentUserDep`) and run a **two-level
+> visibility gate**: the caller must own the live project (else uniform
+> `404 NOT_FOUND`), then the scene must live under it (else the same `404`).
+> `ScenePublic` exposes a dense 1-based `position` (computed server-side)
+> and **omits** both `storyboard_id` and the raw sparse ordering key
+> `scene_number` (internal detail).
+>
+> * **`POST …/scenes`** — body `{ title, duration_seconds, narration?,
+>   subtitle? }`; ordering/identity are server-owned (`extra="forbid"` →
+>   `422`; `duration_seconds > 0`). Always **appends** at the end (`201`,
+>   `version=1`, `position` = last). Repositioning is `…/move`, never create.
+> * **`GET …/scenes`** — returns the project's live scenes ordered by
+>   `position` ascending. **Not paginated** (a project's scene set is a
+>   bounded editorial list). Read-only: a project with no scenes yet returns
+>   `[]` and creates no storyboard.
+> * **`GET …/scenes/{scene_id}`** — one scene (`200`), or the uniform `404`.
+> * **`PATCH …/scenes/{scene_id}`** — partial, version-fenced, **content
+>   only** (`title` / `duration_seconds` / `narration` / `subtitle`). Body:
+>   a required `version` fence plus any subset of those fields. Tri-state:
+>   absent = unchanged; explicit `null` clears a nullable field
+>   (`narration` / `subtitle`); a value sets it (`title` /
+>   `duration_seconds` are non-nullable → explicit `null` is `422`). An
+>   empty patch (only `version`) is `422`; `position` is **not** accepted
+>   here (`extra="forbid"` → `422`). On a real change `version` increments
+>   by exactly 1; a same-value patch is a `200` no-op. **404-before-412**:
+>   a stale `version` on a visible scene is `412 VERSION_CONFLICT`.
+> * **`POST …/scenes/{scene_id}/move`** — a dedicated, version-fenced
+>   reorder. Body `{ version, position }` (1-based). `position` is clamped
+>   into `[1, N]`; a move to the current slot is a `200` no-op. `412` on a
+>   stale `version` (including a concurrent content PATCH). Ordering uses a
+>   sparse gap key with a transparent full rebalance when a gap is exhausted.
+> * **`DELETE …/scenes/{scene_id}`** — owner-scoped **soft** delete (`204`),
+>   no version fence, idempotent **by-404** (a second delete — and any
+>   `GET`/`PATCH`/`move` after delete — is `404`; deleting another user's
+>   scene or an unknown id is the same `404`).
+>
+> Scene identity (`id`) is a **durable UUID, stable across future Version
+> restores** (a snapshot captures scene content keyed by the existing `id`;
+> restore re-materialises under the same `id`, never minting new ones).
+> Richer per-scene aggregates (prompt, voice, camera, assets) are deferred.
+> See `docs/domain/SCENE_AGGREGATE.md`.
 
 ### 3.3 Project Versions (CR-6)
 

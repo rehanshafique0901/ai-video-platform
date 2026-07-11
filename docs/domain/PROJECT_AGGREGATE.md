@@ -117,7 +117,18 @@ These are **not** embedded in the Project row and are **not** mutated
 through Project CRUD — each is its own aggregate reached by its own
 endpoints:
 
-- **Scenes** (`scenes.project_id`) — the shot list.
+- **Storyboards** (`storyboards.project_id`, `ON DELETE CASCADE`) — a
+  generated shot list. A project owns **one auto-created default
+  storyboard** today and may own several once regeneration lands. Carries
+  generation provenance (`generated_by`, `generated_at`).
+- **Scenes** (`scenes.storyboard_id`, `ON DELETE CASCADE`) — the ordered
+  shot list *inside a storyboard*, **not** a direct child of the project
+  row. The α5c public API presents scenes under the project
+  (`/projects/{id}/scenes`) by resolving them through the project's
+  default storyboard; the storyboard stays implicit until multi-storyboard
+  regeneration is a feature. (Schema fact corrected 2026-07-11: earlier
+  revisions of this doc wrongly listed `scenes.project_id` — the ORM has
+  always keyed Scene to `storyboard_id`.)
 - **Prompts** (`prompts.*`) — generation inputs.
 - **Media assets** (`media_assets.project_id`) — rendered/uploaded media.
 - **Render jobs** (`render_jobs.project_id`) — render lifecycle.
@@ -231,15 +242,25 @@ ledger will itself be a mutation that bumps the row `version`.
 
 ```
 Project (root)
- ├── Scenes            scenes.project_id                (Phase 6 / later slice)
- ├── Prompts           prompts.*                        (later slice)
- ├── Media Assets      media_assets.project_id          (α6 candidate)
- ├── Render Jobs       render_jobs.project_id           (α7 candidate)
- ├── Timeline          (project-scoped)                 (Phase 7)
- ├── Versions          project_versions.project_id      (CR-6 slice)
- ├── Tags              project_tags (join)              (α5b+)
- └── Folder (parent)   folders.id  ← projects.folder_id (α5b move-to-folder)
+ ├── Storyboards       storyboards.project_id           (α5c; one default auto-created)
+ │     └── Scenes      scenes.storyboard_id             (α5c — ordered by scene_number)
+ │            └── Prompts   prompts.* (scene-scoped)    (α5d)
+ ├── Media Assets      media_assets.project_id          (α6) ← generated *from* scenes
+ ├── Timeline          timelines.project_id (1:1)       (α6b) → Tracks → Clips → media_assets
+ ├── Render Jobs       render_jobs.project_id           (α7)
+ ├── Versions          project_versions.project_id      (later — snapshots storyboard+scenes)
+ ├── Tags              project_tags (join)              (later)
+ └── Folder (parent)   folders.id  ← projects.folder_id (later move-to-folder)
 ```
+
+> **Media pipeline direction (baseline schema fact).** The `Timeline`
+> does **not** own scenes. Scenes generate **Media Assets**
+> (`media_assets`), assets are placed as **Clips** on **Tracks** inside the
+> `Timeline` (`clips.media_asset_id`, `ON DELETE SET NULL`). The chain is
+> `Scene → Media Asset → Clip → Timeline`, so scene ordering
+> (`scene_number`) lives with the storyboard/scene, never with the
+> timeline. This keeps rendering downstream of, and decoupled from, the
+> editorial shot list.
 
 Each child arrives in its own slice and reuses the same ownership +
 tenant-scoping + anti-enumeration rules defined here. When a child slice
@@ -254,3 +275,4 @@ model.
 |---|---|
 | 2026-07-11 | Initial authoring ahead of Phase 3 α5a (create + read). Sections 4/5/6 mark α5b+ behaviour as designed-not-shipped. |
 | 2026-07-11 | Added §2.1 (identity & addressing — no slug; documented future slug policy) per α5a reviewer sign-off (pre-flight D15). |
+| 2026-07-11 | **Corrected child-aggregate drift ahead of α5c (Scenes):** the boundary now reads *Project owns Storyboards, Storyboard owns Scenes* (`scenes.storyboard_id`, not the previously-listed `scenes.project_id`). §8 diagram redrawn with the `Project → Storyboard → Scene` hierarchy and the `Scene → Media Asset → Clip → Timeline` media-pipeline direction. See `docs/domain/SCENE_AGGREGATE.md` and `docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md` (D1/D4). |

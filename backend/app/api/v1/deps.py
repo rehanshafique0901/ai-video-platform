@@ -44,6 +44,12 @@ from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
 from app.application.use_cases.projects.list_projects import ListProjects
 from app.application.use_cases.projects.update_project import UpdateProject
+from app.application.use_cases.scenes.create_scene import CreateScene
+from app.application.use_cases.scenes.delete_scene import DeleteScene
+from app.application.use_cases.scenes.get_scene import GetScene
+from app.application.use_cases.scenes.list_scenes import ListScenes
+from app.application.use_cases.scenes.move_scene import MoveScene
+from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core import container
 from app.core.errors import UnauthorizedError
@@ -94,6 +100,15 @@ GetProjectDep = Annotated[GetProject, Depends(container.get_get_project_use_case
 ListProjectsDep = Annotated[ListProjects, Depends(container.get_list_projects_use_case)]
 UpdateProjectDep = Annotated[UpdateProject, Depends(container.get_update_project_use_case)]
 DeleteProjectDep = Annotated[DeleteProject, Depends(container.get_delete_project_use_case)]
+
+# ---- Use-case dependencies (Slice α5c — Scenes) -----------------------
+
+CreateSceneDep = Annotated[CreateScene, Depends(container.get_create_scene_use_case)]
+ListScenesDep = Annotated[ListScenes, Depends(container.get_list_scenes_use_case)]
+GetSceneDep = Annotated[GetScene, Depends(container.get_get_scene_use_case)]
+UpdateSceneDep = Annotated[UpdateScene, Depends(container.get_update_scene_use_case)]
+MoveSceneDep = Annotated[MoveScene, Depends(container.get_move_scene_use_case)]
+DeleteSceneDep = Annotated[DeleteScene, Depends(container.get_delete_scene_use_case)]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

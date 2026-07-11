@@ -6,6 +6,76 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5c — Scenes (create / list / get / patch / move / soft-delete) (2026-07-11)
+
+Establishes the **Scene** aggregate — the first child aggregate under a
+project and the first real content-editing workflow. Keeps the α1 baseline
+`Project → Storyboard → Scene` schema but hides the intermediary: a single
+**implicit default storyboard** is auto-created on the first scene, so the
+public API is a flat `…/projects/{id}/scenes` surface (storyboard never on
+the wire). Introduces two patterns reused by every future nested resource:
+the **two-level visibility gate** (project ownership → scene visibility,
+both → uniform `404`) and **project-row-locked ordering** (sparse gap-based
+`scene_number` with a transparent full rebalance). See
+`docs/domain/SCENE_AGGREGATE.md` and
+`docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/scenes`** (`CurrentUserDep`) —
+  append a scene (`201`, `version=1`, `position`=last). Body `{ title,
+  duration_seconds, narration?, subtitle? }` (`extra="forbid"`;
+  `duration_seconds > 0`). Auto-creates the default storyboard on the first
+  scene (emits `storyboard.default_created`). `404` if the project is
+  missing / not the caller's.
+- **`GET /api/v1/projects/{project_id}/scenes`** — the project's live
+  scenes ordered by `position` ascending, **un-paginated** (bounded
+  editorial list). Read-only: no storyboard is created for an empty project
+  (`data: []`). `404` on an unowned project.
+- **`GET …/scenes/{scene_id}`** — one scene (`200`) or the uniform `404`
+  (two-level gate). `ScenePublic` exposes a dense 1-based `position` and
+  omits `storyboard_id` + the raw `scene_number`.
+- **`PATCH …/scenes/{scene_id}`** — partial, version-fenced, **content
+  only** (`title` / `duration_seconds` / `narration` / `subtitle`).
+  Tri-state via `SceneUpdateRequest` (`extra="forbid"`, required
+  `version`). `200` (real change → `version` +1; same-value → no-op);
+  `404` (404-before-412); `412 VERSION_CONFLICT`; `422` (empty patch,
+  forbidden `position`, non-nullable `null`, missing version).
+- **`POST …/scenes/{scene_id}/move`** — dedicated version-fenced reorder.
+  Body `{ version, position }` (1-based, clamped to `[1, N]`; current-slot
+  = `200` no-op). `412` on stale version / concurrent content bump.
+- **`DELETE …/scenes/{scene_id}`** — owner-scoped soft delete (`204`, no
+  version fence), idempotent-by-404.
+- **`Scene` domain entity** (`app/domain/scenes/scene.py`) — frozen slim
+  projection of the fat `scenes` table (defers cinematography columns).
+- **`ISceneRepository` + `SceneRepository`** — `ensure_default_storyboard`
+  (get-or-create under a `SELECT … FOR UPDATE` project-row lock),
+  gap-based `add` (`max + 1000`), `list_by_project`, `get_owned_scene`,
+  version-fenced `update_owned` CAS (hand-set `+1` over the guarded
+  trigger → net +1), `soft_delete_owned`, and `reorder_owned` (gap
+  midpoint with a two-phase full rebalance when a gap is exhausted).
+  Extended on the unit-test `FakeSceneRepository` and the integration
+  `_TestUnitOfWork`.
+- **Six use cases** (`CreateScene` / `ListScenes` / `GetScene` /
+  `UpdateScene` / `MoveScene` / `DeleteScene`) — all run the two-level gate;
+  `UpdateScene` is fetch-then-fence with same-value no-op detection.
+- **DTOs** `SceneCreateRequest` / `ScenePublic` / `SceneUpdateRequest` /
+  `SceneMoveRequest`; router `app/api/v1/routers/scenes.py` mounted at
+  `/api/v1`; container factories + `deps` aliases; `.scenes` on the UoW.
+- **Tests** — 23 use-case unit tests (`tests/unit/.../scenes/`), 11
+  `SceneRepository` integration tests (incl. the load-bearing +1
+  anti-double-bump and the reorder rebalance path), and 22 HTTP
+  integration tests (`tests/integration/api/test_scenes.py`).
+
+#### Documentation
+- `API_CONTRACT.md` §3.2.1 (Scenes) + Resource Map updated to the nested
+  scene routes.
+- New `docs/domain/SCENE_AGGREGATE.md` and
+  `docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md`; `PROJECT_AGGREGATE.md`
+  corrected to `Project owns Storyboards, Storyboard owns Scenes`.
+
+#### Version
+- `0.4.7-phase3-alpha5c-dev`.
+
 ### Phase 3 Slice α5b — Projects update + soft-delete (`PATCH`/`DELETE /projects/{id}`) (2026-07-11)
 
 Completes the Project CRUD lifecycle (`create → read → update →

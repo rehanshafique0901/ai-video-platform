@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any, Self
@@ -24,6 +24,7 @@ from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
     IProjectRepository,
     IRoleRepository,
+    ISceneRepository,
     ISessionRepository,
     ITenantRepository,
     IUserRepository,
@@ -40,6 +41,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
+from app.domain.scenes.scene import Scene
 
 # ---- Password hasher --------------------------------------------------
 
@@ -170,7 +172,8 @@ class FakeUserRepository(IUserRepository):
     async def add(self, user: User) -> User:
         if user.email in self._by_email:
             raise ConflictError(
-                "user already exists", details={"constraint": "uq_users_tenant_id_email"}
+                "user already exists",
+                details={"constraint": "uq_users_tenant_id_email"},
             )
         self._rows[user.id] = user
         self._by_email[user.email] = user.id
@@ -453,6 +456,179 @@ class FakeProjectRepository(IProjectRepository):
         return True
 
 
+def _scene_gap(left: int | None, right: int | None) -> int | None:
+    """Mirror of ``scene_repository._gap`` — kept in sync for faithful unit fakes."""
+    step = 1000
+    if left is None and right is None:
+        return step
+    if left is None:
+        assert right is not None
+        candidate = right - step
+        if candidate < 1:
+            candidate = right // 2
+        if candidate < 1 or candidate >= right:
+            return None
+        return candidate
+    if right is None:
+        return left + step
+    if right - left <= 1:
+        return None
+    return (left + right) // 2
+
+
+@dataclass
+class FakeSceneRepository(ISceneRepository):
+    """In-memory ``ISceneRepository`` for α5c use-case unit tests.
+
+    Models the same observable contract as the real ``SceneRepository``: one
+    implicit default storyboard per project (get-or-create), append-at-end
+    numbering (``max + 1000``), sparse gap-based reorder with a full 1000-step
+    rebalance fallback, project-scoped visibility, and the version-fenced CAS
+    (``version`` bumps by exactly 1 on a real content/order change). The fake
+    models the post-filter (live-rows-only) view, so a scene present in
+    ``_scenes`` is a live scene; soft delete drops it. ``project_id`` scoping
+    works via the single ``project → storyboard`` map (``_default_sb``).
+    """
+
+    _default_sb: dict[UUID, UUID] = field(default_factory=dict)
+    _scenes: dict[UUID, Scene] = field(default_factory=dict)
+
+    async def ensure_default_storyboard(self, project_id: UUID) -> tuple[UUID, bool]:
+        existing = self._default_sb.get(project_id)
+        if existing is not None:
+            return existing, False
+        storyboard_id = uuid4()
+        self._default_sb[project_id] = storyboard_id
+        return storyboard_id, True
+
+    async def add(
+        self,
+        *,
+        storyboard_id: UUID,
+        title: str,
+        duration_seconds: float,
+        narration: str | None,
+        subtitle: str | None,
+    ) -> Scene:
+        live = [s for s in self._scenes.values() if s.storyboard_id == storyboard_id]
+        max_num = max((s.scene_number for s in live), default=None)
+        next_num = 1000 if max_num is None else max_num + 1000
+        now = datetime.now(UTC)
+        scene = Scene(
+            id=uuid4(),
+            storyboard_id=storyboard_id,
+            scene_number=next_num,
+            title=title,
+            duration_seconds=duration_seconds,
+            narration=narration,
+            subtitle=subtitle,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        self._scenes[scene.id] = scene
+        return scene
+
+    def _scoped(self, project_id: UUID, scene_id: UUID) -> Scene | None:
+        sb = self._default_sb.get(project_id)
+        scene = self._scenes.get(scene_id)
+        if scene is None or sb is None or scene.storyboard_id != sb:
+            return None
+        return scene
+
+    async def list_by_project(self, project_id: UUID) -> list[Scene]:
+        sb = self._default_sb.get(project_id)
+        if sb is None:
+            return []
+        scenes = [s for s in self._scenes.values() if s.storyboard_id == sb]
+        scenes.sort(key=lambda s: s.scene_number)
+        return scenes
+
+    async def get_owned_scene(self, project_id: UUID, scene_id: UUID) -> Scene | None:
+        return self._scoped(project_id, scene_id)
+
+    async def position_of(self, storyboard_id: UUID, scene_number: int) -> int:
+        return (
+            sum(
+                1
+                for s in self._scenes.values()
+                if s.storyboard_id == storyboard_id and s.scene_number < scene_number
+            )
+            + 1
+        )
+
+    async def update_owned(
+        self,
+        project_id: UUID,
+        scene_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Scene | None:
+        scene = self._scoped(project_id, scene_id)
+        if scene is None or scene.version != expected_version:
+            return None
+        updated = replace(
+            scene,
+            **dict(changes),
+            version=scene.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._scenes[scene_id] = updated
+        return updated
+
+    async def soft_delete_owned(self, project_id: UUID, scene_id: UUID) -> bool:
+        scene = self._scoped(project_id, scene_id)
+        if scene is None:
+            return False
+        del self._scenes[scene_id]
+        return True
+
+    async def reorder_owned(
+        self,
+        project_id: UUID,
+        scene_id: UUID,
+        target_position: int,
+        expected_version: int,
+    ) -> Scene | None:
+        moved = self._scoped(project_id, scene_id)
+        if moved is None or moved.version != expected_version:
+            return None
+        sb = moved.storyboard_id
+        ordered = sorted(
+            (s for s in self._scenes.values() if s.storyboard_id == sb),
+            key=lambda s: s.scene_number,
+        )
+        ordered_ids = [s.id for s in ordered]
+        others = [s for s in ordered if s.id != scene_id]
+        n = len(others)
+        k = max(0, min(target_position - 1, n))
+        if ordered_ids.index(scene_id) == k:
+            return moved  # no-op
+        left = others[k - 1].scene_number if k > 0 else None
+        right = others[k].scene_number if k < n else None
+        new_number = _scene_gap(left, right)
+        now = datetime.now(UTC)
+        if new_number is not None:
+            updated = replace(
+                moved,
+                scene_number=new_number,
+                version=moved.version + 1,
+                updated_at=now,
+            )
+            self._scenes[scene_id] = updated
+            return updated
+        # Rebalance: renumber the whole storyboard to 1000-step slots.
+        final_order = others[:k] + [moved] + others[k:]
+        result = moved
+        for i, s in enumerate(final_order):
+            number = (i + 1) * 1000
+            updated = replace(s, scene_number=number, version=s.version + 1, updated_at=now)
+            self._scenes[s.id] = updated
+            if s.id == scene_id:
+                result = updated
+        return result
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -466,12 +642,14 @@ class FakeUnitOfWork(IUnitOfWork):
         sessions: FakeSessionRepository | None = None,
         roles: FakeRoleRepository | None = None,
         projects: FakeProjectRepository | None = None,
+        scenes: FakeSceneRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
         self._fake_sessions = sessions or FakeSessionRepository()
         self._fake_roles = roles or FakeRoleRepository()
         self._fake_projects = projects or FakeProjectRepository()
+        self._fake_scenes = scenes or FakeSceneRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -481,6 +659,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.sessions = self._fake_sessions
         self.roles = self._fake_roles
         self.projects = self._fake_projects
+        self.scenes = self._fake_scenes
         return self
 
     async def __aexit__(

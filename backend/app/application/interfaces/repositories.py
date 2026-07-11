@@ -35,6 +35,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
+from app.domain.scenes.scene import Scene
 
 
 class IUserRepository(ABC):
@@ -374,6 +375,167 @@ class IProjectRepository(ABC):
         case (``DeleteProject``) maps ``False`` → ``404 NOT_FOUND`` so a
         repeat delete — and any GET/PATCH after delete — is a uniform
         ``404`` (idempotent-by-404, α5b D6). No version fence (α5b D8).
+        """
+        ...
+
+
+class ISceneRepository(ABC):
+    """Persistence surface for ``scenes``. Soft-deleted rows are excluded.
+
+    Introduced by Slice α5c. A scene lives under a project's **implicit
+    default storyboard** (``Project → Storyboard → Scene``, D1): the
+    storyboard is resolved server-side and never appears on the wire. Every
+    method is project-scoped — the use case has ALREADY established project
+    ownership via :meth:`IProjectRepository.get_owned` (the two-level
+    visibility gate, α5c D6) before reaching this port, so a scene that
+    belongs to another project simply returns ``None`` / is omitted /
+    reports ``False`` (anti-enumeration, inherited from α3/α5a).
+
+    Ordering is a **sparse gap-based** integer key ``scene_number`` (1000,
+    2000, … — D3), never exposed raw; :meth:`position_of` projects a dense
+    1-based position from the sorted order (Q6). ``ensure_default_storyboard``
+    and the numbering/reorder mutations serialize on a ``SELECT … FOR
+    UPDATE`` lock of the parent ``projects`` row (D9), because ``storyboards``
+    carries no per-project uniqueness and ``scenes`` no per-storyboard
+    ordering lock — the row lock is the concurrency boundary that guarantees
+    exactly one default storyboard and collision-free ``scene_number``
+    assignment.
+    """
+
+    @abstractmethod
+    async def ensure_default_storyboard(self, project_id: UUID) -> tuple[UUID, bool]:
+        """Resolve (get-or-create) the project's single default storyboard.
+
+        Takes a ``SELECT … FOR UPDATE`` lock on the parent ``projects`` row
+        (held for the transaction) so concurrent first-scene creations
+        cannot each insert a storyboard (D9). Returns
+        ``(storyboard_id, created)`` where ``created`` is ``True`` only when
+        this call inserted the storyboard (the caller logs
+        ``storyboard.default_created`` on ``True``). Idempotent: the earliest
+        live storyboard is reused if one already exists.
+        """
+        ...
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        storyboard_id: UUID,
+        title: str,
+        duration_seconds: float,
+        narration: str | None,
+        subtitle: str | None,
+    ) -> Scene:
+        """Append a new scene to ``storyboard_id`` and return the persisted entity.
+
+        Unlike :meth:`IProjectRepository.add` (which takes a fully-formed
+        entity), this takes explicit content fields because ``scene_number``
+        is **server-computed**: the new scene is appended after the current
+        maximum live ``scene_number`` (``max + 1000``, or ``1000`` for the
+        first scene — D10). The caller MUST hold the project-row lock (via a
+        prior :meth:`ensure_default_storyboard` in the same transaction) so
+        the ``max`` read + insert is race-free. ``id`` / ``version`` (=1) /
+        timestamps are DB-populated; the returned entity carries the
+        authoritative values.
+        """
+        ...
+
+    @abstractmethod
+    async def list_by_project(self, project_id: UUID) -> list[Scene]:
+        """Return the project's live scenes ordered by ``scene_number`` ASC.
+
+        Read-only and side-effect-free: if the project has no storyboard yet
+        (no scene has ever been created), returns ``[]`` **without** creating
+        one (D8) — a GET must never mutate. Not paginated (Q2): a project's
+        scene set is a bounded editorial list.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned_scene(self, project_id: UUID, scene_id: UUID) -> Scene | None:
+        """Return the project's live scene with ``scene_id``, or ``None``.
+
+        ``None`` when the scene is missing, soft-deleted, or belongs to a
+        storyboard of a different project — deliberately indistinguishable so
+        ``GET /projects/{id}/scenes/{scene_id}`` maps all of them to a
+        uniform ``404`` (α5c D6, mirroring α5a D5). The join to
+        ``storyboards`` enforces the cross-project isolation even though
+        project ownership was already checked upstream (defence in depth).
+        """
+        ...
+
+    @abstractmethod
+    async def update_owned(
+        self,
+        project_id: UUID,
+        scene_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Scene | None:
+        """Version-fenced partial update of the project's live scene (α5c).
+
+        Applies ``changes`` (a mapping of ``scenes`` content columns —
+        ``title`` / ``duration_seconds`` / ``narration`` / ``subtitle``) to
+        the row matching ``scene_id`` + project (via storyboard join) +
+        ``deleted_at IS NULL`` + ``version = expected_version`` via a
+        compare-and-swap (mirrors :meth:`IProjectRepository.update_owned`,
+        hand-setting ``version + 1`` over the guarded trigger → net +1).
+        Returns the updated :class:`Scene` on success, or ``None`` when the
+        CAS matched no row (concurrent bump/delete after the use case's
+        ``get_owned_scene`` → ``412``; the visibility 404 was already
+        decided upstream, α5c D6). Never changes ``scene_number`` (ordering
+        is :meth:`reorder_owned`'s job — D11).
+        """
+        ...
+
+    @abstractmethod
+    async def reorder_owned(
+        self,
+        project_id: UUID,
+        scene_id: UUID,
+        target_position: int,
+        expected_version: int,
+    ) -> Scene | None:
+        """Move ``scene_id`` to 1-based ``target_position`` (version-fenced).
+
+        Takes the project-row lock (D9) and recomputes ``scene_number`` from
+        the sorted live scenes: the gap midpoint between the target
+        neighbours (D12). ``target_position`` is clamped to the valid range.
+        A move to the scene's current slot is a **no-op** (returns the
+        unchanged entity, no write). When no integer gap remains between
+        neighbours, the whole storyboard is **rebalanced** to fresh 1000-step
+        numbers (D12) — the moved scene's number is set under the version
+        fence; the other scenes' ``version`` are trigger-bumped (D14,
+        accepted). Returns the moved :class:`Scene` on success, or ``None``
+        when the version fence fails (concurrent content-PATCH bumped the
+        moved scene, or a concurrent delete) → ``412``.
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_owned(self, project_id: UUID, scene_id: UUID) -> bool:
+        """Soft-delete (``deleted_at = now()``) the project's live scene (α5c).
+
+        Scoped to the project (via storyboard join) + ``deleted_at IS NULL``.
+        Returns ``True`` if a live scene was found and marked, ``False``
+        otherwise (missing, already soft-deleted, or another project's
+        scene). The use case maps ``False`` → ``404`` so a repeat delete —
+        and any GET/PATCH/move after delete — is a uniform ``404``
+        (idempotent-by-404, α5c D13). No version fence (D13). Leaves a gap in
+        ``scene_number`` (the neighbours are not renumbered — display
+        ``position`` is recomputed dynamically).
+        """
+        ...
+
+    @abstractmethod
+    async def position_of(self, storyboard_id: UUID, scene_number: int) -> int:
+        """Return the 1-based display position of ``scene_number`` in its storyboard.
+
+        Computed as ``count(live scenes with a smaller scene_number) + 1``.
+        Used to project the dense wire ``position`` for single-scene
+        responses (create/get/patch/move) without exposing the raw sparse
+        ``scene_number`` (Q6); the list endpoint enumerates positions from
+        the already-sorted :meth:`list_by_project` result instead.
         """
         ...
 
