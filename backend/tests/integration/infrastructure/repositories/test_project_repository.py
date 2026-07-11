@@ -1,11 +1,12 @@
-"""Integration tests for ``ProjectRepository`` (Slice α5a).
+"""Integration tests for ``ProjectRepository`` (Slices α5a + α5b).
 
 Runs against the live database; each test is wrapped in a SAVEPOINT
-that rolls back on teardown, so no rows persist. Covers the three α5a
-methods — ``add`` (create), ``get_owned`` (scoped single read), and
-``list_owned`` (owner-scoped, keyset-paginated, newest-first) — plus
-the live-row uniqueness constraint and soft-delete / cross-owner
-invisibility.
+that rolls back on teardown, so no rows persist. Covers the α5a read/
+create methods — ``add`` (create), ``get_owned`` (scoped single read),
+and ``list_owned`` (owner-scoped, keyset-paginated, newest-first) — the
+live-row uniqueness constraint and soft-delete / cross-owner
+invisibility, and the α5b write methods ``update_owned`` (version-fenced
+CAS) and ``soft_delete_owned`` (owner-scoped soft delete).
 
 Note on ``created_at`` for the ordering tests (R6/R7): the DB
 ``server_default`` is ``now()`` = ``transaction_timestamp()``, which is
@@ -32,6 +33,28 @@ Coverage map (α5a pre-flight §8):
   foreign-owner rows.
 * R7 — ``list_owned`` keyset pagination walks every row exactly once,
   in order, across pages.
+* R8 — ``update_owned`` real change: business field updated; ``version``
+  bumps by **exactly 1** (the load-bearing anti-double-bump check — the
+  ``tg_projects_biu_version_bump`` trigger is guarded, so hand-setting
+  ``version + 1`` must NOT compound to +2).
+* R9 — ``update_owned`` version-stale: wrong ``expected_version`` returns
+  ``None`` and leaves the row untouched.
+* R10 — ``update_owned`` wrong owner/tenant returns ``None``, row
+  untouched (scoping).
+* R11 — ``update_owned`` rename collision → ``ConflictError``.
+* R12 — ``soft_delete_owned`` happy: row hidden from ``get_owned`` /
+  ``list_owned`` afterward.
+* R13 — ``soft_delete_owned`` wrong owner / already-deleted returns
+  ``False``.
+
+Note on ``updated_at`` for R8: the DB ``now()`` is
+``transaction_timestamp()`` — constant within the SAVEPOINT fixture's
+single transaction — so a create-then-update in one test cannot observe
+``updated_at`` *advancing* past ``created_at`` (both resolve to the same
+instant). R8 therefore asserts the ``version`` increment (the load-
+bearing trigger check) and the field change, not a wall-clock advance;
+the HTTP integration tests (separate requests → separate transactions)
+cover observable ``updated_at`` movement.
 """
 
 from __future__ import annotations
@@ -294,3 +317,172 @@ async def test_r7_list_owned_keyset_pagination_covers_all_rows(session: AsyncSes
     )
     assert [r.id for r in page3] == expected[4:]
     assert len(page3) == 1  # last page, partial
+
+
+# ---- R8 — update_owned real change (version +1, not +2) --------------
+
+
+@pytest.mark.integration
+async def test_r8_update_owned_real_change_bumps_version_by_one(session: AsyncSession) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Before"))
+    assert created.version == 1
+
+    updated = await repo.update_owned(
+        project_id=created.id,
+        tenant_id=tenant_id,
+        owner_user_id=owner_id,
+        expected_version=1,
+        changes={"name": "After", "description": "now set"},
+    )
+
+    assert updated is not None
+    assert updated.name == "After"
+    assert updated.description == "now set"
+    # Load-bearing: the guarded trigger must NOT compound the hand-set +1.
+    assert updated.version == 2
+    # Re-fetch confirms persistence (not just the RETURNING projection).
+    refetched = await repo.get_owned(
+        project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+    )
+    assert refetched is not None
+    assert refetched.name == "After"
+    assert refetched.version == 2
+
+
+# ---- R9 — update_owned version-stale ----------------------------------
+
+
+@pytest.mark.integration
+async def test_r9_update_owned_version_stale_returns_none_untouched(session: AsyncSession) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Keep"))
+
+    result = await repo.update_owned(
+        project_id=created.id,
+        tenant_id=tenant_id,
+        owner_user_id=owner_id,
+        expected_version=99,  # stale
+        changes={"name": "ShouldNotApply"},
+    )
+    assert result is None
+
+    refetched = await repo.get_owned(
+        project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+    )
+    assert refetched is not None
+    assert refetched.name == "Keep"  # untouched
+    assert refetched.version == 1
+
+
+# ---- R10 — update_owned wrong owner/tenant ----------------------------
+
+
+@pytest.mark.integration
+async def test_r10_update_owned_wrong_owner_returns_none_untouched(session: AsyncSession) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Owned"))
+
+    # Wrong owner → no match.
+    assert (
+        await repo.update_owned(
+            project_id=created.id,
+            tenant_id=tenant_id,
+            owner_user_id=uuid4(),
+            expected_version=1,
+            changes={"name": "Hijacked"},
+        )
+    ) is None
+    # Wrong tenant → no match.
+    assert (
+        await repo.update_owned(
+            project_id=created.id,
+            tenant_id=uuid4(),
+            owner_user_id=owner_id,
+            expected_version=1,
+            changes={"name": "Hijacked"},
+        )
+    ) is None
+
+    refetched = await repo.get_owned(
+        project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+    )
+    assert refetched is not None
+    assert refetched.name == "Owned"
+    assert refetched.version == 1
+
+
+# ---- R11 — update_owned rename collision → ConflictError --------------
+
+
+@pytest.mark.integration
+async def test_r11_update_owned_rename_collision_raises_conflict(session: AsyncSession) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    a = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Alpha"))
+    await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Beta"))
+
+    with pytest.raises(ConflictError):
+        await repo.update_owned(
+            project_id=a.id,
+            tenant_id=tenant_id,
+            owner_user_id=owner_id,
+            expected_version=1,
+            changes={"name": "Beta"},  # collides with the live "Beta"
+        )
+
+
+# ---- R12 — soft_delete_owned happy ------------------------------------
+
+
+@pytest.mark.integration
+async def test_r12_soft_delete_owned_hides_from_get_and_list(session: AsyncSession) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Doomed"))
+
+    ok = await repo.soft_delete_owned(
+        project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+    )
+    assert ok is True
+
+    # Hidden from the scoped read + list afterward.
+    assert (
+        await repo.get_owned(project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id)
+    ) is None
+    rows = await repo.list_owned(tenant_id=tenant_id, owner_user_id=owner_id, limit=20)
+    assert created.id not in {r.id for r in rows}
+
+
+# ---- R13 — soft_delete_owned wrong owner / already-deleted ------------
+
+
+@pytest.mark.integration
+async def test_r13_soft_delete_owned_wrong_owner_or_repeat_returns_false(
+    session: AsyncSession,
+) -> None:
+    tenant_id, owner_id = await _seed_owner(session)
+    repo = ProjectRepository(session)
+    created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Target"))
+
+    # Wrong owner → no live owned row matched.
+    assert (
+        await repo.soft_delete_owned(
+            project_id=created.id, tenant_id=tenant_id, owner_user_id=uuid4()
+        )
+    ) is False
+
+    # First real delete succeeds; the repeat finds no live row → False.
+    assert (
+        await repo.soft_delete_owned(
+            project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+        )
+    ) is True
+    assert (
+        await repo.soft_delete_owned(
+            project_id=created.id, tenant_id=tenant_id, owner_user_id=owner_id
+        )
+    ) is False

@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -117,12 +118,20 @@ async def application_error_handler(request: Request, exc: ApplicationError) -> 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     request_id = getattr(request.state, "request_id", "")
+    # ``exc.errors()`` is JSON-safe for field-level constraints, but a
+    # Pydantic ``model_validator`` that raises ``ValueError`` embeds the raw
+    # exception object in ``ctx["error"]`` (e.g. the α5b empty-PATCH guard).
+    # ``JSONResponse`` renders with plain ``json.dumps`` (no ``default=``),
+    # which cannot serialise that object → a spurious 500. ``jsonable_encoder``
+    # coerces such objects recursively (the exception collapses to ``{}``
+    # while the human-readable ``msg`` is preserved), so every validator —
+    # field- or model-level — serialises cleanly to the 422 envelope.
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content=_envelope(
             "VALIDATION_FAILED",
             "request validation failed",
-            {"errors": exc.errors()},
+            {"errors": jsonable_encoder(exc.errors())},
             request_id,
         ),
     )

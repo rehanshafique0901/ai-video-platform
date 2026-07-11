@@ -38,8 +38,10 @@ from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.application.use_cases.projects.create_project import CreateProject
+from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
 from app.application.use_cases.projects.list_projects import ListProjects
+from app.application.use_cases.projects.update_project import UpdateProject
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
@@ -259,3 +261,16 @@ def get_get_project_use_case() -> GetProject:
 
 def get_list_projects_use_case() -> ListProjects:
     return ListProjects(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α5b — Projects update + soft-delete)
+# ---------------------------------------------------------------------
+
+
+def get_update_project_use_case() -> UpdateProject:
+    return UpdateProject(uow=get_unit_of_work())
+
+
+def get_delete_project_use_case() -> DeleteProject:
+    return DeleteProject(uow=get_unit_of_work())

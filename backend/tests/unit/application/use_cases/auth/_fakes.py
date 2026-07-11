@@ -13,10 +13,11 @@ the real implementations against a live database via the fixtures in
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 from app.application.interfaces.clock import IClock
@@ -387,6 +388,69 @@ class FakeProjectRepository(IProjectRepository):
             after_created_at, after_id = after
             scoped = [p for p in scoped if (p.created_at, p.id) < (after_created_at, after_id)]
         return scoped[:limit]
+
+    async def update_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Project | None:
+        # α5b: version-fenced CAS. Mirrors the real repo's observable
+        # contract — None when the fenced row is absent / out-of-scope /
+        # version-stale (the use case has already established visibility
+        # via ``get_owned``, so in the normal flow None here means a
+        # concurrent bump → 412). Rename to a name held by ANOTHER live
+        # owned row raises ``ConflictError`` (→ 409). ``version`` bumps by
+        # exactly 1 (matches the guarded DB trigger's net effect).
+        import dataclasses
+
+        row = self._rows.get(project_id)
+        if (
+            row is None
+            or row.tenant_id != tenant_id
+            or row.owner_user_id != owner_user_id
+            or row.version != expected_version
+        ):
+            return None
+        new_name = changes.get("name", row.name)
+        if new_name != row.name:
+            for other in self._rows.values():
+                if (
+                    other.id != project_id
+                    and other.tenant_id == tenant_id
+                    and other.owner_user_id == owner_user_id
+                    and other.name == new_name
+                ):
+                    raise ConflictError(
+                        "project already exists",
+                        details={"constraint": "uq_projects_tenant_id_owner_user_id_name"},
+                    )
+        updated = dataclasses.replace(
+            row,
+            **dict(changes),
+            version=row.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._rows[project_id] = updated
+        return updated
+
+    async def soft_delete_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> bool:
+        # α5b: owner+tenant-scoped soft delete. The fake models the
+        # post-filter (live-rows-only) view, so "soft delete" = drop from
+        # ``_rows``; a second call then finds nothing → False → 404 at the
+        # use case (idempotent-by-404). No version fence (α5b D8).
+        row = self._rows.get(project_id)
+        if row is None or row.tenant_id != tenant_id or row.owner_user_id != owner_user_id:
+            return False
+        del self._rows[project_id]
+        return True
 
 
 # ---- UoW --------------------------------------------------------------

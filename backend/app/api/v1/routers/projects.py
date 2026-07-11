@@ -1,40 +1,54 @@
-"""``/api/v1/projects/*`` HTTP router (Slice α5a — create + read).
+"""``/api/v1/projects/*`` HTTP router (α5a create/read; α5b update/delete).
 
-Three endpoints, all authenticated via :data:`CurrentUserDep` (the sole
+Five endpoints, all authenticated via :data:`CurrentUserDep` (the sole
 authentication seam — no JWT parsing, no ``ITokenIssuer``, no repository
 access in this module):
 
-* ``POST /projects``            → 201, create a project the caller owns.
-* ``GET  /projects``            → 200, list the caller's projects
+* ``POST   /projects``              → 201, create a project the caller owns.
+* ``GET    /projects``              → 200, list the caller's projects
   (newest first, keyset-paginated via ``?limit=`` + opaque ``?cursor=``).
-* ``GET  /projects/{project_id}`` → 200, fetch one owned project;
+* ``GET    /projects/{project_id}`` → 200, fetch one owned project;
   404 if it is missing, soft-deleted, or owned by someone else (α5a D5).
+* ``PATCH  /projects/{project_id}`` → 200, partial version-fenced update
+  (α5b). 404-before-412: visibility (missing/not-yours/deleted → 404) is
+  decided before the version fence (stale ``version`` → 412); a rename
+  collision → 409.
+* ``DELETE /projects/{project_id}`` → 204, owner-scoped soft delete (α5b),
+  idempotent-by-404 (repeat delete, and GET/PATCH after delete → 404).
 
 The router stays thin: it projects the DTO, delegates to a use case,
 and wraps the result in the API_CONTRACT §1.1 envelope. Business rules
-(ownership scoping, uniqueness, pagination) live in the use cases /
-repository. Errors raised by the use cases (``ConflictError`` → 409,
-``NotFoundError`` → 404, ``ValidationFailedError`` → 422) are rendered
-by the handlers registered in ``app.core.errors``; this module contains
-no try / except. See ``docs/api/AUTH_ENDPOINTS.md`` §9 for the mutation
-flow this create endpoint follows.
+(ownership scoping, uniqueness, pagination, the 404-before-412 split)
+live in the use cases / repository. Errors raised by the use cases
+(``ConflictError`` → 409, ``NotFoundError`` → 404,
+``VersionConflictError`` → 412, ``ValidationFailedError`` → 422) are
+rendered by the handlers registered in ``app.core.errors``; this module
+contains no try / except. See ``docs/api/AUTH_ENDPOINTS.md`` §9 (create/
+mutation flow) and the α4 ``PATCH /users/me`` for the version-fence
+precedent this PATCH extends to a path-addressed resource.
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, status
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from app.api.v1.deps import (
     CreateProjectDep,
     CurrentUserDep,
+    DeleteProjectDep,
     GetProjectDep,
     ListProjectsDep,
+    UpdateProjectDep,
 )
 from app.api.v1.helpers import client_ip, envelope
-from app.api.v1.schemas.projects import ProjectCreateRequest, ProjectPublic
+from app.api.v1.schemas.projects import (
+    ProjectCreateRequest,
+    ProjectPublic,
+    ProjectUpdateRequest,
+)
 from app.domain.projects.project import Project
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -147,3 +161,75 @@ async def get_project(
         tenant_id=current_user.tenant_id,
     )
     return JSONResponse(content=envelope(_to_public(project), request))
+
+
+@router.patch("/{project_id}")
+async def update_project(
+    project_id: UUID,
+    body: ProjectUpdateRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: UpdateProjectDep,
+) -> JSONResponse:
+    """Partially update one project owned by the caller (version-fenced).
+
+    The body carries the client's last-observed ``version`` (OCC fence)
+    plus any subset of the mutable fields
+    (``name``/``description``/``language``/``style``/``settings``).
+    Tri-state is resolved here: ``model_dump(exclude_unset=True)`` sends
+    only the keys the client actually set (an explicit ``null`` on
+    ``description``/``style`` clears the column; an absent field is left
+    unchanged), and the ``version`` key is stripped from ``changes``.
+
+    Return semantics (all 200 on success):
+
+    * Persisted change → response ``version`` is incremented by 1;
+      ``updated_at`` reflects the DB write.
+    * Same-value no-op → ``version``/``updated_at`` unchanged; no DB write.
+
+    Failure modes: 404 (missing / not-yours / soft-deleted — visibility
+    before concurrency, α5b D3); 412 ``VERSION_CONFLICT`` (stale
+    ``version``, or a concurrent bump/delete race); 409 ``CONFLICT``
+    (rename to a name already held by another live project of this owner);
+    422 (empty patch, forbidden/mis-typed field, missing ``version``,
+    ``null`` for a non-nullable field, non-UUID path) via Pydantic/FastAPI;
+    401 via ``CurrentUserDep``.
+    """
+    # ``exclude_unset`` gives the tri-state ``changes`` mapping; ``version``
+    # is the fence, not a mutable field, so it is excluded from ``changes``.
+    changes = body.model_dump(exclude_unset=True, exclude={"version"})
+    result = await use_case.execute(
+        project_id=project_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        expected_version=body.version,
+        changes=changes,
+        ip=client_ip(request),
+    )
+    return JSONResponse(content=envelope(_to_public(result.project), request))
+
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(
+    project_id: UUID,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: DeleteProjectDep,
+) -> Response:
+    """Soft-delete one project owned by the caller.
+
+    Sets ``deleted_at`` on the caller's own live project and returns
+    ``204 No Content`` (α5b D7 — nothing meaningful to return on a soft
+    delete; mirrors α2b logout). Idempotent-by-404 (α5b D6): a second
+    ``DELETE`` — and any ``GET``/``PATCH`` after delete — returns ``404``.
+    Deleting another user's/tenant's project, or an unknown id, is the
+    same ``404`` (anti-enumeration). No version fence (α5b D8). Non-UUID
+    path → 422; missing/invalid auth → 401.
+    """
+    await use_case.execute(
+        project_id=project_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        ip=client_ip(request),
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

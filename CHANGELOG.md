@@ -6,6 +6,71 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5b — Projects update + soft-delete (`PATCH`/`DELETE /projects/{id}`) (2026-07-11)
+
+Completes the Project CRUD lifecycle (`create → read → update →
+soft-delete`). Brings the α4 optimistic-concurrency CAS to a
+**path-addressed** resource and establishes the **404-before-412**
+pattern — a path-addressed authenticated mutation decides *visibility*
+(missing / out-of-scope / soft-deleted → `404`, exactly like the read)
+**before** the version fence (`412`), so a caller can never learn a
+resource exists via a `412`. Ships the M3 composite pagination index
+(deferred from α5a) in the same slice. See
+`docs/engineering/PHASE3_ALPHA5B_PREFLIGHT.md`.
+
+#### Added
+- **`PATCH /api/v1/projects/{id}`** (`CurrentUserDep`) — partial,
+  version-fenced update. Mutable surface: `name` / `description` /
+  `language` / `style` / `settings`. Tri-state semantics via
+  `ProjectUpdateRequest` (`extra="forbid"`, required `version`): absent =
+  unchanged, explicit `null` clears a nullable field, value sets it;
+  `settings` is whole-object replace. `200` on success (real change →
+  `version` +1 and `updated_at` advances; same-value → `200` no-op);
+  `404` (missing/not-yours/soft-deleted); `412 VERSION_CONFLICT` (stale
+  version / concurrent-bump race); `409 CONFLICT` (rename collision);
+  `422` (empty patch, forbidden/mis-typed field, missing version,
+  `null` for a non-nullable field).
+- **`DELETE /api/v1/projects/{id}`** (`CurrentUserDep`) — owner-scoped
+  soft delete → `204 No Content`, no version fence. Idempotent-by-404
+  (repeat delete, and GET/PATCH after delete → `404`); frees the project
+  `name` for re-use (uniqueness index excludes soft-deleted rows).
+- **`IProjectRepository.update_owned` / `soft_delete_owned`** + their
+  `SqlAlchemy` implementations. `update_owned` is a `UPDATE ... WHERE
+  version = :expected` CAS (mirrors `UserRepository.update_profile`),
+  mapping a rename `IntegrityError` → `ConflictError`; `soft_delete_owned`
+  sets `deleted_at` and reports whether a live owned row was marked.
+  Extended on the unit-test `FakeProjectRepository` too.
+- **`UpdateProject` / `DeleteProject` use cases** — `UpdateProject` is
+  fetch-then-fence (404-before-412) with same-value no-op detection;
+  `DeleteProject` maps a `False` soft-delete to `404`. Container
+  factories + `UpdateProjectDep` / `DeleteProjectDep` aliases wire them.
+- **Migration `0008`** — composite partial index
+  `ix_projects_owner_created_id`
+  `(tenant_id, owner_user_id, created_at DESC, id DESC) WHERE deleted_at
+  IS NULL` (M3), declared on `Project.__table_args__` and created/dropped
+  by the migration. Serves `list_owned`'s keyset scan; the older
+  `ix_projects_tenant_id_owner_user_id` is kept.
+- **Tests** — unit: `UpdateProject` (9, U1–U9), `DeleteProject` (4,
+  U10–U13); integration: `ProjectRepository` (6, R8–R13 incl. the
+  guarded-trigger version-bump check) and HTTP `test_projects.py` (16,
+  H17–H32 covering 200/204/404/409/412/422, 404-before-412, tri-state
+  PATCH, and idempotent-by-404 delete).
+
+#### Changed
+- **`API_CONTRACT.md`** — §3.2 annotated with the α5b PATCH (tri-state,
+  404-before-412) and DELETE (soft, idempotent-by-404) semantics.
+- App version → `0.4.6-phase3-alpha5b-dev`.
+
+#### Fixed
+- **`validation_error_handler`** (`app/core/errors.py`) now runs
+  `exc.errors()` through `jsonable_encoder`. A Pydantic `model_validator`
+  that raises `ValueError` (first exercised by the α5b empty-PATCH guard)
+  embeds the raw exception object in `ctx["error"]`, which the plain
+  `json.dumps` render path could not serialise — turning an intended
+  `422 VALIDATION_FAILED` into a `500`. The encoder coerces such objects
+  recursively while preserving the human-readable `msg`, hardening the
+  422 path for every field- and model-level validator.
+
 ### Phase 3 Slice α5a — Projects create + read (`POST`/`GET /projects`) (2026-07-11)
 
 The first resource beyond identity, and the first **collection** endpoint.
