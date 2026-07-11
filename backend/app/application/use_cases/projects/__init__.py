@@ -1,1 +1,1 @@
-"""Project use cases (Slice α5a — create + read)."""
+"""Project use cases (α5a — create + read; α5b — update + soft-delete)."""

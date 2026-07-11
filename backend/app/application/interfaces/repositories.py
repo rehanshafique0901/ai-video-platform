@@ -26,7 +26,9 @@ in these interfaces.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from app.domain.identity.session import Session
@@ -312,6 +314,66 @@ class IProjectRepository(ABC):
         caller (``ListProjects``) requests ``limit + 1`` to detect
         whether a further page exists, then trims + builds the
         next-page cursor.
+        """
+        ...
+
+    @abstractmethod
+    async def update_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Project | None:
+        """Version-fenced partial update of the owner's live project (α5b).
+
+        Applies ``changes`` (a mapping of ``projects`` business columns —
+        ``name`` / ``description`` / ``language`` / ``style`` /
+        ``settings``) to the row matching ``project_id`` + ``tenant_id`` +
+        ``owner_user_id`` + ``deleted_at IS NULL`` + ``version =
+        expected_version``, via a compare-and-swap ``UPDATE ... WHERE
+        version = :expected`` (mirrors
+        :meth:`IUserRepository.update_profile`).
+
+        Returns the updated :class:`Project` (with the trigger-bumped
+        ``version`` / ``updated_at``) on success, or ``None`` when the CAS
+        matched no row — i.e. a concurrent writer bumped ``version`` or
+        soft-deleted the row between the caller's ``get_owned`` and this
+        write. The use case (``UpdateProject``) has ALREADY established
+        visibility via ``get_owned`` (the 404-before-412 split, α5b D3), so
+        a ``None`` here is a *concurrency* outcome (→ ``412``), never a
+        *visibility* one.
+
+        Raises ``ConflictError`` if the update renames the project to a
+        ``name`` already held by another live project of the same
+        ``(tenant_id, owner_user_id)`` — the partial-unique index
+        ``uq_projects_tenant_id_owner_user_id_name`` violation is caught
+        and surfaced as ``409`` (α5b D9), identical to ``add``.
+
+        ``changes`` MUST contain only mutable business columns; callers
+        never pass ``version`` / ``updated_at`` (trigger-owned) or
+        identity/ownership columns. An empty ``changes`` is a caller bug
+        (the use case resolves the same-value no-op before reaching here).
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> bool:
+        """Soft-delete (``deleted_at = now()``) the owner's live project (α5b).
+
+        Scoped to ``tenant_id`` + ``owner_user_id`` + ``deleted_at IS
+        NULL`` exactly like ``get_owned``. Returns ``True`` if a live owned
+        row was found and marked deleted, ``False`` otherwise (row missing,
+        already soft-deleted, or owned by another user/tenant). The use
+        case (``DeleteProject``) maps ``False`` → ``404 NOT_FOUND`` so a
+        repeat delete — and any GET/PATCH after delete — is a uniform
+        ``404`` (idempotent-by-404, α5b D6). No version fence (α5b D8).
         """
         ...
 

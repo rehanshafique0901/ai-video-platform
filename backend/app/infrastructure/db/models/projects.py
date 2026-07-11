@@ -130,6 +130,26 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, VersionMixin
             "folder_id",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # α5b (M3): composite partial index that directly serves
+        # ``ProjectRepository.list_owned``'s keyset scan —
+        # ``WHERE tenant_id=? AND owner_user_id=? AND deleted_at IS NULL
+        # ORDER BY created_at DESC, id DESC``. The leading equality columns
+        # (tenant_id, owner_user_id) narrow the scan; the trailing
+        # ``created_at DESC, id DESC`` matches the ORDER BY so pagination
+        # is an index-only range scan (no sort). Partial (``deleted_at IS
+        # NULL``) so soft-deleted rows never bloat it. Created by migration
+        # ``0008``; declared here so the schema validator (stage 8) expects
+        # the name and no hardcoded count needs bumping. The older
+        # ``ix_projects_tenant_id_owner_user_id`` is kept (α5b D10) — it may
+        # serve future include-deleted admin/restore scans.
+        Index(
+            "ix_projects_owner_created_id",
+            "tenant_id",
+            "owner_user_id",
+            text("created_at DESC"),
+            text("id DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
 

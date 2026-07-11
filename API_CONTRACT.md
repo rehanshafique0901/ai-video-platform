@@ -133,9 +133,38 @@ POST   /projects/{id}/autosave         explicit autosave snapshot
 > and a project owned by another user (or in another tenant) is
 > indistinguishable from a missing one — `GET /projects/{id}` returns a
 > uniform `404 NOT_FOUND`. A duplicate live `name` for the same owner is
-> `409 CONFLICT`. `PATCH` / `DELETE` / `duplicate` / `autosave` and the
-> `?folder_id` / `?tag` / `?query` list filters are deferred to α5b+.
-> `ProjectPublic` omits `current_version_id` and `duration_seconds`
+> `409 CONFLICT`.
+>
+> **Shipped in Phase 3 α5b (update + soft-delete):** `PATCH /projects/{id}`
+> and `DELETE /projects/{id}`.
+>
+> * **`PATCH /projects/{id}`** — partial, version-fenced update. Body:
+>   a required `version` (the client's last-observed value — the
+>   optimistic-concurrency fence) plus any subset of the mutable fields
+>   `name` / `description` / `language` / `style` / `settings`. Tri-state
+>   semantics: an **absent** field is left unchanged; an explicit **`null`**
+>   clears a nullable field (`description` / `style`); a **value** sets it.
+>   `settings` is whole-object **replace** (not deep-merge). `aspect_ratio`,
+>   `folder_id`, and all identity/server fields are **immutable** here
+>   (`extra="forbid"` → `422`); an empty patch (only `version`) is `422`.
+>   Returns `200` with the updated `ProjectPublic`; on a real change
+>   `version` increments by exactly 1 and `updated_at` advances, while a
+>   same-value patch is a `200` no-op (version unchanged). **404-before-412:**
+>   a project that is missing, soft-deleted, or owned by another
+>   user/tenant is a uniform `404 NOT_FOUND` (visibility is decided before
+>   the version fence, so existence never leaks via a `412`); a stale
+>   `version` on a visible project is `412 VERSION_CONFLICT`; a rename that
+>   collides with another live project of the same owner is `409 CONFLICT`.
+> * **`DELETE /projects/{id}`** — owner-scoped **soft** delete (sets
+>   `deleted_at`); returns `204 No Content`. No version fence. Idempotent
+>   **by-404**: the first delete succeeds, and every subsequent `DELETE` —
+>   plus any `GET`/`PATCH` — on that id returns `404` (as does deleting
+>   another user's/tenant's or an unknown project). Soft-deleting frees the
+>   project `name` for re-use (the uniqueness index excludes deleted rows).
+>
+> `duplicate` / `autosave`, restore/un-delete, move-to-folder, and the
+> `?folder_id` / `?tag` / `?query` list filters remain deferred to later
+> slices. `ProjectPublic` omits `current_version_id` and `duration_seconds`
 > (managed by later slices). See `docs/domain/PROJECT_AGGREGATE.md`.
 
 ### 3.3 Project Versions (CR-6)
