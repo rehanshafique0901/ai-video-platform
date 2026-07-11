@@ -120,7 +120,11 @@ class Invoice(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("number", name="uq_invoices_number"),
         CheckConstraint("period_end > period_start", name="period_valid"),
-        Index("ix_invoices_subscription_id_period_start", "subscription_id", "period_start"),
+        Index(
+            "ix_invoices_subscription_id_period_start",
+            "subscription_id",
+            "period_start",
+        ),
         Index("ix_invoices_status", "status"),
     )
 
@@ -160,7 +164,9 @@ class CreditLedger(CreatedAtOnlyMixin, Base):
     __table_args__ = (
         CheckConstraint("balance_after >= 0", name="balance_nonnegative"),
         UniqueConstraint(
-            "tenant_id", "idempotency_key", name="uq_credit_ledger_tenant_id_idempotency_key"
+            "tenant_id",
+            "idempotency_key",
+            name="uq_credit_ledger_tenant_id_idempotency_key",
         ),
         Index("ix_credit_ledger_tenant_id_created_at", "tenant_id", "created_at"),
     )

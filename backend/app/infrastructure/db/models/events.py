@@ -53,7 +53,11 @@ class EventOutbox(CreatedAtOnlyMixin, Base):
             "occurred_at",
             postgresql_where=text("published_at IS NULL"),
         ),
-        Index("ix_event_outbox_aggregate_type_aggregate_id", "aggregate_type", "aggregate_id"),
+        Index(
+            "ix_event_outbox_aggregate_type_aggregate_id",
+            "aggregate_type",
+            "aggregate_id",
+        ),
     )
 
 

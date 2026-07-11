@@ -199,7 +199,9 @@ class ProjectVersion(UUIDPrimaryKeyMixin, CreatedAtOnlyMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "version_number", name="uq_project_versions_project_id_version_number"
+            "project_id",
+            "version_number",
+            name="uq_project_versions_project_id_version_number",
         ),
         CheckConstraint("id <> parent_version_id", name="no_self_parent"),
         Index(

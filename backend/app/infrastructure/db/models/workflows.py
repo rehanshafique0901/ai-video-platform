@@ -54,10 +54,16 @@ class WorkflowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "idempotency_key", name="uq_workflow_runs_project_id_idempotency_key"
+            "project_id",
+            "idempotency_key",
+            name="uq_workflow_runs_project_id_idempotency_key",
         ),
         Index("ix_workflow_runs_project_id_status", "project_id", "status"),
-        Index("ix_workflow_runs_workflow_key_workflow_version", "workflow_key", "workflow_version"),
+        Index(
+            "ix_workflow_runs_workflow_key_workflow_version",
+            "workflow_key",
+            "workflow_version",
+        ),
     )
 
 

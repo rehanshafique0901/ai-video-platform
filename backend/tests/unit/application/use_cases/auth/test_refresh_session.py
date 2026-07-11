@@ -337,7 +337,11 @@ async def test_soft_deleted_user_yields_401_and_revokes_only_this_session() -> N
 
 @pytest.mark.unit
 async def test_revoke_timestamp_comes_from_injected_clock_not_wall_clock() -> None:
-    users, sessions, issuer = FakeUserRepository(), FakeSessionRepository(), FakeTokenIssuer()
+    users, sessions, issuer = (
+        FakeUserRepository(),
+        FakeSessionRepository(),
+        FakeTokenIssuer(),
+    )
     frozen = FakeClock(fixed_at=_T0)
     user = _make_user()
     tokens = await _seed_login(user=user, sessions=sessions, users=users, issuer=issuer)

@@ -144,7 +144,9 @@ async def _insert_project(
 
 
 @pytest.mark.integration
-async def test_r1_add_persists_and_returns_populated_entity(session: AsyncSession) -> None:
+async def test_r1_add_persists_and_returns_populated_entity(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
 
@@ -164,7 +166,9 @@ async def test_r1_add_persists_and_returns_populated_entity(session: AsyncSessio
 
 
 @pytest.mark.integration
-async def test_r2_add_duplicate_name_same_owner_raises_conflict(session: AsyncSession) -> None:
+async def test_r2_add_duplicate_name_same_owner_raises_conflict(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Dup"))
@@ -211,7 +215,9 @@ async def test_r4_get_owned_returns_owned_row(session: AsyncSession) -> None:
 
 
 @pytest.mark.integration
-async def test_r5_get_owned_hides_cross_owner_and_soft_deleted(session: AsyncSession) -> None:
+async def test_r5_get_owned_hides_cross_owner_and_soft_deleted(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Scoped"))
@@ -235,7 +241,9 @@ async def test_r5_get_owned_hides_cross_owner_and_soft_deleted(session: AsyncSes
 
 
 @pytest.mark.integration
-async def test_r6_list_owned_newest_first_and_owner_scoped(session: AsyncSession) -> None:
+async def test_r6_list_owned_newest_first_and_owner_scoped(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     other_owner = uuid4()
     await session.execute(
@@ -279,7 +287,9 @@ async def test_r6_list_owned_newest_first_and_owner_scoped(session: AsyncSession
 
 
 @pytest.mark.integration
-async def test_r7_list_owned_keyset_pagination_covers_all_rows(session: AsyncSession) -> None:
+async def test_r7_list_owned_keyset_pagination_covers_all_rows(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     base = datetime(2026, 2, 1, tzinfo=UTC)
     ids = [
@@ -323,7 +333,9 @@ async def test_r7_list_owned_keyset_pagination_covers_all_rows(session: AsyncSes
 
 
 @pytest.mark.integration
-async def test_r8_update_owned_real_change_bumps_version_by_one(session: AsyncSession) -> None:
+async def test_r8_update_owned_real_change_bumps_version_by_one(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Before"))
@@ -355,7 +367,9 @@ async def test_r8_update_owned_real_change_bumps_version_by_one(session: AsyncSe
 
 
 @pytest.mark.integration
-async def test_r9_update_owned_version_stale_returns_none_untouched(session: AsyncSession) -> None:
+async def test_r9_update_owned_version_stale_returns_none_untouched(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Keep"))
@@ -381,7 +395,9 @@ async def test_r9_update_owned_version_stale_returns_none_untouched(session: Asy
 
 
 @pytest.mark.integration
-async def test_r10_update_owned_wrong_owner_returns_none_untouched(session: AsyncSession) -> None:
+async def test_r10_update_owned_wrong_owner_returns_none_untouched(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Owned"))
@@ -419,7 +435,9 @@ async def test_r10_update_owned_wrong_owner_returns_none_untouched(session: Asyn
 
 
 @pytest.mark.integration
-async def test_r11_update_owned_rename_collision_raises_conflict(session: AsyncSession) -> None:
+async def test_r11_update_owned_rename_collision_raises_conflict(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     a = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Alpha"))
@@ -439,7 +457,9 @@ async def test_r11_update_owned_rename_collision_raises_conflict(session: AsyncS
 
 
 @pytest.mark.integration
-async def test_r12_soft_delete_owned_hides_from_get_and_list(session: AsyncSession) -> None:
+async def test_r12_soft_delete_owned_hides_from_get_and_list(
+    session: AsyncSession,
+) -> None:
     tenant_id, owner_id = await _seed_owner(session)
     repo = ProjectRepository(session)
     created = await repo.add(_entity(tenant_id=tenant_id, owner_user_id=owner_id, name="Doomed"))

@@ -88,7 +88,13 @@ def main() -> int:
     )
 
     # Step 8
-    run([sys.executable, "scripts/regenerate_erd.py", str(ARTIFACTS / "erd_generated.md")])
+    run(
+        [
+            sys.executable,
+            "scripts/regenerate_erd.py",
+            str(ARTIFACTS / "erd_generated.md"),
+        ]
+    )
 
     print()
     if rc != 0:

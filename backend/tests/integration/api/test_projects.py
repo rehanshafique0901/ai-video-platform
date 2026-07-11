@@ -85,7 +85,11 @@ async def _register(client: AsyncClient) -> dict:
     """Register a fresh user; return the ``data`` payload (user + tokens)."""
     r = await client.post(
         "/api/v1/auth/register",
-        json={"email": _fresh_email(), "password": "correct horse battery staple", "name": "P"},
+        json={
+            "email": _fresh_email(),
+            "password": "correct horse battery staple",
+            "name": "P",
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()["data"]
@@ -404,7 +408,9 @@ async def test_h18_patch_envelope_shape(client: AsyncClient) -> None:
 
 
 @pytest.mark.integration
-async def test_h19_patch_partial_leaves_absent_fields_unchanged(client: AsyncClient) -> None:
+async def test_h19_patch_partial_leaves_absent_fields_unchanged(
+    client: AsyncClient,
+) -> None:
     reg = await _register(client)
     access = reg["access_token"]
     created = await _create(
@@ -435,7 +441,9 @@ async def test_h19_patch_partial_leaves_absent_fields_unchanged(client: AsyncCli
 
 
 @pytest.mark.integration
-async def test_h20_patch_explicit_null_clears_and_name_null_422(client: AsyncClient) -> None:
+async def test_h20_patch_explicit_null_clears_and_name_null_422(
+    client: AsyncClient,
+) -> None:
     reg = await _register(client)
     access = reg["access_token"]
     created = await _create(client, access, name="Nullable", description="to-clear")
@@ -463,7 +471,9 @@ async def test_h20_patch_explicit_null_clears_and_name_null_422(client: AsyncCli
 
 
 @pytest.mark.integration
-async def test_h21_patch_same_value_no_op_version_unchanged(client: AsyncClient) -> None:
+async def test_h21_patch_same_value_no_op_version_unchanged(
+    client: AsyncClient,
+) -> None:
     reg = await _register(client)
     access = reg["access_token"]
     created = await _create(client, access, name="Steady")
@@ -564,7 +574,9 @@ async def test_h25_patch_rename_collision_returns_409(client: AsyncClient) -> No
 
 
 @pytest.mark.integration
-async def test_h26_patch_forbidden_missing_version_empty_all_422(client: AsyncClient) -> None:
+async def test_h26_patch_forbidden_missing_version_empty_all_422(
+    client: AsyncClient,
+) -> None:
     reg = await _register(client)
     access = reg["access_token"]
     created = await _create(client, access, name="Guarded")
@@ -572,7 +584,9 @@ async def test_h26_patch_forbidden_missing_version_empty_all_422(client: AsyncCl
 
     # Forbidden field (aspect_ratio immutable in α5b; extra="forbid").
     r1 = await client.patch(
-        url, headers=_auth(access), json={"aspect_ratio": "square", "version": created["version"]}
+        url,
+        headers=_auth(access),
+        json={"aspect_ratio": "square", "version": created["version"]},
     )
     assert r1.status_code == 422
 
@@ -654,7 +668,9 @@ async def test_h29_delete_idempotent_by_404(client: AsyncClient) -> None:
 
 
 @pytest.mark.integration
-async def test_h30_delete_other_owners_or_unknown_returns_404(client: AsyncClient) -> None:
+async def test_h30_delete_other_owners_or_unknown_returns_404(
+    client: AsyncClient,
+) -> None:
     reg_a = await _register(client)
     created = await _create(client, reg_a["access_token"], name="A owns")
 

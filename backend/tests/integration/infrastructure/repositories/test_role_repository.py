@@ -81,7 +81,9 @@ async def test_assign_role_by_code_is_idempotent(session: AsyncSession) -> None:
 
 
 @pytest.mark.integration
-async def test_assign_role_by_code_raises_for_unknown_code(session: AsyncSession) -> None:
+async def test_assign_role_by_code_raises_for_unknown_code(
+    session: AsyncSession,
+) -> None:
     user_id = await _seed_user(session)
     repo = RoleRepository(session)
 
@@ -90,7 +92,9 @@ async def test_assign_role_by_code_raises_for_unknown_code(session: AsyncSession
 
 
 @pytest.mark.integration
-async def test_assign_role_by_code_supports_owner_and_editor(session: AsyncSession) -> None:
+async def test_assign_role_by_code_supports_owner_and_editor(
+    session: AsyncSession,
+) -> None:
     """Two distinct seeded codes must both be assignable on the same user."""
     user_id = await _seed_user(session)
     repo = RoleRepository(session)

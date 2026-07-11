@@ -144,7 +144,9 @@ async def test_revoke_is_compare_and_swap_idempotent(session: AsyncSession) -> N
 
 
 @pytest.mark.integration
-async def test_revoke_on_unknown_session_id_returns_false(session: AsyncSession) -> None:
+async def test_revoke_on_unknown_session_id_returns_false(
+    session: AsyncSession,
+) -> None:
     _, user_id = await _seed_user(session)
     repo = SessionRepository(session)
 
@@ -163,7 +165,10 @@ async def test_list_family_returns_all_rows_regardless_of_revocation(
     other_family = uuid4()
 
     s1 = _make_entity(
-        user_id, family_id=family_id, token_hash="f1" + "a" * 62, revoked_at=datetime.now(UTC)
+        user_id,
+        family_id=family_id,
+        token_hash="f1" + "a" * 62,
+        revoked_at=datetime.now(UTC),
     )
     s2 = _make_entity(user_id, family_id=family_id, token_hash="f1" + "b" * 62)
     s3 = _make_entity(user_id, family_id=other_family, token_hash="f2" + "c" * 62)

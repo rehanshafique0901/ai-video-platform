@@ -28,7 +28,11 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.enums import model_status_enum, plugin_kind_enum, pricing_unit_enum
+from app.infrastructure.db.enums import (
+    model_status_enum,
+    plugin_kind_enum,
+    pricing_unit_enum,
+)
 from app.infrastructure.db.mixins import (
     CreatedAtOnlyMixin,
     TimestampMixin,

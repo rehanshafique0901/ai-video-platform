@@ -98,7 +98,9 @@ async def test_exists_by_id_returns_false_for_unknown(session: AsyncSession) -> 
 
 
 @pytest.mark.integration
-async def test_add_persists_user_and_returns_populated_entity(session: AsyncSession) -> None:
+async def test_add_persists_user_and_returns_populated_entity(
+    session: AsyncSession,
+) -> None:
     tenant_id = await _seed_tenant(session)
     repo = UserRepository(session)
     now = datetime.now(UTC)
@@ -275,7 +277,9 @@ async def _seed_user_for_update(
 
 
 @pytest.mark.integration
-async def test_r1_update_profile_happy_path_bumps_version(session: AsyncSession) -> None:
+async def test_r1_update_profile_happy_path_bumps_version(
+    session: AsyncSession,
+) -> None:
     """R1: real row shows the new ``display_name`` and ``version+1``
     after a successful CAS; a fresh ``get_by_id`` confirms the mutation
     is persisted (not just returned by ``RETURNING``); ``version == 2``
@@ -306,7 +310,9 @@ async def test_r1_update_profile_happy_path_bumps_version(session: AsyncSession)
 
 
 @pytest.mark.integration
-async def test_r2_update_profile_version_mismatch_returns_none(session: AsyncSession) -> None:
+async def test_r2_update_profile_version_mismatch_returns_none(
+    session: AsyncSession,
+) -> None:
     """R2: a stale ``expected_version`` yields ``None`` (the caller then
     raises ``VersionConflictError`` → 412). The row is exactly the
     pre-call state — no partial write, no silent bump."""
@@ -327,7 +333,9 @@ async def test_r2_update_profile_version_mismatch_returns_none(session: AsyncSes
 
 
 @pytest.mark.integration
-async def test_r3_update_profile_on_soft_deleted_row_returns_none(session: AsyncSession) -> None:
+async def test_r3_update_profile_on_soft_deleted_row_returns_none(
+    session: AsyncSession,
+) -> None:
     """R3: a soft-deleted row (``deleted_at IS NOT NULL``) is not
     updateable even with the correct version — the ``deleted_at IS NULL``
     filter on the fetch + UPDATE guarantees this. Upstream this collapses
