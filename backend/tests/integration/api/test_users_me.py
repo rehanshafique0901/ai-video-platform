@@ -82,7 +82,11 @@ async def _register(client: AsyncClient) -> dict:
     """Register a fresh user and return the ``data`` payload."""
     r = await client.post(
         "/api/v1/auth/register",
-        json={"email": _fresh_email(), "password": "correct horse battery staple", "name": "M"},
+        json={
+            "email": _fresh_email(),
+            "password": "correct horse battery staple",
+            "name": "M",
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()["data"]
@@ -207,11 +211,16 @@ async def test_me_tampered_signature_rejects_before_session_lookup(
     caplog.set_level(logging.WARNING, logger="app.api.v1.deps")
     reg = await _register(client)
     access = reg["access_token"]
-    # Flip the final character of the signature segment. Ensures a
-    # syntactically valid three-part JWT that fails cryptographic
+    # Flip the FIRST character of the signature segment. The final
+    # base64url char of a 32-byte HS256 HMAC carries 2 padding bits that
+    # decode identically for several source chars (e.g. "A"->"B"), so a
+    # last-char flip is not guaranteed to change the decoded signature and
+    # would occasionally verify (flaky). The first char is fully
+    # significant, so flipping it always changes the decoded HMAC while
+    # keeping a syntactically valid three-part JWT that fails cryptographic
     # verification specifically (not shape validation).
     head, payload, sig = access.split(".")
-    tampered_sig = sig[:-1] + ("A" if sig[-1] != "A" else "B")
+    tampered_sig = ("A" if sig[0] != "A" else "B") + sig[1:]
     tampered = f"{head}.{payload}.{tampered_sig}"
 
     r = await client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {tampered}"})
@@ -222,7 +231,11 @@ async def test_me_tampered_signature_rejects_before_session_lookup(
     assert any(
         "reason=verify_failed" in m for m in rejection_msgs
     ), f"expected reason=verify_failed in dep logs; saw: {rejection_msgs}"
-    session_branch_reasons = ("sid_missing_session", "session_revoked", "session_expired")
+    session_branch_reasons = (
+        "sid_missing_session",
+        "session_revoked",
+        "session_expired",
+    )
     for m in rejection_msgs:
         for reason in session_branch_reasons:
             assert (
@@ -551,7 +564,9 @@ async def test_patch_me_response_matches_subsequent_get(client: AsyncClient) -> 
 
 
 @pytest.mark.integration
-async def test_patch_me_second_write_with_stale_version_gets_412(client: AsyncClient) -> None:
+async def test_patch_me_second_write_with_stale_version_gets_412(
+    client: AsyncClient,
+) -> None:
     """A3: canonical concurrency race — two PATCHes with the same
     expected ``version``, one succeeds and one gets 412.
 
@@ -578,7 +593,10 @@ async def test_patch_me_second_write_with_stale_version_gets_412(client: AsyncCl
     r2 = await client.patch(
         "/api/v1/users/me",
         headers=headers,
-        json={"display_name": "Second", "version": 1},  # stale — first already bumped to 2
+        json={
+            "display_name": "Second",
+            "version": 1,
+        },  # stale — first already bumped to 2
     )
     assert r2.status_code == 412
     assert r2.json()["error"]["code"] == "VERSION_CONFLICT"

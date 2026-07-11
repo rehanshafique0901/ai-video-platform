@@ -206,7 +206,9 @@ def _row_to_entity(row: ProjectRow) -> ProjectEntity:
         # ``Decimal``; the domain entity models it as ``float | None``.
         # α5a never sets it (always None on create) but a row fetched
         # from a later slice could carry a value, so convert defensively.
-        duration_seconds=float(row.duration_seconds) if row.duration_seconds is not None else None,
+        duration_seconds=(
+            float(row.duration_seconds) if row.duration_seconds is not None else None
+        ),
         language=row.language,
         style=row.style,
         settings=row.settings,

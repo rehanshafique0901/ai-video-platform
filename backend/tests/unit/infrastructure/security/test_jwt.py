@@ -58,7 +58,10 @@ def test_verify_rejects_invalid_token(jwt_service: JWTService) -> None:
 @pytest.mark.unit
 def test_verify_rejects_wrong_signature() -> None:
     issuer = JWTService(
-        secret=_SECRET, algorithm="HS256", access_ttl_seconds=900, refresh_ttl_seconds=900
+        secret=_SECRET,
+        algorithm="HS256",
+        access_ttl_seconds=900,
+        refresh_ttl_seconds=900,
     )
     token = issuer.issue_access(uuid4())
     verifier = JWTService(

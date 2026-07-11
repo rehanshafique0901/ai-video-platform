@@ -24,7 +24,11 @@ def _fresh_email() -> str:
 
 @pytest.mark.integration
 async def test_register_happy_path_returns_201_with_tokens(client: AsyncClient) -> None:
-    body = {"email": _fresh_email(), "password": "correct horse battery staple", "name": "E2E"}
+    body = {
+        "email": _fresh_email(),
+        "password": "correct horse battery staple",
+        "name": "E2E",
+    }
     r = await client.post("/api/v1/auth/register", json=body)
 
     assert r.status_code == 201, r.text
@@ -40,7 +44,9 @@ async def test_register_happy_path_returns_201_with_tokens(client: AsyncClient) 
 
 
 @pytest.mark.integration
-async def test_register_duplicate_email_returns_409_conflict(client: AsyncClient) -> None:
+async def test_register_duplicate_email_returns_409_conflict(
+    client: AsyncClient,
+) -> None:
     email = _fresh_email()
     body = {"email": email, "password": "correct horse battery staple", "name": "First"}
     r1 = await client.post("/api/v1/auth/register", json=body)
@@ -72,13 +78,19 @@ async def test_register_lowercases_email(client: AsyncClient) -> None:
 @pytest.mark.integration
 async def test_register_access_token_carries_sid_and_fam(client: AsyncClient, settings) -> None:
     """The access JWT must carry ``sid`` + ``fam`` claims (improvement A)."""
-    body = {"email": _fresh_email(), "password": "correct horse battery staple", "name": "E2E"}
+    body = {
+        "email": _fresh_email(),
+        "password": "correct horse battery staple",
+        "name": "E2E",
+    }
     r = await client.post("/api/v1/auth/register", json=body)
     assert r.status_code == 201, r.text
 
     access_token = r.json()["data"]["access_token"]
     payload = jwt.decode(
-        access_token, settings.jwt_secret.get_secret_value(), algorithms=[settings.jwt_algorithm]
+        access_token,
+        settings.jwt_secret.get_secret_value(),
+        algorithms=[settings.jwt_algorithm],
     )
     assert payload["kind"] == "access"
     assert payload["sid"]
@@ -90,7 +102,9 @@ async def test_register_access_token_carries_sid_and_fam(client: AsyncClient, se
 
 
 @pytest.mark.integration
-async def test_login_happy_path_returns_200_with_new_tokens(client: AsyncClient) -> None:
+async def test_login_happy_path_returns_200_with_new_tokens(
+    client: AsyncClient,
+) -> None:
     email = _fresh_email()
     reg = await client.post(
         "/api/v1/auth/register",
@@ -184,7 +198,11 @@ async def test_login_two_devices_creates_distinct_families(client: AsyncClient, 
 async def test_responses_include_request_id_in_meta(client: AsyncClient) -> None:
     r = await client.post(
         "/api/v1/auth/register",
-        json={"email": _fresh_email(), "password": "correct horse battery staple", "name": "R"},
+        json={
+            "email": _fresh_email(),
+            "password": "correct horse battery staple",
+            "name": "R",
+        },
     )
     assert r.status_code == 201, r.text
     assert r.json()["meta"]["request_id"]
@@ -339,14 +357,18 @@ async def test_logout_is_idempotent(client: AsyncClient) -> None:
 
 
 @pytest.mark.integration
-async def test_logout_missing_authorization_header_returns_401(client: AsyncClient) -> None:
+async def test_logout_missing_authorization_header_returns_401(
+    client: AsyncClient,
+) -> None:
     r = await client.post("/api/v1/auth/logout")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "UNAUTHENTICATED"
 
 
 @pytest.mark.integration
-async def test_logout_malformed_authorization_header_returns_401(client: AsyncClient) -> None:
+async def test_logout_malformed_authorization_header_returns_401(
+    client: AsyncClient,
+) -> None:
     r = await client.post("/api/v1/auth/logout", headers={"Authorization": "NotBearer xyz"})
     assert r.status_code == 401
 

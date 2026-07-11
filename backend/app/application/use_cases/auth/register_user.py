@@ -57,7 +57,11 @@ from uuid import uuid4
 import structlog
 
 from app.application.interfaces.clock import IClock
-from app.application.interfaces.security import IPasswordHasher, IssuedTokens, ITokenIssuer
+from app.application.interfaces.security import (
+    IPasswordHasher,
+    IssuedTokens,
+    ITokenIssuer,
+)
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.auth.errors import (
     EmailAlreadyRegisteredError,

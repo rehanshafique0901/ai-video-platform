@@ -198,7 +198,10 @@ async def test_missing_header_rejects_with_generic_401() -> None:
     _, _, issuer, uow, _ = _seed_live()
     request = _make_request(authorization=None)
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -220,7 +223,10 @@ async def test_malformed_header_rejects_with_generic_401(authorization: str) -> 
     _, _, issuer, uow, _ = _seed_live()
     request = _make_request(authorization=authorization)
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -235,7 +241,10 @@ async def test_verify_failed_flags_security_event() -> None:
     # FakeTokenIssuer.verify raises UnauthorizedError for unknown tokens.
     request = _make_request(authorization="Bearer abc.def.tampered-signature")
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -251,7 +260,10 @@ async def test_sid_missing_session_flags_security_event() -> None:
     uow._fake_sessions._rows.clear()
     request = _make_request(authorization=f"Bearer {access}")
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -269,7 +281,10 @@ async def test_session_revoked_rejects_without_security_flag() -> None:
     _, _, issuer, uow, access = _seed_live(session_row=revoked_row)
     request = _make_request(authorization=f"Bearer {access}")
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -287,7 +302,10 @@ async def test_session_expired_rejects_without_security_flag() -> None:
     _, _, issuer, uow, access = _seed_live(session_row=expired_row)
     request = _make_request(authorization=f"Bearer {access}")
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401
@@ -302,7 +320,10 @@ async def test_sid_user_gone_rejects_without_security_flag() -> None:
     _, _, issuer, uow, access = _seed_live(user_in_repo=False)
     request = _make_request(authorization=f"Bearer {access}")
 
-    with structlog.testing.capture_logs() as entries, pytest.raises(UnauthorizedError) as exc:
+    with (
+        structlog.testing.capture_logs() as entries,
+        pytest.raises(UnauthorizedError) as exc,
+    ):
         await get_current_user(request, issuer, uow)
 
     assert str(exc.value) == _GENERIC_401

@@ -35,7 +35,11 @@ except ImportError:  # pragma: no cover — guarded for environments without pgv
     Vector = None  # type: ignore[assignment,misc]
 
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.enums import media_kind_enum, media_source_enum, storage_backend_enum
+from app.infrastructure.db.enums import (
+    media_kind_enum,
+    media_source_enum,
+    storage_backend_enum,
+)
 from app.infrastructure.db.mixins import (
     SoftDeleteMixin,
     TimestampMixin,

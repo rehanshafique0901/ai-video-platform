@@ -120,6 +120,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.application.interfaces.repositories import (
         IProjectRepository,
         IRoleRepository,
+        ISceneRepository,
         ISessionRepository,
         ITenantRepository,
         IUserRepository,
@@ -127,6 +128,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.application.interfaces.unit_of_work import IUnitOfWork
     from app.infrastructure.repositories.project_repository import ProjectRepository
     from app.infrastructure.repositories.role_repository import RoleRepository
+    from app.infrastructure.repositories.scene_repository import SceneRepository
     from app.infrastructure.repositories.session_repository import SessionRepository
     from app.infrastructure.repositories.tenant_repository import TenantRepository
     from app.infrastructure.repositories.user_repository import UserRepository
@@ -170,6 +172,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.sessions = cast(ISessionRepository, SessionRepository(self._session))
                 self.roles = cast(IRoleRepository, RoleRepository(self._session))
                 self.projects = cast(IProjectRepository, ProjectRepository(self._session))
+                self.scenes = cast(ISceneRepository, SceneRepository(self._session))
                 return self
 
             async def __aexit__(

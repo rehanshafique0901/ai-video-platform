@@ -76,10 +76,13 @@ class RenderJob(UUIDPrimaryKeyMixin, TimestampMixin, VersionMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "queue IN ('critical','high','normal','low','background')", name="queue_valid"
+            "queue IN ('critical','high','normal','low','background')",
+            name="queue_valid",
         ),
         UniqueConstraint(
-            "project_id", "idempotency_key", name="uq_render_jobs_project_id_idempotency_key"
+            "project_id",
+            "idempotency_key",
+            name="uq_render_jobs_project_id_idempotency_key",
         ),
         Index(
             "ix_render_jobs_status_priority_created_at",

@@ -60,7 +60,11 @@ class IdempotencyKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "expires_at",
             postgresql_where=text("status <> 'in_flight'"),
         ),
-        Index("ix_idempotency_keys_resource_type_resource_id", "resource_type", "resource_id"),
+        Index(
+            "ix_idempotency_keys_resource_type_resource_id",
+            "resource_type",
+            "resource_id",
+        ),
     )
 
 

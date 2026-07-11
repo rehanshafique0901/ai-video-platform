@@ -182,7 +182,10 @@ def test_verify_rejects_token_missing_sid_claim() -> None:
     """A token minted without the sid/fam claims must be rejected as invalid."""
     # Craft one manually using JWTService without the AuthTokenIssuer's sid/fam.
     jwt_svc = JWTService(
-        secret=_SECRET, algorithm="HS256", access_ttl_seconds=900, refresh_ttl_seconds=2_592_000
+        secret=_SECRET,
+        algorithm="HS256",
+        access_ttl_seconds=900,
+        refresh_ttl_seconds=2_592_000,
     )
     bare_access = jwt_svc.issue_access(uuid4())  # no claims dict
 

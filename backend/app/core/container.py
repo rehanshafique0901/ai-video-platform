@@ -42,6 +42,12 @@ from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
 from app.application.use_cases.projects.list_projects import ListProjects
 from app.application.use_cases.projects.update_project import UpdateProject
+from app.application.use_cases.scenes.create_scene import CreateScene
+from app.application.use_cases.scenes.delete_scene import DeleteScene
+from app.application.use_cases.scenes.get_scene import GetScene
+from app.application.use_cases.scenes.list_scenes import ListScenes
+from app.application.use_cases.scenes.move_scene import MoveScene
+from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
@@ -274,3 +280,32 @@ def get_update_project_use_case() -> UpdateProject:
 
 def get_delete_project_use_case() -> DeleteProject:
     return DeleteProject(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α5c — Scenes CRUD + reorder)
+# ---------------------------------------------------------------------
+
+
+def get_create_scene_use_case() -> CreateScene:
+    return CreateScene(uow=get_unit_of_work())
+
+
+def get_list_scenes_use_case() -> ListScenes:
+    return ListScenes(uow=get_unit_of_work())
+
+
+def get_get_scene_use_case() -> GetScene:
+    return GetScene(uow=get_unit_of_work())
+
+
+def get_update_scene_use_case() -> UpdateScene:
+    return UpdateScene(uow=get_unit_of_work())
+
+
+def get_move_scene_use_case() -> MoveScene:
+    return MoveScene(uow=get_unit_of_work())
+
+
+def get_delete_scene_use_case() -> DeleteScene:
+    return DeleteScene(uow=get_unit_of_work())

@@ -27,7 +27,12 @@ import _load_env
 
 DATABASE_URL = _load_env.load()
 
-_PARTITION_PREFIXES = ("usage_records_y", "analytics_events_y", "event_log_y", "audit_log_y")
+_PARTITION_PREFIXES = (
+    "usage_records_y",
+    "analytics_events_y",
+    "event_log_y",
+    "audit_log_y",
+)
 _PARTITION_DEFAULTS = {
     "usage_records_default",
     "analytics_events_default",
