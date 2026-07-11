@@ -31,6 +31,7 @@ import structlog
 from fastapi import Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.helpers import client_ip
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
@@ -118,14 +119,6 @@ BearerAccessTokenDep = Annotated[str, Depends(_bearer_access_token)]
 # ---- Authenticated-request seam (Slice α3) ----------------------------
 
 
-def _client_ip(request: Request) -> str | None:
-    """Best-effort caller IP for audit logs (same shape as ``routers/auth.py``)."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
-
-
 def _reject(
     reason: str,
     *,
@@ -170,7 +163,7 @@ async def get_current_user(
     is preserved for ``/auth/logout``, which has its own message shape
     (α2b, deliberate).
     """
-    ip = _client_ip(request)
+    ip = client_ip(request)
     user_agent = request.headers.get("user-agent")
 
     # ---- Step 1: header shape (reason=missing_header / malformed_header)

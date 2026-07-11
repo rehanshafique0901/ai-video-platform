@@ -22,7 +22,6 @@ flow this create endpoint follows.
 
 from __future__ import annotations
 
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, status
@@ -34,22 +33,11 @@ from app.api.v1.deps import (
     GetProjectDep,
     ListProjectsDep,
 )
+from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.projects import ProjectCreateRequest, ProjectPublic
 from app.domain.projects.project import Project
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-
-
-def _meta(request: Request, *, next_cursor: str | None = None) -> dict[str, Any]:
-    """Build the API_CONTRACT §1.1 ``meta`` block.
-
-    ``next_cursor`` is included only when present — its absence is the
-    "last page" signal for list responses (API_CONTRACT §6).
-    """
-    meta: dict[str, Any] = {"request_id": getattr(request.state, "request_id", "")}
-    if next_cursor is not None:
-        meta["next_cursor"] = next_cursor
-    return meta
 
 
 def _to_public(project: Project) -> ProjectPublic:
@@ -73,21 +61,6 @@ def _to_public(project: Project) -> ProjectPublic:
         updated_at=project.updated_at,
         version=project.version,
     )
-
-
-def _client_ip(request: Request) -> str | None:
-    """Best-effort caller IP for audit logs (same shape as ``routers/auth.py``).
-
-    Third copy of this helper (auth, users, now projects). Per the note
-    in ``routers/users.py``, an extraction to a shared ``app.api.v1``
-    helper module is now warranted; it is deferred to a dedicated
-    tidy-up slice so α5a stays purely additive and does not churn the
-    α2/α4 routers.
-    """
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -114,14 +87,11 @@ async def create_project(
         language=body.language,
         style=body.style,
         settings=body.settings,
-        ip=_client_ip(request),
+        ip=client_ip(request),
     )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
-        content={
-            "data": _to_public(result.project).model_dump(mode="json"),
-            "meta": _meta(request),
-        },
+        content=envelope(_to_public(result.project), request),
     )
 
 
@@ -148,9 +118,12 @@ async def list_projects(
         limit=limit,
         cursor_token=cursor,
     )
-    data = [_to_public(p).model_dump(mode="json") for p in page.items]
     return JSONResponse(
-        content={"data": data, "meta": _meta(request, next_cursor=page.next_cursor)}
+        content=envelope(
+            [_to_public(p) for p in page.items],
+            request,
+            next_cursor=page.next_cursor,
+        )
     )
 
 
@@ -173,6 +146,4 @@ async def get_project(
         owner_user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )
-    return JSONResponse(
-        content={"data": _to_public(project).model_dump(mode="json"), "meta": _meta(request)}
-    )
+    return JSONResponse(content=envelope(_to_public(project), request))

@@ -35,21 +35,15 @@ See ``docs/engineering/AUTH_ENDPOINTS.md`` §8 for the canonical flow.
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.api.v1.deps import CurrentUserDep, UpdateUserProfileDep
+from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.users import UpdateUserProfileRequest, UserPublic
 from app.domain.identity.user import User
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-def _envelope(payload: UserPublic, request: Request) -> dict[str, Any]:
-    request_id = getattr(request.state, "request_id", "")
-    return {"data": payload.model_dump(mode="json"), "meta": {"request_id": request_id}}
 
 
 def _to_public(user: User) -> UserPublic:
@@ -71,20 +65,6 @@ def _to_public(user: User) -> UserPublic:
     )
 
 
-def _client_ip(request: Request) -> str | None:
-    """Best-effort caller IP for audit logs (same shape as ``routers/auth.py``).
-
-    Duplicated from ``routers/auth.py`` deliberately — α4 introduces the
-    second router with this need and duplication is cheaper than the
-    scope creep of a shared helper module. If a third router adds the
-    same helper, extract to ``app.api.v1.helpers`` at that point.
-    """
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
-
-
 @router.get("/me")
 async def get_me(request: Request, current_user: CurrentUserDep) -> JSONResponse:
     """Return the authenticated caller's own public profile.
@@ -95,7 +75,7 @@ async def get_me(request: Request, current_user: CurrentUserDep) -> JSONResponse
     runs, ``current_user`` is guaranteed to be a live, un-revoked user
     with a valid session; no additional validation is warranted.
     """
-    return JSONResponse(content=_envelope(_to_public(current_user), request))
+    return JSONResponse(content=envelope(_to_public(current_user), request))
 
 
 @router.patch("/me")
@@ -140,6 +120,6 @@ async def update_me(
         user_id=current_user.id,
         expected_version=body.version,
         display_name=body.display_name,
-        ip=_client_ip(request),
+        ip=client_ip(request),
     )
-    return JSONResponse(content=_envelope(_to_public(result.user), request))
+    return JSONResponse(content=envelope(_to_public(result.user), request))
