@@ -10,20 +10,14 @@ Success responses follow the envelope in ``API_CONTRACT.md`` §1.1:
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api.v1.deps import SessionDep
+from app.api.v1.helpers import envelope
 
 router = APIRouter(tags=["health"])
-
-
-def _envelope(data: dict[str, Any], request: Request) -> dict[str, Any]:
-    request_id = getattr(request.state, "request_id", "")
-    return {"data": data, "meta": {"request_id": request_id}}
 
 
 @router.get("/healthz")
@@ -31,7 +25,7 @@ async def healthz(request: Request) -> JSONResponse:
     """Process liveness — 200 whenever the process can respond."""
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=_envelope({"status": "ok"}, request),
+        content=envelope({"status": "ok"}, request),
     )
 
 
@@ -43,9 +37,9 @@ async def readyz(request: Request, session: SessionDep) -> JSONResponse:
     except Exception:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=_envelope({"status": "db_unreachable"}, request),
+            content=envelope({"status": "db_unreachable"}, request),
         )
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=_envelope({"status": "ready"}, request),
+        content=envelope({"status": "ready"}, request),
     )

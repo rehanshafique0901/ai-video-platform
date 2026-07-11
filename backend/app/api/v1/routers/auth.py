@@ -37,6 +37,7 @@ from app.api.v1.deps import (
     RefreshSessionDep,
     RegisterUserDep,
 )
+from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.auth import (
     AuthTokensPayload,
     LoginRequest,
@@ -49,11 +50,6 @@ from app.application.use_cases.auth.refresh_session import RefreshSessionResult
 from app.application.use_cases.auth.register_user import RegisterUserResult
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-def _envelope(payload: AuthTokensPayload, request: Request) -> dict[str, Any]:
-    request_id = getattr(request.state, "request_id", "")
-    return {"data": payload.model_dump(mode="json"), "meta": {"request_id": request_id}}
 
 
 def _to_payload(user_id: Any, tokens_bundle: Any, user: Any) -> AuthTokensPayload:
@@ -93,13 +89,13 @@ async def register(
         email=body.email,
         password=body.password,
         name=body.name,
-        ip=_client_ip(request),
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     payload = _to_payload(result.user.id, result.tokens, result.user)
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
-        content=_envelope(payload, request),
+        content=envelope(payload, request),
     )
 
 
@@ -112,13 +108,13 @@ async def login(
     result: LoginUserResult = await use_case.execute(
         email=body.email,
         password=body.password,
-        ip=_client_ip(request),
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     payload = _to_payload(result.user.id, result.tokens, result.user)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=_envelope(payload, request),
+        content=envelope(payload, request),
     )
 
 
@@ -130,13 +126,13 @@ async def refresh(
 ) -> JSONResponse:
     result: RefreshSessionResult = await use_case.execute(
         refresh_token=body.refresh_token,
-        ip=_client_ip(request),
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     payload = _to_payload(result.user.id, result.tokens, result.user)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=_envelope(payload, request),
+        content=envelope(payload, request),
     )
 
 
@@ -159,17 +155,3 @@ async def logout(
     """
     await use_case.execute(access_token)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-def _client_ip(request: Request) -> str | None:
-    """Return the caller IP, honouring a common reverse-proxy header if present.
-
-    Storing IP is best-effort for audit: TrustedHost + X-Forwarded-For
-    handling for production land in a later slice (behind an ADR). For
-    α2a we take the first value of ``X-Forwarded-For`` if set, otherwise
-    ``request.client.host``.
-    """
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
