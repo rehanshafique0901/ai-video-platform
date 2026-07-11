@@ -118,12 +118,14 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.application.interfaces.repositories import (
+        IProjectRepository,
         IRoleRepository,
         ISessionRepository,
         ITenantRepository,
         IUserRepository,
     )
     from app.application.interfaces.unit_of_work import IUnitOfWork
+    from app.infrastructure.repositories.project_repository import ProjectRepository
     from app.infrastructure.repositories.role_repository import RoleRepository
     from app.infrastructure.repositories.session_repository import SessionRepository
     from app.infrastructure.repositories.tenant_repository import TenantRepository
@@ -167,6 +169,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.tenants = cast(ITenantRepository, TenantRepository(self._session))
                 self.sessions = cast(ISessionRepository, SessionRepository(self._session))
                 self.roles = cast(IRoleRepository, RoleRepository(self._session))
+                self.projects = cast(IProjectRepository, ProjectRepository(self._session))
                 return self
 
             async def __aexit__(

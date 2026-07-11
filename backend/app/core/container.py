@@ -37,6 +37,9 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.projects.create_project import CreateProject
+from app.application.use_cases.projects.get_project import GetProject
+from app.application.use_cases.projects.list_projects import ListProjects
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
@@ -239,3 +242,20 @@ def get_update_user_profile_use_case() -> UpdateUserProfile:
     See pre-flight §4.1 (composition root wiring) and §12 step 8.
     """
     return UpdateUserProfile(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α5a — Projects create + read)
+# ---------------------------------------------------------------------
+
+
+def get_create_project_use_case() -> CreateProject:
+    return CreateProject(uow=get_unit_of_work())
+
+
+def get_get_project_use_case() -> GetProject:
+    return GetProject(uow=get_unit_of_work())
+
+
+def get_list_projects_use_case() -> ListProjects:
+    return ListProjects(uow=get_unit_of_work())

@@ -22,6 +22,7 @@ from types import TracebackType
 from typing import Self
 
 from app.application.interfaces.repositories import (
+    IProjectRepository,
     IRoleRepository,
     ISessionRepository,
     ITenantRepository,
@@ -50,6 +51,7 @@ class IUnitOfWork(ABC):
     tenants: ITenantRepository
     sessions: ISessionRepository
     roles: IRoleRepository
+    projects: IProjectRepository  # α5a
 
     async def __aenter__(self) -> Self:
         return self

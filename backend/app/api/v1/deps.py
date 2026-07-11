@@ -38,6 +38,9 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.projects.create_project import CreateProject
+from app.application.use_cases.projects.get_project import GetProject
+from app.application.use_cases.projects.list_projects import ListProjects
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.core import container
 from app.core.errors import UnauthorizedError
@@ -80,6 +83,12 @@ LogoutSessionDep = Annotated[LogoutSession, Depends(container.get_logout_session
 UpdateUserProfileDep = Annotated[
     UpdateUserProfile, Depends(container.get_update_user_profile_use_case)
 ]
+
+# ---- Use-case dependencies (Slice α5a) --------------------------------
+
+CreateProjectDep = Annotated[CreateProject, Depends(container.get_create_project_use_case)]
+GetProjectDep = Annotated[GetProject, Depends(container.get_get_project_use_case)]
+ListProjectsDep = Annotated[ListProjects, Depends(container.get_list_projects_use_case)]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

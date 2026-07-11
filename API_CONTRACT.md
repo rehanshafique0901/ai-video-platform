@@ -30,7 +30,7 @@ Error:
 ```
 {
   "error": {
-    "code": "PROJECT_NOT_FOUND",
+    "code": "NOT_FOUND",
     "message": "Human-readable explanation.",
     "details": { "project_id": "…" },
     "request_id": "…"
@@ -123,6 +123,20 @@ POST   /projects/{id}/duplicate
 DELETE /projects/{id}                  soft delete
 POST   /projects/{id}/autosave         explicit autosave snapshot
 ```
+
+> **Shipped in Phase 3 α5a (create + read):** `POST /projects` (201,
+> `version=1`), `GET /projects` (owner-scoped, newest-first
+> `created_at DESC, id DESC`, cursor pagination via `?limit=` (1–100,
+> default 20) + opaque `?cursor=`), and `GET /projects/{id}`. All three
+> are authenticated (`CurrentUserDep`) and owner-and-tenant scoped:
+> ownership/tenancy are taken from the caller, never the request body,
+> and a project owned by another user (or in another tenant) is
+> indistinguishable from a missing one — `GET /projects/{id}` returns a
+> uniform `404 NOT_FOUND`. A duplicate live `name` for the same owner is
+> `409 CONFLICT`. `PATCH` / `DELETE` / `duplicate` / `autosave` and the
+> `?folder_id` / `?tag` / `?query` list filters are deferred to α5b+.
+> `ProjectPublic` omits `current_version_id` and `duration_seconds`
+> (managed by later slices). See `docs/domain/PROJECT_AGGREGATE.md`.
 
 ### 3.3 Project Versions (CR-6)
 

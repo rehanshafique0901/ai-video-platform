@@ -6,6 +6,64 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5a — Projects create + read (`POST`/`GET /projects`) (2026-07-11)
+
+The first resource beyond identity, and the first **collection** endpoint.
+Establishes the owner-and-tenant scoping pattern and the cursor
+(keyset) pagination primitives that every future list endpoint reuses.
+A thin, additive slice: create + read only (`PATCH` / `DELETE` /
+`duplicate` deferred to α5b+). **No migration** — the `projects` table
+and its `version` / soft-delete / uniqueness constraints already exist
+from α1. See `docs/domain/PROJECT_AGGREGATE.md` (aggregate model) and
+`docs/engineering/PHASE3_ALPHA5_PREFLIGHT.md` (slice scope + decisions).
+
+#### Added
+- **`Project` domain entity** (`app/domain/projects/project.py`) — a
+  frozen dataclass mirroring the `projects` row. `current_version_id` /
+  `duration_seconds` are modelled but unset in α5a (managed by later
+  slices).
+- **Cursor pagination primitives** (`app/application/pagination.py`) —
+  `Cursor` / `Page` dataclasses + opaque, versioned, URL-safe base64
+  `encode_cursor` / `decode_cursor`. A malformed token is a
+  `ValidationFailedError` (422), never a 500. Placed in the application
+  layer so both use cases and the API import it without an import-linter
+  violation.
+- **`IProjectRepository`** (`add` / `get_owned` / `list_owned`) + a
+  `SqlAlchemy` `ProjectRepository`. `get_owned` / `list_owned` filter on
+  `(tenant_id, owner_user_id, deleted_at IS NULL)`; `list_owned`
+  paginates by keyset `(created_at, id) DESC` with a deterministic
+  `id` tie-break (D14); `add` maps a duplicate-name `IntegrityError` to
+  `ConflictError`. `IUnitOfWork` gains a `projects` attribute wired
+  through the SQLAlchemy UoW, the unit-test fakes, and the integration
+  conftest.
+- **`CreateProject` / `GetProject` / `ListProjects` use cases**
+  (`app/application/use_cases/projects/`) — ownership + tenancy come
+  from the authenticated caller; a cross-owner / cross-tenant / missing
+  project collapses to `NotFoundError` (anti-enumeration).
+- **DTOs** (`app/api/v1/schemas/projects.py`) — `ProjectCreateRequest`
+  (`extra="forbid"`; `aspect_ratio` constrained to
+  `horizontal|vertical|square`; ownership/tenancy not accepted from the
+  body) and `ProjectPublic` (omits `current_version_id` /
+  `duration_seconds`, exposes `version` as the α5b PATCH handle).
+- **Endpoints** (`app/api/v1/routers/projects.py`, all `CurrentUserDep`):
+  `POST /api/v1/projects` (201, `version=1`; 409 on duplicate name),
+  `GET /api/v1/projects` (owner-scoped, newest-first, `?limit=` 1–100
+  default 20 + opaque `?cursor=`; `meta.next_cursor` present iff a
+  further page exists), and `GET /api/v1/projects/{project_id}` (200 or
+  a uniform 404). Container factories + `*Dep` aliases wire them through
+  the composition root.
+- **Tests** — unit: `CreateProject` (6), `GetProject` (4),
+  `ListProjects` (5, incl. a multi-page keyset walk), pagination (4);
+  integration: `ProjectRepository` (7, R1–R7) and HTTP `test_projects.py`
+  (16, H1–H16 covering 201/401/404/409/422, owner scoping, and cursor
+  pagination).
+
+#### Changed
+- **`API_CONTRACT.md`** — §1.2 error example corrected from
+  `PROJECT_NOT_FOUND` to the canonical `NOT_FOUND`; §3.2 annotated with
+  the α5a-shipped subset and the deferred surface.
+- App version → `0.4.5-phase3-alpha5a-dev`.
+
 ### Phase 3 Slice α4 — Authenticated profile update (`PATCH /users/me`) (2026-07-10)
 
 The first authenticated **mutation**, and the write-path counterpart to
