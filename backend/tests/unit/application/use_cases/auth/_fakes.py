@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
+    IProjectRepository,
     IRoleRepository,
     ISessionRepository,
     ITenantRepository,
@@ -37,6 +38,7 @@ from app.core.errors import ConflictError, NotFoundError
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.projects.project import Project
 
 # ---- Password hasher --------------------------------------------------
 
@@ -323,6 +325,70 @@ class FakeRoleRepository(IRoleRepository):
         self.assignments.append((user_id, role_code))
 
 
+@dataclass
+class FakeProjectRepository(IProjectRepository):
+    """In-memory ``IProjectRepository`` for α5a use-case unit tests.
+
+    Models the same observable contract as the real
+    ``ProjectRepository``: the live-row partial-unique index on
+    ``(tenant_id, owner_user_id, name)`` (``add`` raises
+    ``ConflictError`` on a duplicate), owner-and-tenant scoping on reads,
+    and ``created_at DESC, id DESC`` keyset ordering on ``list_owned``.
+    The fake has no ``deleted_at`` concept — it models the post-filter
+    view, so a row present in ``_rows`` is a live row.
+    """
+
+    _rows: dict[UUID, Project] = field(default_factory=dict)
+
+    async def add(self, project: Project) -> Project:
+        for existing in self._rows.values():
+            if (
+                existing.tenant_id == project.tenant_id
+                and existing.owner_user_id == project.owner_user_id
+                and existing.name == project.name
+            ):
+                raise ConflictError(
+                    "project already exists",
+                    details={"constraint": "uq_projects_tenant_id_owner_user_id_name"},
+                )
+        self._rows[project.id] = project
+        return project
+
+    async def get_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> Project | None:
+        project = self._rows.get(project_id)
+        if (
+            project is None
+            or project.tenant_id != tenant_id
+            or project.owner_user_id != owner_user_id
+        ):
+            return None
+        return project
+
+    async def list_owned(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[Project]:
+        scoped = [
+            p
+            for p in self._rows.values()
+            if p.tenant_id == tenant_id and p.owner_user_id == owner_user_id
+        ]
+        # Newest first; ``id`` breaks ``created_at`` ties (total order).
+        scoped.sort(key=lambda p: (p.created_at, p.id), reverse=True)
+        if after is not None:
+            after_created_at, after_id = after
+            scoped = [p for p in scoped if (p.created_at, p.id) < (after_created_at, after_id)]
+        return scoped[:limit]
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -335,11 +401,13 @@ class FakeUnitOfWork(IUnitOfWork):
         tenants: FakeTenantRepository | None = None,
         sessions: FakeSessionRepository | None = None,
         roles: FakeRoleRepository | None = None,
+        projects: FakeProjectRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
         self._fake_sessions = sessions or FakeSessionRepository()
         self._fake_roles = roles or FakeRoleRepository()
+        self._fake_projects = projects or FakeProjectRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -348,6 +416,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.tenants = self._fake_tenants
         self.sessions = self._fake_sessions
         self.roles = self._fake_roles
+        self.projects = self._fake_projects
         return self
 
     async def __aexit__(

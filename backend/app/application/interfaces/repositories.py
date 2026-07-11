@@ -32,6 +32,7 @@ from uuid import UUID
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.projects.project import Project
 
 
 class IUserRepository(ABC):
@@ -241,6 +242,76 @@ class ISessionRepository(ABC):
 
         Order is unspecified. Used exclusively by reuse-detection; hot
         paths (refresh happy path) never hit this method.
+        """
+        ...
+
+
+class IProjectRepository(ABC):
+    """Persistence surface for ``projects``. Soft-deleted rows are excluded.
+
+    Introduced by Slice α5a (create + read). Every method is
+    tenant-and-owner scoped: reads pass BOTH ``tenant_id`` AND
+    ``owner_user_id`` so a project belonging to another owner (or
+    another tenant) is invisible — it returns ``None`` / omits the row
+    rather than raising an authorization error, so a caller cannot
+    distinguish "does not exist" from "not yours" (α5a D5 + the
+    anti-enumeration posture inherited from α3). Authorization is the
+    caller's responsibility: the use case has already resolved the
+    authenticated ``owner_user_id`` / ``tenant_id`` from
+    ``CurrentUserDep`` before reaching this port.
+
+    α5b+ extends this with ``update`` (version-fenced CAS, mirroring
+    :meth:`IUserRepository.update_profile`) and ``soft_delete``.
+    """
+
+    @abstractmethod
+    async def add(self, project: Project) -> Project:
+        """Insert a new project row and return the persisted entity.
+
+        Raises ``ConflictError`` if the partial-unique index
+        ``uq_projects_tenant_id_owner_user_id_name`` (live rows only) is
+        violated — i.e. the owner already has a non-deleted project with
+        this ``name``. Timestamps + ``version`` (=1) are populated by DB
+        defaults; the returned entity carries the DB-side values.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> Project | None:
+        """Return the owner's live project with ``project_id``, or ``None``.
+
+        ``None`` is returned when the row does not exist, is
+        soft-deleted, OR belongs to a different ``tenant_id`` /
+        ``owner_user_id`` — the three cases are deliberately
+        indistinguishable so ``GET /projects/{id}`` maps all of them to
+        a uniform ``404 NOT_FOUND`` (α5a D5).
+        """
+        ...
+
+    @abstractmethod
+    async def list_owned(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[Project]:
+        """Return up to ``limit`` of the owner's live projects, newest first.
+
+        Ordering is ``created_at DESC, id DESC`` — a *total* order so
+        keyset pagination never duplicates or skips a row under
+        timestamp ties (α5a D14). ``after`` is the decoded cursor
+        position ``(created_at, id)``: when provided, only rows strictly
+        *after* it in the DESC order are returned (Postgres row-value
+        comparison ``(created_at, id) < (:created_at, :id)``). The
+        caller (``ListProjects``) requests ``limit + 1`` to detect
+        whether a further page exists, then trims + builds the
+        next-page cursor.
         """
         ...
 
