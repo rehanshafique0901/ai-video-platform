@@ -87,6 +87,24 @@ class ProjectVersionRestoreRequest(BaseModel):
     version: int = Field(..., ge=1, description="Aggregate project version the client last saw.")
 
 
+class ProjectVersionBranchRequest(BaseModel):
+    """POST /api/v1/projects/{project_id}/versions/{version_id}/branch body (α5d.3).
+
+    ``name`` is the **new** project's name (Q4): required, whitespace-stripped,
+    1..200 chars — the same constraints as ``ProjectCreateRequest.name`` (a
+    branch creates a first-class project). Every other root field
+    (``aspect_ratio`` / ``description`` / ``language`` / ``style`` /
+    ``settings``) is inherited from the source snapshot, not the request, so
+    they are not accepted here; ``extra="forbid"`` turns any other key into a
+    422. A duplicate live name for this owner is a ``409`` (not a 422 — the
+    collision is a persistence outcome, decided by the DB unique index).
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+
+
 class ProjectVersionDiff(BaseModel):
     """Coarse base→target change summary between two versions (α5d.2 §7).
 

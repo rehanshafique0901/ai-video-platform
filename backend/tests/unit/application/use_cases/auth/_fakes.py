@@ -865,6 +865,139 @@ class FakeProjectVersionRepository(IProjectVersionRepository):
         )
         return version
 
+    async def branch(
+        self,
+        *,
+        source_project_id: UUID,
+        source_version_id: UUID,
+        source_version_number: int,
+        source_snapshot: dict[str, Any],
+        new_project_name: str,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> tuple[Project, ProjectVersion]:
+        # Mirrors the real repo's observable contract (α5d.3): fork the source
+        # snapshot into a NEW independent project owned by the caller — a live
+        # name collision raises ConflictError (→ 409) before any child write;
+        # scenes are materialized with FRESH ids under a new default storyboard;
+        # v1 is reason=branch with a branched_from provenance block + NULL
+        # parent; the new project's current pointer is advanced and its version
+        # ends at 2 (created + first capture). The source is never touched.
+        for existing in self._projects._rows.values():
+            if (
+                existing.tenant_id == tenant_id
+                and existing.owner_user_id == owner_user_id
+                and existing.name == new_project_name
+            ):
+                raise ConflictError(
+                    "project already exists",
+                    details={"constraint": "uq_projects_tenant_id_owner_user_id_name"},
+                )
+
+        snap_project = source_snapshot["project"]
+        snap_scenes = source_snapshot.get("scenes", [])
+        now = datetime.now(UTC)
+
+        new_project_id = uuid4()
+        new_project = Project(
+            id=new_project_id,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            folder_id=None,
+            current_version_id=None,
+            name=new_project_name,
+            description=snap_project["description"],
+            aspect_ratio=snap_project["aspect_ratio"],
+            duration_seconds=(
+                None
+                if snap_project["duration_seconds"] is None
+                else float(snap_project["duration_seconds"])
+            ),
+            language=snap_project["language"],
+            style=snap_project["style"],
+            settings=snap_project["settings"],
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        self._projects._rows[new_project_id] = new_project
+
+        sb = uuid4()
+        self._scenes._default_sb[new_project_id] = sb
+        for s in sorted(snap_scenes, key=lambda d: d["scene_number"]):
+            scene = Scene(
+                id=uuid4(),  # fresh identity (Q5)
+                storyboard_id=sb,
+                scene_number=s["scene_number"],
+                title=s["title"],
+                duration_seconds=float(s["duration_seconds"]),
+                narration=s.get("narration"),
+                subtitle=s.get("subtitle"),
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+            self._scenes._scenes[scene.id] = scene
+
+        materialized = await self._scenes.list_by_project(new_project_id)
+        version_id = uuid4()
+        snapshot: dict[str, Any] = {
+            "schema_version": 1,
+            "project": {
+                "id": str(new_project_id),
+                "name": new_project.name,
+                "description": new_project.description,
+                "aspect_ratio": new_project.aspect_ratio,
+                "duration_seconds": (
+                    None
+                    if new_project.duration_seconds is None
+                    else str(new_project.duration_seconds)
+                ),
+                "language": new_project.language,
+                "style": new_project.style,
+                "settings": new_project.settings,
+                "version": new_project.version,
+            },
+            "storyboard": {"id": str(sb), "generated_by": "system"},
+            "scenes": [
+                {
+                    "id": str(sc.id),
+                    "scene_number": sc.scene_number,
+                    "title": sc.title,
+                    "duration_seconds": str(sc.duration_seconds),
+                    "narration": sc.narration,
+                    "subtitle": sc.subtitle,
+                }
+                for sc in materialized
+            ],
+            "branched_from": {
+                "project_id": str(source_project_id),
+                "version_id": str(source_version_id),
+                "version_number": source_version_number,
+            },
+        }
+        version = ProjectVersion(
+            id=version_id,
+            project_id=new_project_id,
+            version_number=1,
+            parent_version_id=None,
+            created_by_user_id=owner_user_id,
+            reason="branch",
+            snapshot=snapshot,
+            diff_summary=None,
+            created_at=now,
+        )
+        self._versions[version_id] = version
+
+        # Advance the new project's pointer + bump version → 2 (created + v1).
+        self._projects._rows[new_project_id] = replace(
+            new_project,
+            current_version_id=version_id,
+            version=new_project.version + 1,
+            updated_at=now,
+        )
+        return self._projects._rows[new_project_id], version
+
 
 # ---- UoW --------------------------------------------------------------
 

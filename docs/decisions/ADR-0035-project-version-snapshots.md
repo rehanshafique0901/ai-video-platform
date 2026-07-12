@@ -2,7 +2,7 @@
 
 **Status:** Proposed (documents patterns shipped in Phase 3 α5d.1 — Project Versions capture + read — and α5d.2 — restore + diff + the Aggregate OCC Rule). Flips to Accepted on merge of this ADR PR.
 **Refines / documents:** `docs/domain/PROJECT_AGGREGATE.md` §6 (the two versioning mechanisms + the Aggregate OCC Rule), `schema.md` §9 (`project_versions`), `API_CONTRACT.md` §3.3, and the α5d pre-flights (`docs/engineering/PHASE3_ALPHA5D_PREFLIGHT.md`, `docs/engineering/PHASE3_ALPHA5D2_PREFLIGHT.md`). Builds on ADR-0034 (authenticated endpoint pattern), the α5a Project aggregate, α5b soft-delete + OCC PATCH, and the α5c Scene aggregate.
-**Wave:** Phase 3, content-versioning slice (α5d.1 read path: capture + list + get; α5d.2: restore + diff + Aggregate OCC Rule; α5d.3 reserved for branch / autosave).
+**Wave:** Phase 3, content-versioning slice (α5d.1 read path: capture + list + get; α5d.2: restore + diff + Aggregate OCC Rule; α5d.3: branch = fork-to-new-project + `branched_from` provenance, D12; autosave deferred to α5d.4+).
 
 ---
 
@@ -103,15 +103,16 @@ violation. Within the same transaction it:
 
 1. Assigns the next `version_number` (1, 2, 3 …).
 2. Links `parent_version_id` to the project's **previous** `current_version_id`
-   (a linear lineage chain in α5d.1; branching is α5d.2).
+   (a linear lineage chain; branch forks to a *new* project rather than
+   creating a non-linear head, so each project's chain stays linear — D12).
 3. Inserts the immutable snapshot with `reason = manual_save`.
 4. Repoints `projects.current_version_id = new.id`, which bumps
    `projects.version` by exactly one (row-OCC trigger). The newest manual save
    becomes current.
 
 `reason` is **server-set to `manual_save`** in α5d.1; the API accepts no client
-`reason`. `autosave` is background (later), `restore`/`branch` are α5d.2,
-`generated` is the generation pipeline (α7+).
+`reason`. `restore` is α5d.2, `branch` is α5d.3 (D12), `autosave` is background
+(α5d.4+), `generated` is the generation pipeline (α7+).
 
 ### D5 — Scene identity is preserved across capture (and future restore)
 
@@ -209,6 +210,38 @@ differ), and scene `added` / `removed` / `modified` counts keyed by scene `id`
 (present-in-target-not-base, present-in-base-not-target, present-in-both-with-
 different-content). Field-level diffs are deferred — the canonical serialization
 (D6) keeps a richer diff cheap to add later.
+
+### D12 — Branch = fork a snapshot into a new independent project (α5d.3)
+
+`POST …/versions/{version_id}/branch` **forks** a historical snapshot into a
+**new, independently-editable project** owned by the caller (α5d.3 pre-flight Q1
+Option A). This is the only migration-free reading of "branch" that is genuinely
+distinct from restore (D10): restore rewinds *this* project onto an old
+snapshot; branch leaves the source **untouched** and creates a *fresh* aggregate
+seeded from the chosen version's content. Branch does not mutate the source, so
+— unlike restore — it has **no OCC fence** and does **not** bump the source
+`projects.version` (D9 does not apply; there is no source write). The new
+project is materialized from the snapshot: root fields copied (including the
+otherwise-immutable `aspect_ratio` — a fork legitimately seeds it; `name` comes
+from the request body), scenes re-materialized with **freshly-minted** ids (a
+new project is a new identity space — the opposite of restore's id-preservation
+in D10, because the source scenes still live in the source project), and a
+`reason=branch` `v1` captured via the canonical builder (D6). That `v1` has
+`parent_version_id = NULL` (a fresh root — lineage stays self-contained per
+project, never a cross-project `parent`) and embeds a structured
+**`branched_from`** provenance block inside its snapshot:
+
+```json
+"branched_from": { "project_id": "…", "version_id": "…", "version_number": 2 }
+```
+
+The same block is echoed in the response `meta.branched_from`. The new project's
+current pointer is then advanced to `v1`, so its `version` follows the normal
+"created + first capture" arc → 2. The whole fork (project + storyboard + scenes
++ `v1` + pointer advance) runs in **one transaction**; a duplicate live project
+name for the caller → `409` (raised before any child write, no debris). The
+`branched_from` breadcrumb is a **one-way historical record**, not a live
+coupling — after the fork the two projects evolve fully independently.
 
 ---
 
@@ -322,8 +355,13 @@ them.
 - **α5d.2 — restore + diff (shipped).** Restore-by-new-version (D2/D10) with the
   Aggregate OCC Rule fence (D9), and an on-demand coarse diff between two
   snapshots (D11, enabled by canonical serialization, D6).
-- **α5d.3 — branch.** Branch via a non-linear `parent_version_id` (D10 already
-  makes lineage a DAG), plus an optional materialized `diff_summary`.
+- **α5d.3 — branch (shipped).** Branch = **fork a snapshot into a new
+  independent project** (D12), not an in-project non-linear head. Lineage stays a
+  self-contained per-project chain; the cross-project link is a one-way
+  `branched_from` provenance breadcrumb in the new project's `v1` snapshot.
+- **In-project multi-head branching (deferred).** A second live head *inside* one
+  project (branch labels, switching, merge semantics) would need a new table /
+  migration and earns its own slice if ever required.
 - **Autosave.** Background `reason=autosave` captures with a retention/pruning
   policy so autosaves do not swamp the manual-save history.
 - **Snapshot compression / externalization.** Only if a real project's JSONB

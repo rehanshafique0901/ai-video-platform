@@ -31,6 +31,14 @@ Restore + diff (α5d.2 pre-flight §7 / §12):
 * HD1 diff happy                   → 200, coarse add/remove/modify counts
 * HD2 diff missing ``against`` param → 422
 * HD3 diff unknown version (either side) → 404
+
+Branch (α5d.3 pre-flight §5 / §9):
+
+* HB1 branch happy                 → 201, NEW ``ProjectPublic`` + ``meta.branched_from``;
+                                      the new project is first-class (GET project/scenes/v1)
+* HB2 branch bad body (missing/empty name, extra field) → 422
+* HB3 branch unowned/unknown project or version → 404
+* HB4 branch duplicate live name   → 409
 """
 
 from __future__ import annotations
@@ -51,6 +59,23 @@ _PUBLIC_KEYS = {
     "is_current",
 }
 _DETAIL_KEYS = _PUBLIC_KEYS | {"snapshot", "diff_summary"}
+
+# ``ProjectPublic`` (the branch response) — matches ``schemas/projects.py``.
+_PROJECT_PUBLIC_KEYS = {
+    "id",
+    "tenant_id",
+    "owner_user_id",
+    "folder_id",
+    "name",
+    "description",
+    "aspect_ratio",
+    "language",
+    "style",
+    "settings",
+    "created_at",
+    "updated_at",
+    "version",
+}
 
 
 def _fresh_email() -> str:
@@ -504,3 +529,151 @@ async def test_hd3_diff_unknown_version_404(client: AsyncClient) -> None:
         params={"against": v1["id"]},
     )
     assert r_target.status_code == 404, r_target.text
+
+
+# ---- HB1 — branch happy path (fork to a new first-class project) ------
+
+
+@pytest.mark.integration
+async def test_hb1_branch_happy_path(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    scene_a = await _create_scene(client, access, project_id)
+    scene_b = await _create_scene(client, access, project_id)
+    v1 = await _create_version(client, access, project_id)
+
+    new_name = f"Forked {uuid4()}"
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/branch",
+        headers=_auth(access),
+        json={"name": new_name},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    # Provenance breadcrumb echoed in meta (Q7).
+    assert body["meta"]["branched_from"] == {
+        "project_id": project_id,
+        "version_id": v1["id"],
+        "version_number": v1["version_number"],
+    }
+    new_project = body["data"]
+    assert set(new_project.keys()) == _PROJECT_PUBLIC_KEYS
+    assert new_project["id"] != project_id
+    assert new_project["name"] == new_name
+    assert new_project["aspect_ratio"] == "horizontal"
+    assert new_project["version"] == 2  # created + first capture
+    new_id = new_project["id"]
+
+    # The new project is a first-class project: GET it directly.
+    r_get = await client.get(f"/api/v1/projects/{new_id}", headers=_auth(access))
+    assert r_get.status_code == 200, r_get.text
+
+    # Its scenes are materialized with FRESH ids, content + order preserved.
+    r_scenes = await client.get(f"/api/v1/projects/{new_id}/scenes", headers=_auth(access))
+    assert r_scenes.status_code == 200, r_scenes.text
+    new_scenes = r_scenes.json()["data"]
+    assert len(new_scenes) == 2
+    new_scene_ids = {s["id"] for s in new_scenes}
+    assert new_scene_ids.isdisjoint({scene_a, scene_b})
+
+    # Its version ledger holds exactly the reason=branch v1 (current) with the
+    # persisted provenance block.
+    r_versions = await client.get(f"/api/v1/projects/{new_id}/versions", headers=_auth(access))
+    assert r_versions.status_code == 200, r_versions.text
+    versions = r_versions.json()["data"]
+    assert len(versions) == 1
+    assert versions[0]["reason"] == "branch"
+    assert versions[0]["version_number"] == 1
+    assert versions[0]["parent_version_id"] is None
+    assert versions[0]["is_current"] is True
+
+    r_v1 = await client.get(
+        f"/api/v1/projects/{new_id}/versions/{versions[0]['id']}", headers=_auth(access)
+    )
+    assert r_v1.status_code == 200, r_v1.text
+    assert r_v1.json()["data"]["snapshot"]["branched_from"] == {
+        "project_id": project_id,
+        "version_id": v1["id"],
+        "version_number": v1["version_number"],
+    }
+
+
+# ---- HB2 — branch bad body → 422 --------------------------------------
+
+
+@pytest.mark.integration
+async def test_hb2_branch_bad_body_422(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+    url = f"/api/v1/projects/{project_id}/versions/{v1['id']}/branch"
+
+    # Missing the required ``name``.
+    r_missing = await client.post(url, headers=_auth(access), json={})
+    assert r_missing.status_code == 422, r_missing.text
+
+    # Empty / whitespace-only name (min_length after strip).
+    r_empty = await client.post(url, headers=_auth(access), json={"name": "   "})
+    assert r_empty.status_code == 422, r_empty.text
+
+    # Extra field (``extra="forbid"``): root fields are inherited, not accepted.
+    r_extra = await client.post(
+        url, headers=_auth(access), json={"name": "OK", "aspect_ratio": "square"}
+    )
+    assert r_extra.status_code == 422, r_extra.text
+
+
+# ---- HB3 — branch project/version gate → 404 --------------------------
+
+
+@pytest.mark.integration
+async def test_hb3_branch_unowned_or_unknown_404(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    # Unowned/unknown project → 404 even though the version id is real.
+    r_project = await client.post(
+        f"/api/v1/projects/{uuid4()}/versions/{v1['id']}/branch",
+        headers=_auth(access),
+        json={"name": "From nowhere"},
+    )
+    assert r_project.status_code == 404, r_project.text
+
+    # Unknown version under an owned project → 404.
+    r_version = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{uuid4()}/branch",
+        headers=_auth(access),
+        json={"name": "From unknown version"},
+    )
+    assert r_version.status_code == 404, r_version.text
+
+
+# ---- HB4 — branch to a duplicate live name → 409 ----------------------
+
+
+@pytest.mark.integration
+async def test_hb4_branch_duplicate_name_409(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    taken = f"Taken {uuid4()}"
+    r_first = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/branch",
+        headers=_auth(access),
+        json={"name": taken},
+    )
+    assert r_first.status_code == 201, r_first.text
+
+    # A second branch to the same live name for this owner → 409.
+    r_dup = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/branch",
+        headers=_auth(access),
+        json={"name": taken},
+    )
+    assert r_dup.status_code == 409, r_dup.text

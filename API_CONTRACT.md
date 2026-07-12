@@ -232,9 +232,11 @@ GET   /projects/{id}/versions/{version_id}
 POST  /projects/{id}/versions                        capture a snapshot (α5d.1)
 POST  /projects/{id}/versions/{version_id}/restore   → creates new version pointing at the restored snapshot
 GET   /projects/{id}/versions/{version_id}/diff?against={other_version_id}
+POST  /projects/{id}/versions/{version_id}/branch    → forks the snapshot into a NEW independent project (α5d.3)
 ```
 
-> **Shipped in Phase 3 α5d.1 (capture + browse) and α5d.2 (restore + diff).**
+> **Shipped in Phase 3 α5d.1 (capture + browse), α5d.2 (restore + diff), and
+> α5d.3 (branch).**
 > A project version is an
 > **immutable content snapshot** of the project plus its ordered scenes —
 > distinct from the row-OCC `version` counter that guards live mutations. The
@@ -289,8 +291,26 @@ GET   /projects/{id}/versions/{version_id}/diff?against={other_version_id}
 >   `200` with `ProjectVersionDiff` — `base_version_number`,
 >   `target_version_number`, `project_changed` (business columns differ), and
 >   `scene_changes` (`added` / `removed` / `modified` counts keyed by scene `id`).
+> * **`POST …/versions/{version_id}/branch`** — **forks** a historical snapshot
+>   into a **new, independently-editable project** (α5d.3 — "fork to a new
+>   project"; ADR-0035 D12). Unlike restore (which rewinds *this* project),
+>   branch leaves the source **untouched** and creates a fresh aggregate owned
+>   by the caller, seeded from the chosen version's snapshot (root fields +
+>   scenes materialized with **freshly-minted** ids). The body carries just
+>   `{ name }` (the new project's name; every other root field — including the
+>   immutable `aspect_ratio` — is inherited from the snapshot; `extra="forbid"`
+>   → `422`). The new project's `v1` is `reason=branch` (`parent_version_id`
+>   NULL) and its snapshot embeds a structured **`branched_from`** provenance
+>   block (`{ project_id, version_id, version_number }` of the source), also
+>   echoed in the response `meta.branched_from`. There is **no OCC fence** (the
+>   source is not mutated) and **no source `projects.version` bump**. Two-level
+>   `404` gate (source project, then version) runs first (anti-enumeration); a
+>   duplicate live project name for the caller → `409 CONFLICT`. The whole fork
+>   (new project + storyboard + scenes + `v1` + pointer advance) runs in **one
+>   transaction**. Returns `201` with the **new project** as `ProjectPublic`
+>   (its `version` is the branched project's OCC handle).
 >
-> **Deferred to α5d.3+:** `…/versions/{version_id}/branch`, autosave. See
+> **Deferred to α5d.4+:** autosave, field-level diff detail. See
 > `docs/domain/PROJECT_AGGREGATE.md` §6 and
 > `docs/decisions/ADR-0035-project-version-snapshots.md`.
 
