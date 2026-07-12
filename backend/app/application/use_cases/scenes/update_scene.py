@@ -123,6 +123,12 @@ class UpdateScene:
             position = await self._uow.scenes.position_of(
                 storyboard_id=updated.storyboard_id, scene_number=updated.scene_number
             )
+            # Aggregate OCC Rule (α5d.2): only reached on a real content change
+            # (the same-value no-op returned above), so advance the
+            # project-aggregate OCC token.
+            await self._uow.projects.touch_version(
+                project_id=project_id, tenant_id=tenant_id, owner_user_id=owner_user_id
+            )
             await self._uow.commit()
 
         _LOGGER.info(

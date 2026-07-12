@@ -30,15 +30,21 @@ from fastapi.responses import JSONResponse
 from app.api.v1.deps import (
     CreateProjectVersionDep,
     CurrentUserDep,
+    DiffProjectVersionsDep,
     GetProjectVersionDep,
     ListProjectVersionsDep,
+    RestoreProjectVersionDep,
 )
 from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.versions import (
     ProjectVersionCreateRequest,
     ProjectVersionDetail,
+    ProjectVersionDiff,
     ProjectVersionPublic,
+    ProjectVersionRestoreRequest,
+    SceneChangeCounts,
 )
+from app.application.use_cases.versions.results import VersionDiffResult
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 router = APIRouter(prefix="/projects/{project_id}/versions", tags=["versions"])
@@ -73,6 +79,20 @@ def _to_detail(version: ProjectVersion, current_version_id: UUID | None) -> Proj
         is_current=version.id == current_version_id,
         snapshot=version.snapshot,
         diff_summary=version.diff_summary,
+    )
+
+
+def _to_diff(result: VersionDiffResult) -> ProjectVersionDiff:
+    """Project a ``VersionDiffResult`` into the coarse diff wire DTO (α5d.2 §7)."""
+    return ProjectVersionDiff(
+        base_version_number=result.base_version_number,
+        target_version_number=result.target_version_number,
+        project_changed=result.project_changed,
+        scene_changes=SceneChangeCounts(
+            added=result.scenes_added,
+            removed=result.scenes_removed,
+            modified=result.scenes_modified,
+        ),
     )
 
 
@@ -150,3 +170,60 @@ async def get_version(
     return JSONResponse(
         content=envelope(_to_detail(result.version, result.current_version_id), request)
     )
+
+
+@router.post("/{version_id}/restore")
+async def restore_version(
+    project_id: UUID,
+    version_id: UUID,
+    body: ProjectVersionRestoreRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: RestoreProjectVersionDep,
+) -> JSONResponse:
+    """Restore a historical snapshot into the caller's project's live state.
+
+    Appends a new ``reason=restore`` version and repoints the current pointer
+    (history is never rewritten — ADR-0035 D2). Version-fenced on the
+    **aggregate** ``projects.version`` (§4 Aggregate OCC Rule): ``body.version``
+    is the token the client last observed. Returns ``200`` with the new head as
+    ``ProjectVersionDetail``. ``404`` project/version gate (two-level, before
+    the fence); ``412`` on a stale fence (no writes); ``422`` bad body.
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        version_id=version_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        expected_version=body.version,
+        ip=client_ip(request),
+    )
+    return JSONResponse(
+        content=envelope(_to_detail(result.version, result.current_version_id), request)
+    )
+
+
+@router.get("/{version_id}/diff")
+async def diff_versions(
+    project_id: UUID,
+    version_id: UUID,
+    against: UUID,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: DiffProjectVersionsDep,
+) -> JSONResponse:
+    """Coarse change summary between two versions (base ``against`` → target path).
+
+    Computed on demand from the two stored snapshots (nothing persisted). Both
+    versions must belong to the caller's owned project (two-level gate on each
+    → ``404``); ``against`` is a required query param and a malformed UUID is a
+    ``422``. Returns ``200`` with ``ProjectVersionDiff`` (Q8/Q9).
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        version_id=version_id,
+        against_version_id=against,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+    return JSONResponse(content=envelope(_to_diff(result), request))

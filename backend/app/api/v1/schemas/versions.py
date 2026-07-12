@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProjectVersionCreateRequest(BaseModel):
@@ -70,3 +70,44 @@ class ProjectVersionDetail(ProjectVersionPublic):
 
     snapshot: dict[str, Any]
     diff_summary: dict[str, Any] | None
+
+
+class ProjectVersionRestoreRequest(BaseModel):
+    """POST /api/v1/projects/{project_id}/versions/{version_id}/restore body (α5d.2).
+
+    ``version`` is the **aggregate** OCC token the client last observed on the
+    project (§4 Aggregate OCC Rule) — restore is version-fenced exactly like a
+    PATCH: a stale value yields ``412`` with no writes. ``extra="forbid"``
+    rejects any other key with a 422. Required body (unlike the empty-body
+    capture): the fence is mandatory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(..., ge=1, description="Aggregate project version the client last saw.")
+
+
+class ProjectVersionDiff(BaseModel):
+    """Coarse base→target change summary between two versions (α5d.2 §7).
+
+    Computed on demand; ``base`` is the ``against`` version, ``target`` is the
+    path version (Q8). ``project_changed`` flags any project business-column
+    difference; the scene counts are keyed on scene ``id``. Field-level detail
+    is deferred (α5d.3+).
+    """
+
+    base_version_number: int
+    target_version_number: int
+    project_changed: bool
+    scene_changes: SceneChangeCounts
+
+
+class SceneChangeCounts(BaseModel):
+    """Scene-set delta (base → target), keyed on scene ``id``."""
+
+    added: int
+    removed: int
+    modified: int
+
+
+ProjectVersionDiff.model_rebuild()

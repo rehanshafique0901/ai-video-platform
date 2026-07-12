@@ -199,6 +199,173 @@ class ProjectVersionRepository(IProjectVersionRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    # ---- α5d.2: restore -------------------------------------------------
+
+    async def _ensure_default_storyboard(self, project_id: UUID) -> UUID:
+        """Get-or-create the project's single default storyboard, return its id.
+
+        Mirrors ``SceneRepository.ensure_default_storyboard`` (α5c D1/D9) but
+        without the ``(id, created)`` tuple — restore only needs the target id.
+        The parent ``projects`` row is already locked ``FOR UPDATE`` by the
+        caller (``restore``), so this get-or-create is race-free.
+        """
+        existing = await self._session.execute(
+            select(StoryboardRow.id)
+            .where(StoryboardRow.project_id == project_id)
+            .where(StoryboardRow.deleted_at.is_(None))
+            .order_by(StoryboardRow.created_at.asc(), StoryboardRow.id.asc())
+            .limit(1)
+        )
+        found = existing.scalar_one_or_none()
+        if found is not None:
+            return found
+        row = StoryboardRow(project_id=project_id, generated_by="system")
+        self._session.add(row)
+        await self._session.flush()
+        return row.id
+
+    async def _reconcile_scenes(
+        self, storyboard_id: UUID, snap_scenes: list[dict[str, Any]]
+    ) -> None:
+        """Make the live scene set equal ``snap_scenes``, keyed on ``id`` (Q3/Q4).
+
+        Collision-proof strategy: **blanket soft-delete every live scene** under
+        the storyboard first (empties the ``WHERE deleted_at IS NULL`` partial
+        unique index on ``(storyboard_id, scene_number)``), then upsert each
+        snapshot scene with its captured ``scene_number`` verbatim. Because the
+        index is empty during the rewrite, permuted orderings (a move between
+        capture and restore) cannot collide — a superset of the pre-flight's
+        "soft-delete removed first" that also handles reordered survivors.
+        Snapshot ids with an existing physical row (now soft-deleted) are
+        **revived in place** (clear ``deleted_at``, rewrite columns — an INSERT
+        would collide on the PK); ids with no physical row are **inserted** with
+        the snapshot's UUID (identity preserved). Rows absent from the snapshot
+        are left soft-deleted (the "removed" outcome). An empty snapshot leaves
+        every live scene soft-deleted (empty project).
+        """
+        found = await self._session.execute(
+            select(SceneRow.id).where(SceneRow.storyboard_id == storyboard_id)
+        )
+        existing_ids = set(found.scalars().all())
+
+        # Blanket soft-delete all currently-live scenes → partial index emptied.
+        await self._session.execute(
+            update(SceneRow)
+            .where(SceneRow.storyboard_id == storyboard_id)
+            .where(SceneRow.deleted_at.is_(None))
+            .values(deleted_at=func.now())
+        )
+
+        # Revive / insert each snapshot scene with its captured columns.
+        for s in snap_scenes:
+            sid = UUID(s["id"])
+            values = _scene_write_values(s)
+            if sid in existing_ids:
+                await self._session.execute(
+                    update(SceneRow).where(SceneRow.id == sid).values(**values, deleted_at=None)
+                )
+            else:
+                self._session.add(SceneRow(id=sid, storyboard_id=storyboard_id, **values))
+        await self._session.flush()
+
+    async def restore(
+        self,
+        *,
+        project_id: UUID,
+        source_version_id: UUID,
+        restored_by_user_id: UUID,
+        expected_project_version: int,
+    ) -> ProjectVersionEntity | None:
+        project = await self._lock_project(project_id)
+        # Ownership+liveness established upstream (projects.get_owned); a None
+        # here would mean a concurrent soft-delete after the gate. Unreachable
+        # under the joint lock; assert (outer transaction rolls back).
+        assert project is not None, "project vanished between ownership gate and restore"
+
+        # 1. Aggregate OCC fence (§4). Stale → 412, NO writes.
+        if project.version != expected_project_version:
+            return None
+
+        # 2. Load the source snapshot (the use case already project-scoped +
+        #    404-gated it; re-read under the lock for a consistent view).
+        source = (
+            await self._session.execute(
+                select(ProjectVersionRow)
+                .where(ProjectVersionRow.id == source_version_id)
+                .where(ProjectVersionRow.project_id == project_id)
+            )
+        ).scalar_one_or_none()
+        assert source is not None, "source version vanished between gate and restore"
+        snapshot: dict[str, Any] = source.snapshot
+        snap_project: dict[str, Any] = snapshot["project"]
+        snap_scenes: list[dict[str, Any]] = snapshot.get("scenes", [])
+
+        # 3. aspect_ratio is immutable (Q2/G6): assert-equal, never write. A
+        #    mismatch is corruption, not a mutation — surface it, don't hide it.
+        assert (
+            snap_project["aspect_ratio"] == project.aspect_ratio
+        ), "restore aspect_ratio mismatch — immutable column diverged from snapshot"
+
+        # 4. Rehome under the live default storyboard (Q5), then reconcile.
+        storyboard_id = await self._ensure_default_storyboard(project_id)
+        await self._reconcile_scenes(storyboard_id, snap_scenes)
+
+        # 5. Trailing capture: build the reason=restore snapshot from the
+        #    now-restored live scenes + the (about-to-be-written) root, then
+        #    assign the next ordinal and lineage parent = source (Q6/Q7).
+        restored_scenes = await self._live_scenes(storyboard_id)
+        new_project_version = expected_project_version + 1
+        restore_snapshot = {
+            "schema_version": _SNAPSHOT_SCHEMA_VERSION,
+            "project": {**snap_project, "version": new_project_version},
+            "storyboard": {"id": str(storyboard_id), "generated_by": "system"},
+            "scenes": [_scene_dict(s) for s in restored_scenes],
+        }
+        max_num = (
+            await self._session.execute(
+                select(func.max(ProjectVersionRow.version_number)).where(
+                    ProjectVersionRow.project_id == project_id
+                )
+            )
+        ).scalar_one_or_none()
+        next_number = 1 if max_num is None else int(max_num) + 1
+
+        row = ProjectVersionRow(
+            project_id=project_id,
+            version_number=next_number,
+            parent_version_id=source_version_id,
+            created_by_user_id=restored_by_user_id,
+            reason="restore",
+            snapshot=restore_snapshot,
+            diff_summary=None,
+        )
+        self._session.add(row)
+        await self._session.flush()
+
+        # 6. ONE projects UPDATE = exactly one aggregate version bump (Q6):
+        #    rewrite the mutable root + advance current_version_id + hand-set
+        #    version+1 in a single statement. Hand-setting +1 makes
+        #    NEW.version != OLD.version, so the guarded trigger no-ops (net +1).
+        #    aspect_ratio is deliberately absent (immutable, Q2).
+        await self._session.execute(
+            update(ProjectRow)
+            .where(ProjectRow.id == project_id)
+            .values(
+                name=snap_project["name"],
+                description=snap_project["description"],
+                duration_seconds=_to_numeric(snap_project["duration_seconds"]),
+                language=snap_project["language"],
+                style=snap_project["style"],
+                settings=snap_project["settings"],
+                current_version_id=row.id,
+                version=ProjectRow.version + 1,
+                updated_at=func.now(),
+            )
+        )
+
+        await self._session.refresh(row)
+        return _row_to_entity(row)
+
 
 def _num(value: Decimal | float | None) -> str | None:
     """Serialize a ``Numeric`` duration as a lossless string (or ``None``).
@@ -208,6 +375,71 @@ def _num(value: Decimal | float | None) -> str | None:
     (α5d Q7).
     """
     return None if value is None else str(value)
+
+
+def _to_numeric(value: str | None) -> Decimal | None:
+    """Inverse of :func:`_num` — parse a snapshot duration string to ``Decimal``.
+
+    Restore writes ``duration_seconds`` back into the ``Numeric`` column; going
+    through ``Decimal`` (never ``float``) preserves the exact stored scale
+    (``"3.000"`` → ``Decimal('3.000')``), so a capture → restore → re-capture
+    round-trip is byte-faithful (α5d.2 R6).
+    """
+    return None if value is None else Decimal(value)
+
+
+# The full ("fat") scene column set carried in a snapshot (α5c D2 / G4). Kept
+# as one list so the snapshot serializer (:func:`_scene_dict`) and the restore
+# writer (:func:`_scene_write_values`) can never drift apart.
+_FAT_SCENE_COLUMNS: tuple[str, ...] = (
+    "title",
+    "narration",
+    "subtitle",
+    "emotion",
+    "camera_angle",
+    "camera_motion",
+    "lens",
+    "lighting",
+    "weather",
+    "location",
+    "animation",
+    "transition_in",
+    "music_mood",
+    "extra",
+)
+
+
+def _scene_dict(s: SceneRow) -> dict[str, Any]:
+    """Serialize one scene row into the canonical snapshot shape (α5d Q7).
+
+    ``id`` preserved verbatim (restore identity — G4), ``scene_number`` kept,
+    duration as a lossless string, all fat cinematography columns included.
+    """
+    out: dict[str, Any] = {
+        "id": str(s.id),
+        "scene_number": s.scene_number,
+        "duration_seconds": _num(s.duration_seconds),
+    }
+    for col in _FAT_SCENE_COLUMNS:
+        out[col] = getattr(s, col)
+    return out
+
+
+def _scene_write_values(s: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot scene dict → ``scenes`` column values for a restore upsert.
+
+    Inverse of :func:`_scene_dict`: rewrites ``scene_number`` verbatim (Q4) and
+    the full fat column set (§6), converting the duration string back to
+    ``Numeric`` via ``Decimal`` (R6). ``id`` / ``storyboard_id`` are set by the
+    caller (identity + rehome target).
+    """
+    values: dict[str, Any] = {
+        "scene_number": s["scene_number"],
+        "duration_seconds": _to_numeric(s["duration_seconds"]),
+    }
+    for col in _FAT_SCENE_COLUMNS:
+        values[col] = s[col]
+    return values
 
 
 def _build_snapshot(
@@ -246,28 +478,7 @@ def _build_snapshot(
             if storyboard is None
             else {"id": str(storyboard.id), "generated_by": storyboard.generated_by}
         ),
-        "scenes": [
-            {
-                "id": str(s.id),
-                "scene_number": s.scene_number,
-                "title": s.title,
-                "duration_seconds": _num(s.duration_seconds),
-                "narration": s.narration,
-                "subtitle": s.subtitle,
-                "emotion": s.emotion,
-                "camera_angle": s.camera_angle,
-                "camera_motion": s.camera_motion,
-                "lens": s.lens,
-                "lighting": s.lighting,
-                "weather": s.weather,
-                "location": s.location,
-                "animation": s.animation,
-                "transition_in": s.transition_in,
-                "music_mood": s.music_mood,
-                "extra": s.extra,
-            }
-            for s in scenes
-        ],
+        "scenes": [_scene_dict(s) for s in scenes],
     }
 
 

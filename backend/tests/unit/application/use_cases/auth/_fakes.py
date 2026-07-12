@@ -457,6 +457,28 @@ class FakeProjectRepository(IProjectRepository):
         del self._rows[project_id]
         return True
 
+    async def touch_version(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> int | None:
+        # Aggregate OCC Rule (α5d.2): advance the project-aggregate OCC token
+        # by exactly 1 after a real child mutation. Owner+tenant scoped; None
+        # if no live owned row (matches the real repo's RETURNING-None).
+        import dataclasses
+
+        row = self._rows.get(project_id)
+        if row is None or row.tenant_id != tenant_id or row.owner_user_id != owner_user_id:
+            return None
+        updated = dataclasses.replace(
+            row,
+            version=row.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._rows[project_id] = updated
+        return updated.version
+
 
 def _scene_gap(left: int | None, right: int | None) -> int | None:
     """Mirror of ``scene_repository._gap`` — kept in sync for faithful unit fakes."""
@@ -739,6 +761,108 @@ class FakeProjectVersionRepository(IProjectVersionRepository):
         version = self._versions.get(version_id)
         if version is None or version.project_id != project_id:
             return None
+        return version
+
+    async def restore(
+        self,
+        *,
+        project_id: UUID,
+        source_version_id: UUID,
+        restored_by_user_id: UUID,
+        expected_project_version: int,
+    ) -> ProjectVersion | None:
+        # Mirrors the real repo's observable contract: aggregate OCC fence on
+        # the project version (stale → None → 412, no writes); reconcile the
+        # live scene set to equal the snapshot's (keyed on id, preserving
+        # UUIDs); rewrite the mutable project root (aspect_ratio invariant);
+        # append a reason=restore version parented on the source; advance the
+        # current pointer + bump project version by exactly 1.
+        project = self._projects._rows.get(project_id)
+        assert project is not None, "project vanished between ownership gate and restore"
+        if project.version != expected_project_version:
+            return None
+
+        source = self._versions.get(source_version_id)
+        assert source is not None and source.project_id == project_id
+        snap = source.snapshot
+        snap_project = snap["project"]
+        snap_scenes = snap.get("scenes", [])
+        assert snap_project["aspect_ratio"] == project.aspect_ratio
+
+        # Reconcile the fake's live scene set to the snapshot (by id).
+        sb = self._scenes._default_sb.get(project_id)
+        if sb is None:
+            sb = uuid4()
+            self._scenes._default_sb[project_id] = sb
+        for sid in [s.id for s in self._scenes._scenes.values() if s.storyboard_id == sb]:
+            del self._scenes._scenes[sid]
+        now = datetime.now(UTC)
+        for s in snap_scenes:
+            scene = Scene(
+                id=UUID(s["id"]),
+                storyboard_id=sb,
+                scene_number=s["scene_number"],
+                title=s["title"],
+                duration_seconds=float(s["duration_seconds"]),
+                narration=s.get("narration"),
+                subtitle=s.get("subtitle"),
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+            self._scenes._scenes[scene.id] = scene
+
+        new_project_version = expected_project_version + 1
+        restored_scenes = await self._scenes.list_by_project(project_id)
+        version_id = uuid4()
+        restore_snapshot: dict[str, Any] = {
+            "schema_version": 1,
+            "project": {**snap_project, "version": new_project_version},
+            "storyboard": {"id": str(sb), "generated_by": "system"},
+            "scenes": [
+                {
+                    "id": str(sc.id),
+                    "scene_number": sc.scene_number,
+                    "title": sc.title,
+                    "duration_seconds": str(sc.duration_seconds),
+                    "narration": sc.narration,
+                    "subtitle": sc.subtitle,
+                }
+                for sc in restored_scenes
+            ],
+        }
+        existing = [v for v in self._versions.values() if v.project_id == project_id]
+        next_number = max((v.version_number for v in existing), default=0) + 1
+        version = ProjectVersion(
+            id=version_id,
+            project_id=project_id,
+            version_number=next_number,
+            parent_version_id=source_version_id,
+            created_by_user_id=restored_by_user_id,
+            reason="restore",
+            snapshot=restore_snapshot,
+            diff_summary=None,
+            created_at=now,
+        )
+        self._versions[version_id] = version
+
+        # Rewrite mutable root + advance pointer + bump version by exactly 1.
+        self._projects._rows[project_id] = replace(
+            project,
+            name=snap_project["name"],
+            description=snap_project["description"],
+            duration_seconds=(
+                None
+                if snap_project["duration_seconds"] is None
+                else float(snap_project["duration_seconds"])
+            ),
+            language=snap_project["language"],
+            style=snap_project["style"],
+            settings=snap_project["settings"],
+            current_version_id=version_id,
+            version=new_project_version,
+            updated_at=now,
+        )
         return version
 
 

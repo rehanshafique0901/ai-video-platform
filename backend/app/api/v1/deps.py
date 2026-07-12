@@ -52,8 +52,10 @@ from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.application.use_cases.versions.create_version import CreateProjectVersion
+from app.application.use_cases.versions.diff_versions import DiffProjectVersions
 from app.application.use_cases.versions.get_version import GetProjectVersion
 from app.application.use_cases.versions.list_versions import ListProjectVersions
+from app.application.use_cases.versions.restore_version import RestoreProjectVersion
 from app.core import container
 from app.core.errors import UnauthorizedError
 from app.domain.identity.user import User
@@ -123,6 +125,15 @@ ListProjectVersionsDep = Annotated[
 ]
 GetProjectVersionDep = Annotated[
     GetProjectVersion, Depends(container.get_get_project_version_use_case)
+]
+
+# ---- Use-case dependencies (Slice α5d.2 — restore + diff) -------------
+
+RestoreProjectVersionDep = Annotated[
+    RestoreProjectVersion, Depends(container.get_restore_project_version_use_case)
+]
+DiffProjectVersionsDep = Annotated[
+    DiffProjectVersions, Depends(container.get_diff_project_versions_use_case)
 ]
 
 
