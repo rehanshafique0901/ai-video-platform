@@ -105,6 +105,14 @@ class MoveScene:
             new_position = await self._uow.scenes.position_of(
                 storyboard_id=moved.storyboard_id, scene_number=moved.scene_number
             )
+            # Aggregate OCC Rule (α5d.2): a move to the scene's current slot is
+            # a no-op (``reorder_owned`` returns the row with an unchanged
+            # ``version``); only a real reorder advances the project-aggregate
+            # OCC token.
+            if moved.version != expected_version:
+                await self._uow.projects.touch_version(
+                    project_id=project_id, tenant_id=tenant_id, owner_user_id=owner_user_id
+                )
             await self._uow.commit()
 
         _LOGGER.info(

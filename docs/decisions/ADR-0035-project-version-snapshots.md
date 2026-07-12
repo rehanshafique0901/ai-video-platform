@@ -1,8 +1,8 @@
 # ADR-0035 — Project Version Snapshots (Immutable Content Ledger, Restore-by-New-Version, Identity Preservation)
 
-**Status:** Proposed (documents patterns shipped in Phase 3 α5d.1 — Project Versions capture + read). Flips to Accepted on merge of this ADR PR.
-**Refines / documents:** `docs/domain/PROJECT_AGGREGATE.md` §6 (the two versioning mechanisms), `schema.md` §9 (`project_versions`), `API_CONTRACT.md` §3.3, and the α5d pre-flight (`docs/engineering/PHASE3_ALPHA5D_PREFLIGHT.md`). Builds on ADR-0034 (authenticated endpoint pattern), the α5a Project aggregate, α5b soft-delete + OCC PATCH, and the α5c Scene aggregate.
-**Wave:** Phase 3, content-versioning slice (α5d.1 read path: capture + list + get; α5d.2 reserved for restore / branch / diff).
+**Status:** Proposed (documents patterns shipped in Phase 3 α5d.1 — Project Versions capture + read — and α5d.2 — restore + diff + the Aggregate OCC Rule). Flips to Accepted on merge of this ADR PR.
+**Refines / documents:** `docs/domain/PROJECT_AGGREGATE.md` §6 (the two versioning mechanisms + the Aggregate OCC Rule), `schema.md` §9 (`project_versions`), `API_CONTRACT.md` §3.3, and the α5d pre-flights (`docs/engineering/PHASE3_ALPHA5D_PREFLIGHT.md`, `docs/engineering/PHASE3_ALPHA5D2_PREFLIGHT.md`). Builds on ADR-0034 (authenticated endpoint pattern), the α5a Project aggregate, α5b soft-delete + OCC PATCH, and the α5c Scene aggregate.
+**Wave:** Phase 3, content-versioning slice (α5d.1 read path: capture + list + get; α5d.2: restore + diff + Aggregate OCC Rule; α5d.3 reserved for branch / autosave).
 
 ---
 
@@ -147,6 +147,69 @@ version that exists under another project is indistinguishable from
 "never existed." This mirrors the α5c scene gate and the α2/α3
 anti-enumeration stance.
 
+### D9 — `projects.version` is the aggregate-wide OCC token (Aggregate OCC Rule)
+
+Restore needs a fence that answers *"has anything in this project changed since
+the user opened the restore screen?"* — including a **scene edit**, not just a
+root-column PATCH. In α5c, scene mutations bumped only `scenes.version`, so a
+project-level fence could miss a concurrent scene edit. α5d.2 closes that gap by
+promoting the root counter to an aggregate-wide token:
+
+> **`projects.version` is the optimistic-concurrency token for the entire
+> Project aggregate. Any mutation of any aggregate child that changes externally
+> observable project state MUST increment `projects.version`.**
+
+Concretely, the α5c scene `create` / `update` / `move` / `delete` paths now also
+bump `projects.version` (via `IProjectRepository.touch_version`), **guarded so a
+no-op edit does not bump** (a same-value PATCH, a move that doesn't change
+order). Restore fences on this token: the value the caller last observed is
+invalidated by *any* observable aggregate change. This is the contract every
+future child aggregate (Timeline, Assets, Tags, Branch) inherits — a small,
+cheap cross-cutting change made now rather than after those aggregates exist.
+
+### D10 — Restore is a single-transaction, scene-reconciling, exactly-one-bump append
+
+Restore (`POST …/versions/{id}/restore`) runs entirely under the α5c project-row
+lock in **one transaction**, `404`-before-`412` (ownership + version-belongs-to-
+project gates precede the fence; stale aggregate token → `412` with **zero
+writes**). On a passing fence it:
+
+1. Loads the source snapshot and asserts `aspect_ratio` **invariance** — it is
+   immutable (never rewritten); a divergence is corruption, surfaced not hidden.
+2. Rehomes under the **live** default storyboard (`ensure_default_storyboard`);
+   the snapshot's `storyboard.id` is provenance only.
+3. **Reconciles scenes keyed on `id`** — blanket soft-deletes every live scene
+   first (emptying the `WHERE deleted_at IS NULL` partial unique index on
+   `(storyboard_id, scene_number)`), then upserts each snapshot scene with its
+   captured `scene_number` verbatim. A snapshot id whose physical row was
+   soft-deleted is **revived in place** (clear `deleted_at`, rewrite columns — an
+   INSERT would collide on the PK); an id with no physical row is **inserted**
+   with the snapshot's UUID; rows absent from the snapshot are left soft-deleted.
+   Because the index is empty during the rewrite, permuted orderings (a move
+   between capture and restore) cannot collide.
+4. Captures a trailing `reason=restore` version (`parent_version_id` = the
+   **source** version, per D2), rewrites the mutable root, advances
+   `current_version_id`, and hand-sets `version = version + 1` — a **single**
+   `projects` UPDATE that produces **exactly one** aggregate bump (D9). The
+   guarded trigger no-ops because the statement already changed `version`.
+
+All-or-nothing: an injected mid-restore failure rolls the whole transaction back
+to zero writes (proven by an integration test). Restore returns `200` (it
+mutates the live project and returns its new current version — the version row
+is a side effect), whereas capture returns `201`.
+
+### D11 — Diff is computed on demand, coarse, and never persisted
+
+`GET …/versions/{id}/diff?against={base}` computes a change summary **on the fly**
+from the two stored snapshots — nothing is written (the `diff_summary` column
+stays reserved for a future materialized/branch use). Both versions are gated to
+the caller's owned project (uniform `404` on either side); `against` is required.
+The α5d.2 shape is deliberately **coarse**: `project_changed` (business columns
+differ), and scene `added` / `removed` / `modified` counts keyed by scene `id`
+(present-in-target-not-base, present-in-base-not-target, present-in-both-with-
+different-content). Field-level diffs are deferred — the canonical serialization
+(D6) keeps a richer diff cheap to add later.
+
 ---
 
 ## Alternatives Considered
@@ -217,9 +280,10 @@ anti-enumeration stance.
   version-scoped children. α5d.1 keeps α5c's implicit single default storyboard
   and captures its *identity* into the snapshot; per-version binding is revisited
   only if/when generation (α7) needs it.
-- **Deferred — restore round-tripping fat fields.** The snapshot includes scene
-  columns the α5c API does not expose. α5d.2 restore must write those columns
-  back faithfully even though no API surface sets them. Noted for that slice.
+- **Resolved (α5d.2) — restore round-trips fat fields.** The snapshot includes
+  scene columns the α5c API does not expose; α5d.2 restore writes them back
+  faithfully (D10), covered by a full fat-column round-trip integration test
+  (capture → mutate → restore → snapshot equality modulo `project.version`).
 
 ---
 
@@ -234,6 +298,15 @@ anti-enumeration stance.
   `list_versions.py` + `ProjectVersionSummary` read model.
 - **Get (full snapshot):** `GET /api/v1/projects/{id}/versions/{version_id}` —
   `get_version.py`.
+- **Restore (append + reconcile, α5d.2):**
+  `POST /api/v1/projects/{id}/versions/{version_id}/restore` —
+  `restore_version.py`, `project_version_repository.py::restore`
+  (`_reconcile_scenes`, `_ensure_default_storyboard`).
+- **Diff (on-demand, α5d.2):**
+  `GET /api/v1/projects/{id}/versions/{version_id}/diff?against={base}` —
+  `diff_versions.py` (pure function over two snapshots).
+- **Aggregate OCC Rule (α5d.2):** `IProjectRepository.touch_version` wired into
+  the four `app/application/use_cases/scenes/*` mutation use cases.
 - **Domain:** `app/domain/versions/project_version.py`
   (`ProjectVersion`, `ProjectVersionSummary`).
 - **Immutability trigger:** `tg_project_versions_bud_reject_mutation`
@@ -246,9 +319,11 @@ them.
 
 ## Future Extensions
 
-- **α5d.2 — restore / branch / diff.** Restore-by-new-version (D2),
-  branch via a non-linear `parent_version_id`, and a computed `diff_summary`
-  between two snapshots (enabled by canonical serialization, D6).
+- **α5d.2 — restore + diff (shipped).** Restore-by-new-version (D2/D10) with the
+  Aggregate OCC Rule fence (D9), and an on-demand coarse diff between two
+  snapshots (D11, enabled by canonical serialization, D6).
+- **α5d.3 — branch.** Branch via a non-linear `parent_version_id` (D10 already
+  makes lineage a DAG), plus an optional materialized `diff_summary`.
 - **Autosave.** Background `reason=autosave` captures with a retention/pruning
   policy so autosaves do not swamp the manual-save history.
 - **Snapshot compression / externalization.** Only if a real project's JSONB

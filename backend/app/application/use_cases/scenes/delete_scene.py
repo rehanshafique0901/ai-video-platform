@@ -70,6 +70,12 @@ class DeleteScene:
                     "scene not found",
                     details={"scene_id": str(scene_id)},
                 )
+            # Aggregate OCC Rule (α5d.2): a soft delete removes a scene from
+            # the project's observable content, so advance the
+            # project-aggregate OCC token.
+            await self._uow.projects.touch_version(
+                project_id=project_id, tenant_id=tenant_id, owner_user_id=owner_user_id
+            )
             await self._uow.commit()
 
         _LOGGER.info(

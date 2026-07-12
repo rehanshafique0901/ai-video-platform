@@ -20,6 +20,17 @@ Coverage map (α5d pre-flight §7 / §8):
 * H11 get unknown version          → 404
 * H12 get version of another project → 404 (cross-project isolation)
 * H13 get non-UUID version path    → 422
+
+Restore + diff (α5d.2 pre-flight §7 / §12):
+
+* HR1 restore happy                → 200, new head (reason=restore, is_current),
+                                      snapshot scenes reconciled to the source
+* HR2 restore stale aggregate fence → 412 (no writes)
+* HR3 restore unowned/unknown project or version → 404 (before the fence)
+* HR4 restore bad body (missing/extra field) → 422
+* HD1 diff happy                   → 200, coarse add/remove/modify counts
+* HD2 diff missing ``against`` param → 422
+* HD3 diff unknown version (either side) → 404
 """
 
 from __future__ import annotations
@@ -90,6 +101,13 @@ async def _create_version(client: AsyncClient, access: str, project_id: str) -> 
     )
     assert r.status_code == 201, r.text
     return r.json()["data"]
+
+
+async def _project_version(client: AsyncClient, access: str, project_id: str) -> int:
+    """Read the project's live aggregate OCC token (the restore fence)."""
+    r = await client.get(f"/api/v1/projects/{project_id}", headers=_auth(access))
+    assert r.status_code == 200, r.text
+    return r.json()["data"]["version"]
 
 
 # ---- H1 — create happy -------------------------------------------------
@@ -300,3 +318,189 @@ async def test_h13_get_non_uuid_version_422(client: AsyncClient) -> None:
         f"/api/v1/projects/{project_id}/versions/not-a-uuid", headers=_auth(access)
     )
     assert r.status_code == 422, r.text
+
+
+# ---- HR1 — restore happy path -----------------------------------------
+
+
+@pytest.mark.integration
+async def test_hr1_restore_happy_path(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    scene_a = await _create_scene(client, access, project_id)
+    scene_b = await _create_scene(client, access, project_id)
+    v1 = await _create_version(client, access, project_id)
+
+    # Drift away from the snapshot: add a third scene after capture.
+    await _create_scene(client, access, project_id)
+    fence = await _project_version(client, access, project_id)
+
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/restore",
+        headers=_auth(access),
+        json={"version": fence},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert set(data.keys()) == _DETAIL_KEYS
+    assert data["reason"] == "restore"
+    assert data["parent_version_id"] == v1["id"]
+    assert data["version_number"] == v1["version_number"] + 1
+    assert data["is_current"] is True
+    # Live scene set reconciled back to the source snapshot (the added scene is
+    # dropped; the two original ids survive in order).
+    assert [s["id"] for s in data["snapshot"]["scenes"]] == [scene_a, scene_b]
+
+
+# ---- HR2 — restore with a stale aggregate fence → 412 -----------------
+
+
+@pytest.mark.integration
+async def test_hr2_restore_stale_fence_412(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+    fence = await _project_version(client, access, project_id)
+
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/restore",
+        headers=_auth(access),
+        json={"version": fence - 1},  # stale
+    )
+    assert r.status_code == 412, r.text
+
+
+# ---- HR3 — restore project/version gate → 404 (before the fence) ------
+
+
+@pytest.mark.integration
+async def test_hr3_restore_unowned_or_unknown_404(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    # Unowned/unknown project → 404 even though the version id is real.
+    r_project = await client.post(
+        f"/api/v1/projects/{uuid4()}/versions/{v1['id']}/restore",
+        headers=_auth(access),
+        json={"version": 999},
+    )
+    assert r_project.status_code == 404, r_project.text
+
+    # Unknown version under an owned project → 404 (before the fence).
+    r_version = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{uuid4()}/restore",
+        headers=_auth(access),
+        json={"version": 999},
+    )
+    assert r_version.status_code == 404, r_version.text
+
+
+# ---- HR4 — restore bad body → 422 -------------------------------------
+
+
+@pytest.mark.integration
+async def test_hr4_restore_bad_body_422(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    # Missing the required ``version`` fence.
+    r_missing = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/restore",
+        headers=_auth(access),
+        json={},
+    )
+    assert r_missing.status_code == 422, r_missing.text
+
+    # Extra field (``extra="forbid"``).
+    r_extra = await client.post(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/restore",
+        headers=_auth(access),
+        json={"version": 1, "reason": "hax"},
+    )
+    assert r_extra.status_code == 422, r_extra.text
+
+
+# ---- HD1 — diff happy path --------------------------------------------
+
+
+@pytest.mark.integration
+async def test_hd1_diff_happy_path(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    scene_a = await _create_scene(client, access, project_id)
+    scene_b = await _create_scene(client, access, project_id)
+    v1 = await _create_version(client, access, project_id)
+
+    # Mutate: modify scene A, remove scene B, add a new scene → then capture v2.
+    await client.patch(
+        f"/api/v1/projects/{project_id}/scenes/{scene_a}",
+        headers=_auth(access),
+        json={"version": 1, "title": "Modified"},
+    )
+    await client.delete(f"/api/v1/projects/{project_id}/scenes/{scene_b}", headers=_auth(access))
+    await _create_scene(client, access, project_id)
+    v2 = await _create_version(client, access, project_id)
+
+    # Diff base=v1 (against) → target=v2 (path).
+    r = await client.get(
+        f"/api/v1/projects/{project_id}/versions/{v2['id']}/diff",
+        headers=_auth(access),
+        params={"against": v1["id"]},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["base_version_number"] == v1["version_number"]
+    assert data["target_version_number"] == v2["version_number"]
+    assert data["scene_changes"]["added"] == 1
+    assert data["scene_changes"]["removed"] == 1
+    assert data["scene_changes"]["modified"] == 1
+
+
+# ---- HD2 — diff missing ``against`` param → 422 -----------------------
+
+
+@pytest.mark.integration
+async def test_hd2_diff_missing_against_422(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    r = await client.get(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/diff", headers=_auth(access)
+    )
+    assert r.status_code == 422, r.text
+
+
+# ---- HD3 — diff with an unknown version → 404 -------------------------
+
+
+@pytest.mark.integration
+async def test_hd3_diff_unknown_version_404(client: AsyncClient) -> None:
+    reg = await _register(client)
+    access = reg["access_token"]
+    project_id = await _create_project(client, access)
+    v1 = await _create_version(client, access, project_id)
+
+    # Unknown ``against`` (base) → 404.
+    r_base = await client.get(
+        f"/api/v1/projects/{project_id}/versions/{v1['id']}/diff",
+        headers=_auth(access),
+        params={"against": str(uuid4())},
+    )
+    assert r_base.status_code == 404, r_base.text
+
+    # Unknown target (path) → 404.
+    r_target = await client.get(
+        f"/api/v1/projects/{project_id}/versions/{uuid4()}/diff",
+        headers=_auth(access),
+        params={"against": v1["id"]},
+    )
+    assert r_target.status_code == 404, r_target.text

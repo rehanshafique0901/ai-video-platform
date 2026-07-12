@@ -379,6 +379,35 @@ class IProjectRepository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def touch_version(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> int | None:
+        """Bump the aggregate OCC token (``projects.version += 1``) — α5d.2.
+
+        The **Aggregate OCC Rule** (α5d.2 Q1 / Option A;
+        ``PROJECT_AGGREGATE.md`` §6): ``projects.version`` is the
+        optimistic-concurrency token for the *entire* Project aggregate, so
+        any mutation of an aggregate child that changes externally observable
+        project state MUST advance it. The α5c scene use cases
+        (create / update / move / delete) call this after a **real** child
+        change so a subsequent restore fence (α5d.2) "sees" the edit.
+
+        Owner-and-tenant scoped + ``deleted_at IS NULL`` exactly like
+        ``get_owned``. Hand-sets ``version = version + 1`` over the guarded
+        ``tg_projects_biu_version_bump`` trigger (net +1, same discipline as
+        ``update_owned``). Returns the new ``version`` on success, or ``None``
+        if no live owned row matched (the caller established ownership
+        upstream, so ``None`` means a concurrent soft-delete — surfaced by the
+        transaction, never a silent no-op). MUST NOT be called for a
+        same-value / no-op child mutation (the aggregate version only moves on
+        a real persisted change).
+        """
+        ...
+
 
 class ISceneRepository(ABC):
     """Persistence surface for ``scenes``. Soft-deleted rows are excluded.
@@ -613,6 +642,48 @@ class IProjectVersionRepository(ABC):
         ``GET /projects/{id}/versions/{version_id}`` maps both to a uniform
         ``404`` (α5d, mirroring α5c D6). Returns the FULL entity including the
         ``snapshot`` blob (this is the detail read).
+        """
+        ...
+
+    @abstractmethod
+    async def restore(
+        self,
+        *,
+        project_id: UUID,
+        source_version_id: UUID,
+        restored_by_user_id: UUID,
+        expected_project_version: int,
+    ) -> ProjectVersion | None:
+        """Restore ``source_version_id``'s snapshot into live state — α5d.2.
+
+        One transaction, all-or-nothing (pre-flight §3/§9). Under a
+        ``SELECT … FOR UPDATE`` lock of the parent ``projects`` row:
+
+        1. **Aggregate OCC fence** — compare the locked ``projects.version``
+           against ``expected_project_version`` (the aggregate token the
+           client last observed, §4 Aggregate OCC Rule). Mismatch → return
+           ``None`` (the use case maps it to ``412``), **no writes**.
+        2. **Rewrite the project root** — mutable business columns
+           (``name`` / ``description`` / ``duration_seconds`` / ``language`` /
+           ``style`` / ``settings``) ← ``snapshot.project``. ``aspect_ratio``
+           is immutable (α5b G6): assert-equal, never written (Q2).
+        3. **Reconcile scenes by ``id``** across ALL physical rows (live +
+           soft-deleted) under the live default storyboard (Q3/Q5): soft-delete
+           the removed set first (frees ``scene_number`` slots under the
+           partial-unique index), then upsert/insert each snapshot scene with
+           its captured ``scene_number`` and full **fat** column set verbatim
+           (Q4/§6), reviving soft-deleted rows in place. An empty snapshot
+           soft-deletes all live scenes.
+        4. **Trailing capture** — append a ``reason=restore`` version whose
+           ``parent_version_id`` is ``source_version_id`` (Q7) via the same
+           canonical snapshot builder, advancing ``current_version_id`` and
+           bumping ``projects.version`` once (Q6).
+
+        The source version was already fetched + project-scoped by the use
+        case (``versions.get_owned`` → 404, the 404-before-412 split), so a
+        ``None`` here is a *concurrency* outcome (→ 412), never a *visibility*
+        one. Returns the new ``reason=restore``
+        :class:`~app.domain.versions.project_version.ProjectVersion`.
         """
         ...
 

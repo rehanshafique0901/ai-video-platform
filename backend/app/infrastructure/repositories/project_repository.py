@@ -191,6 +191,31 @@ class ProjectRepository(IProjectRepository):
         marked = (await self._session.execute(stmt)).scalar_one_or_none()
         return marked is not None
 
+    async def touch_version(
+        self,
+        project_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> int | None:
+        # Aggregate OCC Rule (α5d.2 Q1) — advance the project-aggregate OCC
+        # token after a real child (scene) mutation. Same hand-set ``+1`` over
+        # the guarded ``tg_projects_biu_version_bump`` trigger as
+        # ``update_owned`` (net exactly +1), scoped owner+tenant+live. No
+        # version fence: the child mutation carried its own fence; this is the
+        # aggregate roll-up, so it advances whatever the current value is.
+        # ``RETURNING version`` reports the new token (or None if a concurrent
+        # soft-delete removed the row — the outer transaction handles it).
+        upd = (
+            update(ProjectRow)
+            .where(ProjectRow.id == project_id)
+            .where(ProjectRow.tenant_id == tenant_id)
+            .where(ProjectRow.owner_user_id == owner_user_id)
+            .where(ProjectRow.deleted_at.is_(None))
+            .values(version=ProjectRow.version + 1, updated_at=func.now())
+            .returning(ProjectRow.version)
+        )
+        return (await self._session.execute(upd)).scalar_one_or_none()
+
 
 def _row_to_entity(row: ProjectRow) -> ProjectEntity:
     return ProjectEntity(

@@ -86,6 +86,11 @@ class CreateScene:
             position = await self._uow.scenes.position_of(
                 storyboard_id=storyboard_id, scene_number=scene.scene_number
             )
+            # Aggregate OCC Rule (α5d.2): a new scene changes observable
+            # project state, so advance the project-aggregate OCC token.
+            await self._uow.projects.touch_version(
+                project_id=project_id, tenant_id=tenant_id, owner_user_id=owner_user_id
+            )
             await self._uow.commit()
 
         _LOGGER.info(
