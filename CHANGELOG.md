@@ -6,6 +6,96 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α6.2 — Media Asset Aggregate (generation-output CRUD) (2026-07-13)
+
+Introduces the **Media Asset aggregate** — the first *generation-output* content
+— as a **register-by-metadata** CRUD surface backed by the existing baseline
+`media_assets` table (no migration — table + indexes + the `(storage_backend,
+storage_bucket, storage_key)` unique constraint already exist). Unlike prompts /
+scenes, `media_assets` carries its **own `tenant_id` + `owner_user_id`** (direct
+ownership) and only a **nullable `project_id`**, so the endpoints are **top-level
+and owner-scoped** (α6.2 pre-flight Q1), not project-nested. α6.2 **registers**
+an object the client already holds (`source ∈ {uploaded, stock}`) — it makes
+**no** provider call, byte upload, presigned URL, or checksum fetch; AI
+generation (`source = generated`) and object storage are later slices (Q2). The
+concurrency posture **adopts ADR-0036** (Q3, **ADR-0037**): no `version` column,
+no per-row OCC, a `PATCH` is **last-writer-wins** (no `412`), mutations do **not**
+bump `projects.version`, and media is **excluded** from `project_versions`
+snapshots / restore / diff. Duplicate storage coordinates → `409`; foreign /
+unknown optional links → `422`. See `docs/domain/MEDIA_AGGREGATE.md`,
+**ADR-0037**, and `docs/engineering/PHASE3_ALPHA6_2_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/media`** (`CurrentUserDep`) — register a media asset
+  (metadata only). Body `{ kind, source, storage_backend, storage_bucket,
+  storage_key, mime_type, size_bytes, checksum_sha256, project_id?, scene_id?,
+  prompt_id?, model_id?, provider?, width?, height?, duration_seconds?,
+  source_metadata? }`. `kind` / `storage_backend` validated enums; `source`
+  restricted to `uploaded` / `stock` (`generated` → `422`); `checksum_sha256` a
+  64-char hex string (→ 32 bytes); `size_bytes ≥ 0`. Each present optional link
+  validated for the caller (foreign/unknown `project_id`, `scene_id`/`prompt_id`
+  without or outside that project, unknown/retired `model_id` → `422
+  VALIDATION_FAILED`, not `404`). Duplicate `(storage_backend, storage_bucket,
+  storage_key)` → `409 CONFLICT` (unique-constraint backstop behind a
+  pre-check). Identity + ownership server-owned (`extra="forbid"` → `422`).
+  Returns `201` + `MediaPublic`.
+- **`GET /api/v1/media`** — list the caller's live assets newest-first
+  (`created_at` desc, `id` desc) with optional `?kind=<enum>`, `?source=<str>`,
+  `?project_id=<uuid>`, `?scene_id=<uuid>` filters (combined = AND; bad enum /
+  non-UUID → `422`). Owner-scoped; not paginated. Empty → `200 []`.
+- **`GET /api/v1/media/{media_id}`** — one asset (`200`) or the uniform owner
+  `404` (unknown / other owner / soft-deleted).
+- **`PATCH /api/v1/media/{media_id}`** — narrow, partial, **no version fence**.
+  Body = any subset of `{ project_id, scene_id, prompt_id, model_id, provider,
+  source_metadata }`; tri-state via `exclude_unset` (explicit `null` clears a
+  nullable link, re-validated when non-null → `422`; `source_metadata`
+  non-nullable). Physical-object fields immutable (`extra="forbid"` → `422`);
+  empty patch → `422`; same-value patch is a `200` no-op. No `projects.version`
+  bump.
+- **`DELETE /api/v1/media/{media_id}`** — owner-scoped soft delete (`204`), no
+  version fence, idempotent-by-404.
+- **Domain** `app/domain/media/media_asset.py` — frozen `MediaAsset` entity
+  (slim view of the physical row; **no `version` field** by design;
+  `checksum_sha256` as `bytes`).
+- **`IMediaRepository`** + `MediaRepository` (`add` [unique→`ConflictError`],
+  `list_owned` + `kind`/`source`/`project_id`/`scene_id` filters, `get_owned`,
+  `update_owned` [no OCC fence], `soft_delete_owned`, `model_is_linkable`) — all
+  owner-scoped (tenant + owner_user) + soft-delete excluded. Wired onto the real
+  `UnitOfWork`, the integration `_TestUnitOfWork`, and `FakeUnitOfWork`
+  (+ `FakeMediaRepository`).
+- **Use cases** `app/application/use_cases/media/` — `RegisterMedia`,
+  `ListMedia`, `GetMedia`, `UpdateMedia`, `DeleteMedia`, plus a shared
+  `_links.validate_media_links` helper (project/scene/prompt/model consistency →
+  `422`). Structured logs never carry `storage_key` / `checksum` /
+  `source_metadata` values.
+- **DTOs** `app/api/v1/schemas/media.py` — `MediaRegisterRequest`,
+  `MediaUpdateRequest` (tri-state, `extra="forbid"`, empty-patch → `422`),
+  `MediaPublic` (no `version`; `owner_user_id`/`tenant_id`/`deleted_at` omitted;
+  `checksum_sha256` emitted as hex); container factories + `deps` aliases +
+  `routers/media.py`, mounted in `app/main.py`.
+- **Tests** — unit matrix for the 5 use cases (happy / each-link-foreign→422 /
+  scene-without-project→422 / unknown-model→422 / duplicate→409 / same-value
+  no-op / explicit-null clears / idempotent-by-404); repository integration incl.
+  the load-bearing **F5** test (a media asset's `project_id`/`scene_id`/
+  `prompt_id` links **survive** a parent *soft-delete* — `ON DELETE SET NULL`
+  fires only on a hard delete) + the unique-conflict path; HTTP integration
+  `test_media.py` (A1–A15 end-to-end: 201/200/204/404/422/409/401, owner
+  isolation, filters, tri-state PATCH, immutable-field rejection,
+  idempotent-by-404).
+
+#### Documentation
+- `API_CONTRACT.md` §2 resource map + new §3.2.3 — media documented as shipped
+  (top-level, owner-scoped, register-by-metadata, no `version`).
+- `docs/domain/MEDIA_AGGREGATE.md` (new) + **ADR-0037** (new, adopts ADR-0036) —
+  the generation-output identity, direct owner-level ownership, register-by-
+  metadata boundary, storage-identity uniqueness, and the no-OCC / no-snapshot
+  rationale.
+- `docs/domain/PROJECT_AGGREGATE.md` §6/§8 — media noted as **outside** the
+  versioned snapshot boundary; §8 map updated with the α6.2 Media output.
+
+#### Version
+- `0.4.12-phase3-alpha6.2-dev`.
+
 ### Phase 3 Slice α6.1 — Prompt Aggregate (generation-input CRUD) (2026-07-12)
 
 Introduces the **Prompt aggregate** — the first *generation-input* content — as

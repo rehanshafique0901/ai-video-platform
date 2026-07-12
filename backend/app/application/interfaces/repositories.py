@@ -34,6 +34,7 @@ from uuid import UUID
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
@@ -689,6 +690,166 @@ class IPromptRepository(ABC):
         row is written (``prompts.model_id`` is ``ON DELETE SET NULL`` so the FK
         alone would silently accept a since-retired model; this is the app-level
         gate). ``ai_models`` is a system registry with no soft-delete.
+        """
+        ...
+
+
+class IMediaRepository(ABC):
+    """Persistence surface for ``media_assets``. Soft-deleted rows are excluded.
+
+    Introduced by Slice α6.2. A media asset is a **generation output** —
+    a registered pointer to a concrete stored object. Unlike prompts/scenes, the
+    ``media_assets`` row carries its **own** ``tenant_id`` + ``owner_user_id``
+    (direct ownership), so every method is **owner-scoped** (``tenant_id`` +
+    ``owner_user_id``), NOT project-scoped: an asset owned by another user (or in
+    another tenant) is invisible — it returns ``None`` / is omitted / reports
+    ``False`` (anti-enumeration, inherited from α5a). ``project_id`` is an
+    optional link/filter, never the access key. Authorization is the caller's
+    responsibility: the use case has already resolved ``owner_user_id`` /
+    ``tenant_id`` from ``CurrentUserDep`` before reaching this port.
+
+    **No optimistic concurrency (ADR-0037, adopting ADR-0036 / α6.2 Q3).** The
+    ``media_assets`` table has no ``version`` column and is absent from the
+    version-bump trigger set, so media mutations are **last-writer-wins**: no CAS
+    fence, and — crucially — a media register/update/delete does **NOT** bump
+    ``projects.version`` and is **NOT** captured in project version snapshots.
+    Media is a generation output, not versioned editorial content; the versioned
+    aggregate stays {project root + scenes}. ``updated_at`` is trigger-owned.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        kind: str,
+        source: str,
+        storage_backend: str,
+        storage_bucket: str,
+        storage_key: str,
+        mime_type: str,
+        size_bytes: int,
+        checksum_sha256: bytes,
+        project_id: UUID | None,
+        scene_id: UUID | None,
+        prompt_id: UUID | None,
+        model_id: UUID | None,
+        provider: str | None,
+        width: int | None,
+        height: int | None,
+        duration_seconds: float | None,
+        source_metadata: dict[str, Any],
+    ) -> MediaAsset:
+        """Insert a new media asset for ``(tenant_id, owner_user_id)`` and return it.
+
+        The caller (``RegisterMedia``) has ALREADY validated each non-``None``
+        link (``project_id`` owned live, ``scene_id`` / ``prompt_id`` live in that
+        project, ``model_id`` linkable) and that ``source`` is one of the
+        register-allowed values (α6.2 Q2 — ``generated`` is rejected upstream).
+        ``id`` / timestamps are DB-populated; the returned entity carries the
+        authoritative values.
+
+        Raises ``ConflictError`` if the ``uq_media_assets_storage_backend_
+        storage_bucket_storage_key`` uniqueness constraint is violated — i.e. an
+        asset with the same ``(storage_backend, storage_bucket, storage_key)``
+        already exists (the use case maps it to ``409``, α6.2 Q6). The unique
+        constraint is the race-safe backstop behind the use case's pre-check.
+        """
+        ...
+
+    @abstractmethod
+    async def list_owned(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        kind: str | None = None,
+        source: str | None = None,
+        project_id: UUID | None = None,
+        scene_id: UUID | None = None,
+    ) -> list[MediaAsset]:
+        """Return the owner's live media assets, newest first, optionally filtered.
+
+        Ordered by ``created_at DESC, id DESC`` (a total order — no duplicate /
+        skip under timestamp ties). ``kind`` (a ``media_kind`` value), ``source``
+        (a ``media_source`` value), ``project_id`` and ``scene_id`` narrow the
+        result when provided (combined = AND). Uses the ``(tenant_id, kind,
+        created_at)`` index. Not paginated in α6.2 (Q10). Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> MediaAsset | None:
+        """Return the owner's live media asset with ``media_id``, or ``None``.
+
+        ``None`` when the row is missing, soft-deleted, OR belongs to a different
+        ``tenant_id`` / ``owner_user_id`` — deliberately indistinguishable so
+        ``GET /media/{media_id}`` maps all of them to a uniform ``404`` (α6.2 D2,
+        mirroring α5a D5).
+        """
+        ...
+
+    @abstractmethod
+    async def update_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> MediaAsset | None:
+        """Partial update of the owner's live media asset (α6.2, narrow PATCH).
+
+        Applies ``changes`` (a mapping of the **mutable** columns only —
+        ``project_id`` / ``scene_id`` / ``prompt_id`` / ``model_id`` /
+        ``provider`` / ``source_metadata``; the physical-object columns are
+        immutable, Q8) to the row matching ``media_id`` + ``tenant_id`` +
+        ``owner_user_id`` + ``deleted_at IS NULL``. **No version fence**
+        (ADR-0037 — media has no OCC column); ``updated_at`` is bumped by the
+        trigger. Returns the updated :class:`MediaAsset`, or ``None`` when no live
+        owned row matched (missing / soft-deleted / another owner's — the use
+        case maps ``None`` → ``404``, never ``412``). ``changes`` MUST be
+        non-empty and contain only mutable columns (the use case resolves the
+        empty-patch ``422`` upstream); any non-``None`` link in ``changes`` was
+        validated by the use case first.
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> bool:
+        """Soft-delete (``deleted_at = now()``) the owner's live media asset (α6.2).
+
+        Scoped to ``tenant_id`` + ``owner_user_id`` + ``deleted_at IS NULL``.
+        Returns ``True`` if a live owned row was found and marked, ``False``
+        otherwise (missing, already soft-deleted, or another owner's asset). The
+        use case maps ``False`` → ``404`` so a repeat delete — and any GET/PATCH
+        after delete — is a uniform ``404`` (idempotent-by-404, α6.2 D4). No
+        version fence. Soft-delete trips none of the downstream ``SET NULL`` FKs
+        (they fire on hard delete only), so any future clip/render references
+        keep pointing at the now-hidden row (F6, forward-compat note).
+        """
+        ...
+
+    @abstractmethod
+    async def model_is_linkable(self, model_id: UUID) -> bool:
+        """True iff ``model_id`` references an ``ai_models`` row usable as a media target.
+
+        A model is linkable when the row exists and its ``status`` is **not**
+        ``retired`` (α6.2 Q5, mirroring α6.1 Q4). Used by ``RegisterMedia`` /
+        ``UpdateMedia`` to validate a client-supplied ``model_id`` → ``422`` on
+        failure, before the row is written (``media_assets.model_id`` is ``ON
+        DELETE RESTRICT``, but the FK alone would still accept a since-retired
+        model; this is the app-level gate). ``ai_models`` has no soft-delete.
         """
         ...
 

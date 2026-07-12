@@ -19,6 +19,7 @@ from typing import Self, cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.interfaces.repositories import (
+    IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -29,6 +30,7 @@ from app.application.interfaces.repositories import (
     IUserRepository,
 )
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.infrastructure.repositories.media_repository import MediaRepository
 from app.infrastructure.repositories.project_repository import ProjectRepository
 from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
@@ -70,6 +72,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.scenes = cast(ISceneRepository, SceneRepository(self._session))
         self.versions = cast(IProjectVersionRepository, ProjectVersionRepository(self._session))
         self.prompts = cast(IPromptRepository, PromptRepository(self._session))
+        self.media = cast(IMediaRepository, MediaRepository(self._session))
         return self
 
     async def __aexit__(

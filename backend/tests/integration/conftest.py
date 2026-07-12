@@ -118,6 +118,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.application.interfaces.repositories import (
+        IMediaRepository,
         IProjectRepository,
         IProjectVersionRepository,
         IPromptRepository,
@@ -128,6 +129,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IUserRepository,
     )
     from app.application.interfaces.unit_of_work import IUnitOfWork
+    from app.infrastructure.repositories.media_repository import MediaRepository
     from app.infrastructure.repositories.project_repository import ProjectRepository
     from app.infrastructure.repositories.project_version_repository import (
         ProjectVersionRepository,
@@ -183,6 +185,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                     IProjectVersionRepository, ProjectVersionRepository(self._session)
                 )
                 self.prompts = cast(IPromptRepository, PromptRepository(self._session))
+                self.media = cast(IMediaRepository, MediaRepository(self._session))
                 return self
 
             async def __aexit__(

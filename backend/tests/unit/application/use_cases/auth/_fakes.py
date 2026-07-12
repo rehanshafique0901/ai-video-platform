@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
+    IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -42,6 +43,7 @@ from app.core.errors import ConflictError, NotFoundError
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
@@ -1097,6 +1099,165 @@ class FakePromptRepository(IPromptRepository):
         return model_id in self._linkable_models
 
 
+# ---- Media repository -------------------------------------------------
+
+
+@dataclass
+class FakeMediaRepository(IMediaRepository):
+    """In-memory ``IMediaRepository`` for α6.2 use-case unit tests.
+
+    Models the real ``MediaRepository`` observable contract: **owner-scoped**
+    visibility (``tenant_id`` + ``owner_user_id``, NOT project-scoped),
+    newest-first listing with ``kind`` / ``source`` / ``project_id`` /
+    ``scene_id`` filters, the ``(storage_backend, storage_bucket, storage_key)``
+    uniqueness (``add`` raises ``ConflictError`` on a duplicate → 409), and —
+    per ADR-0037 — **no** version fence and **no** ``projects.version`` bump on
+    any mutation (last-writer-wins). ``_order`` is an insertion ordinal so
+    newest-first is deterministic without real timestamps. ``_linkable_models``
+    is the set of ``ai_models`` ids a test declares linkable
+    (:meth:`model_is_linkable` returns membership); a model NOT in the set
+    models a missing/retired model → the use case raises ``422``.
+    """
+
+    _media: dict[UUID, MediaAsset] = field(default_factory=dict)
+    _linkable_models: set[UUID] = field(default_factory=set)
+    _order: dict[UUID, int] = field(default_factory=dict)
+    _seq: int = 0
+
+    async def add(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        kind: str,
+        source: str,
+        storage_backend: str,
+        storage_bucket: str,
+        storage_key: str,
+        mime_type: str,
+        size_bytes: int,
+        checksum_sha256: bytes,
+        project_id: UUID | None,
+        scene_id: UUID | None,
+        prompt_id: UUID | None,
+        model_id: UUID | None,
+        provider: str | None,
+        width: int | None,
+        height: int | None,
+        duration_seconds: float | None,
+        source_metadata: dict[str, Any],
+    ) -> MediaAsset:
+        for existing in self._media.values():
+            if (
+                existing.storage_backend == storage_backend
+                and existing.storage_bucket == storage_bucket
+                and existing.storage_key == storage_key
+            ):
+                raise ConflictError(
+                    "media asset already exists for these storage coordinates",
+                    details={
+                        "constraint": ("uq_media_assets_storage_backend_storage_bucket_storage_key")
+                    },
+                )
+        now = datetime.now(UTC)
+        media = MediaAsset(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            kind=kind,
+            project_id=project_id,
+            scene_id=scene_id,
+            prompt_id=prompt_id,
+            model_id=model_id,
+            provider=provider,
+            storage_backend=storage_backend,
+            storage_bucket=storage_bucket,
+            storage_key=storage_key,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            width=width,
+            height=height,
+            duration_seconds=duration_seconds,
+            checksum_sha256=checksum_sha256,
+            source=source,
+            source_metadata=dict(source_metadata),
+            created_at=now,
+            updated_at=now,
+        )
+        self._media[media.id] = media
+        self._seq += 1
+        self._order[media.id] = self._seq
+        return media
+
+    async def list_owned(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        kind: str | None = None,
+        source: str | None = None,
+        project_id: UUID | None = None,
+        scene_id: UUID | None = None,
+    ) -> list[MediaAsset]:
+        rows = [
+            m
+            for m in self._media.values()
+            if m.tenant_id == tenant_id and m.owner_user_id == owner_user_id
+        ]
+        if kind is not None:
+            rows = [m for m in rows if m.kind == kind]
+        if source is not None:
+            rows = [m for m in rows if m.source == source]
+        if project_id is not None:
+            rows = [m for m in rows if m.project_id == project_id]
+        if scene_id is not None:
+            rows = [m for m in rows if m.scene_id == scene_id]
+        # Newest-first: insertion ordinal DESC mirrors (created_at, id) DESC.
+        rows.sort(key=lambda m: self._order.get(m.id, 0), reverse=True)
+        return rows
+
+    async def get_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> MediaAsset | None:
+        media = self._media.get(media_id)
+        if media is None or media.tenant_id != tenant_id or media.owner_user_id != owner_user_id:
+            return None
+        return media
+
+    async def update_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> MediaAsset | None:
+        media = self._media.get(media_id)
+        if media is None or media.tenant_id != tenant_id or media.owner_user_id != owner_user_id:
+            return None
+        # No version fence (ADR-0037): last-writer-wins. updated_at advances.
+        updated = replace(media, updated_at=datetime.now(UTC), **dict(changes))
+        self._media[media_id] = updated
+        return updated
+
+    async def soft_delete_owned(
+        self,
+        media_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> bool:
+        media = self._media.get(media_id)
+        if media is None or media.tenant_id != tenant_id or media.owner_user_id != owner_user_id:
+            return False
+        del self._media[media_id]
+        return True
+
+    async def model_is_linkable(self, model_id: UUID) -> bool:
+        return model_id in self._linkable_models
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1113,6 +1274,7 @@ class FakeUnitOfWork(IUnitOfWork):
         scenes: FakeSceneRepository | None = None,
         versions: FakeProjectVersionRepository | None = None,
         prompts: FakePromptRepository | None = None,
+        media: FakeMediaRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1127,6 +1289,7 @@ class FakeUnitOfWork(IUnitOfWork):
             _projects=self._fake_projects, _scenes=self._fake_scenes
         )
         self._fake_prompts = prompts or FakePromptRepository()
+        self._fake_media = media or FakeMediaRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -1139,6 +1302,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.scenes = self._fake_scenes
         self.versions = self._fake_versions
         self.prompts = self._fake_prompts
+        self.media = self._fake_media
         return self
 
     async def __aexit__(

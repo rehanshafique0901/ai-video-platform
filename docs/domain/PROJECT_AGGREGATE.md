@@ -137,7 +137,15 @@ endpoints:
   captured in `project_versions` snapshots (see §6 and ADR-0036). A prompt may
   optionally link a live scene (`scene_id`, immutable after create) and an
   `ai_models` row (`model_id`). See `docs/domain/PROMPT_AGGREGATE.md`.
-- **Media assets** (`media_assets.project_id`) — rendered/uploaded media.
+- **Media assets** (`media_assets.project_id`, `ON DELETE SET NULL`, **nullable**)
+  — **generation outputs**, shipped in α6.2 as a **top-level, owner-scoped**
+  CRUD aggregate (`/media`), NOT a project child: `media_assets` carries its own
+  `tenant_id` + `owner_user_id`, and `project_id` is an *optional link/filter*.
+  Deliberately **outside** the versioned content boundary (no `version` column,
+  no per-row OCC, no `projects.version` bump, **not** captured in
+  `project_versions` snapshots — see §6 and **ADR-0037**, which adopts ADR-0036).
+  Registered by metadata (`source ∈ {uploaded, stock}`); optional
+  `scene_id`/`prompt_id`/`model_id` links. See `docs/domain/MEDIA_AGGREGATE.md`.
 - **Render jobs** (`render_jobs.project_id`) — render lifecycle.
 - **Project versions** (`project_versions.project_id`) — the immutable
   snapshot ledger (see §6). `projects.current_version_id` is a *pointer*
@@ -294,6 +302,16 @@ soft-deleted, a prompt's `scene_id` link survives both a scene soft-delete and
 a version restore — the FK's `ON DELETE SET NULL` fires only on a hard scene
 delete, which the API never performs.)
 
+**Generation outputs are outside both mechanisms too (α6.2, ADR-0037).** Media
+assets — shipped in α6.2 — are **generation outputs** and follow the same stance
+as prompts: no `version` column, no per-row OCC, no `projects.version` bump, and
+**not** captured/restored/diffed. Media additionally sits *outside* the project
+as an **owner-level** artefact (its own `tenant_id` + `owner_user_id`, a nullable
+`project_id`), reusable across projects — which makes snapshot capture ill-defined
+in any case. **ADR-0037** adopts ADR-0036's concurrency model for the output side.
+Media→project/scene/prompt links likewise survive a parent soft-delete and a
+restore (`ON DELETE SET NULL` fires only on a hard parent delete).
+
 ---
 
 ## 7. Invariants (must always hold)
@@ -322,7 +340,7 @@ Project (root)
  ├── Storyboards       storyboards.project_id           (α5c; one default auto-created)
  │     └── Scenes      scenes.storyboard_id             (α5c — ordered by scene_number)
  ├── Prompts           prompts.project_id               (α6.1 — generation inputs; optional scene_id link; NO OCC, NOT in snapshots)
- ├── Media Assets      media_assets.project_id          (α6.2) ← generated *from* prompts
+ ├── Media Assets      media_assets.project_id (NULLABLE) (α6.2 — generation OUTPUTS; owner-level, top-level /media; NO OCC, NOT in snapshots) ← linked *from* prompts
  ├── Timeline          timelines.project_id (1:1)       (α6.3) → Tracks → Clips → media_assets
  ├── Render Jobs       render_jobs.project_id           (α6.4)
  ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; α5d.3 branch=fork-to-new-project via branched_from)
@@ -357,3 +375,4 @@ model.
 | 2026-07-12 | **§6 updated for α5d.2 (restore + diff):** added the **Aggregate OCC Rule** — `projects.version` is now the OCC token for the entire aggregate; scene create/update/move/delete each bump it (guarded against no-ops), and restore bumps it exactly once. Documented the restore-by-new-version + scene-reconcile + one-transaction semantics and the on-demand diff. Invariant #6 extended to child mutations. §8 diagram: `Versions` marked α5d.2 restore+diff (branch α5d.3). |
 | 2026-07-12 | **§6 updated for α5d.3 (branch = fork to a new project):** documented branch as a source-immutable fork into a new caller-owned aggregate (fresh scene ids, `reason=branch` v1, `parent_version_id` NULL) with a self-contained `branched_from` provenance breadcrumb (`{project_id, version_id, version_number}`); no OCC fence, no source version bump, new project's version follows the created + first-capture arc → 2. Recorded that an in-project multi-head model is deferred (needs a migration). §8 diagram: `Versions` marked α5d.3 branch. See **ADR-0035** D12. |
 | 2026-07-12 | **§3/§6/§8 updated for α6.1 (Prompt aggregate):** the Prompts child is now shipped as an owner-scoped CRUD surface (`/projects/{id}/prompts`) and re-marked in §3 as a **generation input** explicitly **outside** the versioned content boundary — no `version` column, no per-row OCC, no `projects.version` bump, and **not** captured in `project_versions` snapshots/restore/diff (a decision, not an omission). Added the "Generation inputs are outside both mechanisms" note in §6 with the ADR-0036 governing principle verbatim. §8 diagram: `Prompts` promoted to a direct project child (α6.1) feeding Media Assets (α6.2). See `docs/domain/PROMPT_AGGREGATE.md` and **ADR-0036**. |
+| 2026-07-13 | **§3/§6/§8 updated for α6.2 (Media Asset aggregate):** media is now shipped as a **top-level, owner-scoped** CRUD surface (`/media`) — NOT a project child (its own `tenant_id`+`owner_user_id`, nullable `project_id`). §3 re-marks it as a **generation output** outside the versioned boundary (no `version`, no OCC, no `projects.version` bump, not in snapshots/restore/diff). Added the "Generation outputs are outside both mechanisms" note in §6 (**ADR-0037** adopts ADR-0036). §8 diagram: Media Assets marked α6.2 shipped, owner-level, nullable `project_id`. See `docs/domain/MEDIA_AGGREGATE.md` and **ADR-0037**. |

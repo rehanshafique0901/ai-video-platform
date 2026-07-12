@@ -39,6 +39,11 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.media.delete_media import DeleteMedia
+from app.application.use_cases.media.get_media import GetMedia
+from app.application.use_cases.media.list_media import ListMedia
+from app.application.use_cases.media.register_media import RegisterMedia
+from app.application.use_cases.media.update_media import UpdateMedia
 from app.application.use_cases.projects.create_project import CreateProject
 from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
@@ -155,6 +160,14 @@ ListPromptsDep = Annotated[ListPrompts, Depends(container.get_list_prompts_use_c
 GetPromptDep = Annotated[GetPrompt, Depends(container.get_get_prompt_use_case)]
 UpdatePromptDep = Annotated[UpdatePrompt, Depends(container.get_update_prompt_use_case)]
 DeletePromptDep = Annotated[DeletePrompt, Depends(container.get_delete_prompt_use_case)]
+
+# ---- Use-case dependencies (Slice α6.2 — Media) -----------------------
+
+RegisterMediaDep = Annotated[RegisterMedia, Depends(container.get_register_media_use_case)]
+ListMediaDep = Annotated[ListMedia, Depends(container.get_list_media_use_case)]
+GetMediaDep = Annotated[GetMedia, Depends(container.get_get_media_use_case)]
+UpdateMediaDep = Annotated[UpdateMedia, Depends(container.get_update_media_use_case)]
+DeleteMediaDep = Annotated[DeleteMedia, Depends(container.get_delete_media_use_case)]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

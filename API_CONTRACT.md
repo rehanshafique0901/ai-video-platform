@@ -54,6 +54,7 @@ Error:
 | Project Versions (CR-6) | `/projects/{id}/versions`, `/projects/{id}/versions/{version_id}` |
 | Scenes | `/projects/{id}/scenes`, `/projects/{id}/scenes/{scene_id}`, `/projects/{id}/scenes/{scene_id}/move` |
 | Prompts (α6.1) | `/projects/{id}/prompts`, `/projects/{id}/prompts/{prompt_id}` |
+| Media (α6.2) | `/media`, `/media/{media_id}` (top-level, owner-scoped) |
 | AI — Script | `/ai/script` |
 | AI — Storyboard | `/ai/storyboard` |
 | AI — Images | `/ai/images` |
@@ -288,6 +289,80 @@ DELETE /projects/{project_id}/prompts/{prompt_id}    soft delete
 > `ON DELETE SET NULL` fires only on a hard scene delete, which the API never
 > performs). See `docs/domain/PROMPT_AGGREGATE.md` and
 > `docs/decisions/ADR-0036-prompts-generation-inputs.md`.
+
+#### 3.2.3 Media assets (Phase 3 α6.2)
+
+```
+POST   /media                register a media asset (metadata only)
+GET    /media                list (newest-first, filters: ?kind= ?source= ?project_id= ?scene_id=)
+GET    /media/{media_id}
+PATCH  /media/{media_id}     narrow partial update (no version fence)
+DELETE /media/{media_id}     soft delete
+```
+
+> **Shipped in Phase 3 α6.2 (Media CRUD).** A media asset is a **generation
+> output** — a registered pointer to a concrete stored object (image / video /
+> narration / subtitle / music / sound_effect / thumbnail). Unlike prompts and
+> scenes, media is an **owner-level** artefact: the `media_assets` row carries
+> its **own `tenant_id` + `owner_user_id`** and only a **nullable `project_id`**,
+> so the endpoints are **top-level and owner-scoped** (not project-nested). The
+> visibility gate is a single direct row match — a missing / soft-deleted /
+> other-owner asset is a uniform `404 NOT_FOUND` (anti-enumeration).
+>
+> **Media is NOT versioned editorial content (ADR-0037, adopts ADR-0036).** It
+> has **no `version` column**, does **not** participate in optimistic
+> concurrency, and is **excluded** from `project_versions` snapshots / restore /
+> diff. A `PATCH` is **last-writer-wins** — no `version` on the wire, no `412` —
+> and mutating a media asset does **not** bump `projects.version`.
+>
+> **Register-by-metadata (α6.2 scope).** `POST /media` registers an object the
+> client **already holds**: the API makes **no** provider call, **no** byte
+> upload, **no** presigned URL, and does **not** verify the checksum. Object
+> storage and AI generation are later slices.
+>
+> * **`POST /media`** — body `{ kind, source, storage_backend, storage_bucket,
+>   storage_key, mime_type, size_bytes, checksum_sha256, project_id?, scene_id?,
+>   prompt_id?, model_id?, provider?, width?, height?, duration_seconds?,
+>   source_metadata? }`. `kind` (`media_kind`) and `storage_backend`
+>   (`local, s3, r2, azure_blob, gcs`) are validated enums; `source` accepts only
+>   `uploaded` / `stock` (`generated` → `422`, deferred to α8). `checksum_sha256`
+>   is a **64-char hex** string (→ 32 bytes). `size_bytes ≥ 0`. Optional links
+>   are validated for the caller — a foreign/unknown `project_id`, a `scene_id` /
+>   `prompt_id` without (or outside) that project, or an unknown/retired
+>   `model_id` → `422 VALIDATION_FAILED` (not `404`). Identity + ownership are
+>   server-owned (`extra="forbid"` → any non-declared key such as `id` /
+>   `owner_user_id` / `tenant_id` is `422`). Duplicate `(storage_backend,
+>   storage_bucket, storage_key)` → **`409 CONFLICT`**. Returns `201` +
+>   `MediaPublic`.
+> * **`GET /media`** — the caller's live assets, ordered **newest-first**
+>   (`created_at` desc, `id` desc). Optional `?kind=<enum>`, `?source=<str>`,
+>   `?project_id=<uuid>`, `?scene_id=<uuid>` filters (combined = AND); a bad enum
+>   / non-UUID is `422`. Not paginated. Empty → `200 []`.
+> * **`GET /media/{media_id}`** — one asset (`200`), or the uniform `404`
+>   (unknown / another owner / soft-deleted).
+> * **`PATCH /media/{media_id}`** — **narrow**, partial, **no version fence**.
+>   Body = any subset of the **mutable** set `{ project_id, scene_id, prompt_id,
+>   model_id, provider, source_metadata }`. Tri-state: absent = unchanged;
+>   explicit `null` clears a nullable link (re-validated when non-null → else
+>   `422`); `source_metadata` is non-nullable (explicit `null` → `422`). The
+>   physical-object fields (`storage_*`, `checksum_sha256`, `mime_type`,
+>   `size_bytes`, `width`, `height`, `duration_seconds`, `kind`, `source`) are
+>   **immutable** — presence in the patch → `422` (`extra="forbid"`). Empty patch
+>   → `422`; a same-value patch is a `200` no-op. Returns `200` + `MediaPublic`.
+> * **`DELETE /media/{media_id}`** — owner-scoped **soft** delete (`204`), no
+>   version fence, idempotent **by-404** (a second delete — and any `GET`/`PATCH`
+>   after delete — is `404`; deleting another owner's asset or an unknown id is
+>   the same `404`).
+>
+> `MediaPublic` = `{ id, kind, source, project_id, scene_id, prompt_id, model_id,
+> provider, storage_backend, storage_bucket, storage_key, mime_type, size_bytes,
+> width, height, duration_seconds, checksum_sha256 (hex), source_metadata,
+> created_at, updated_at }` — **no `version`**; `owner_user_id` / `tenant_id` /
+> `deleted_at` are server-internal and omitted. A media asset's `project_id` /
+> `scene_id` / `prompt_id` links **survive** a parent *soft-delete* and a version
+> *restore* (the FK `ON DELETE SET NULL` fires only on a hard parent delete,
+> which the API never performs). See `docs/domain/MEDIA_AGGREGATE.md` and
+> `docs/decisions/ADR-0037-media-generation-outputs.md`.
 
 ### 3.3 Project Versions (CR-6)
 
