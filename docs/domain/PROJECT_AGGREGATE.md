@@ -213,12 +213,23 @@ must not be confused:
    (`project_versions` table, `reason` enum, `snapshot` JSONB), pointed at
    by `projects.current_version_id`. This is the *product* "version
    history / restore" feature — a separate slice with its own endpoints
-   (`API_CONTRACT.md` §3.3). **α5a does not create, read, or reference
-   it**; new projects leave `current_version_id` NULL.
+   (`API_CONTRACT.md` §3.3). **α5a did not create, read, or reference it**;
+   new projects leave `current_version_id` NULL until first capture.
+   **Shipped in α5d.1 (capture + list + get):** a capture serializes on the
+   project row, assigns a monotonic `version_number`, links a
+   `parent_version_id` lineage chain, stores a canonical JSONB snapshot
+   (project root + default storyboard + full-row ordered scenes, `Numeric`
+   as decimal strings, scene ids preserved), and advances
+   `current_version_id` (which bumps the row `version` by one). The ledger
+   is append-only, DB-enforced by a `reject_mutation` trigger. Full
+   semantics — restore-by-new-version, identity preservation, the hard-delete
+   constraint — live in **ADR-0035**. Restore / branch / diff are α5d.2.
 
 **Do not conflate them:** the row `version` is a concurrency guard; the
-`project_versions` ledger is a user-facing history. A restore in the
-ledger will itself be a mutation that bumps the row `version`.
+`project_versions` ledger is a user-facing history. A capture (and, later, a
+restore) appends to the ledger and, via the `current_version_id` repoint,
+bumps the row `version` as incidental bookkeeping — the append, not the bump,
+is the versioning act (ADR-0035 D1).
 
 ---
 
@@ -244,11 +255,11 @@ ledger will itself be a mutation that bumps the row `version`.
 Project (root)
  ├── Storyboards       storyboards.project_id           (α5c; one default auto-created)
  │     └── Scenes      scenes.storyboard_id             (α5c — ordered by scene_number)
- │            └── Prompts   prompts.* (scene-scoped)    (α5d)
+ │            └── Prompts   prompts.* (scene-scoped)    (later)
  ├── Media Assets      media_assets.project_id          (α6) ← generated *from* scenes
  ├── Timeline          timelines.project_id (1:1)       (α6b) → Tracks → Clips → media_assets
  ├── Render Jobs       render_jobs.project_id           (α7)
- ├── Versions          project_versions.project_id      (later — snapshots storyboard+scenes)
+ ├── Versions          project_versions.project_id      (α5d.1 capture+read; restore/branch α5d.2)
  ├── Tags              project_tags (join)              (later)
  └── Folder (parent)   folders.id  ← projects.folder_id (later move-to-folder)
 ```
@@ -276,3 +287,4 @@ model.
 | 2026-07-11 | Initial authoring ahead of Phase 3 α5a (create + read). Sections 4/5/6 mark α5b+ behaviour as designed-not-shipped. |
 | 2026-07-11 | Added §2.1 (identity & addressing — no slug; documented future slug policy) per α5a reviewer sign-off (pre-flight D15). |
 | 2026-07-11 | **Corrected child-aggregate drift ahead of α5c (Scenes):** the boundary now reads *Project owns Storyboards, Storyboard owns Scenes* (`scenes.storyboard_id`, not the previously-listed `scenes.project_id`). §8 diagram redrawn with the `Project → Storyboard → Scene` hierarchy and the `Scene → Media Asset → Clip → Timeline` media-pipeline direction. See `docs/domain/SCENE_AGGREGATE.md` and `docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md` (D1/D4). |
+| 2026-07-12 | **§6 updated for α5d.1 (Project Versions capture + read):** the snapshot ledger is now shipped (capture / list / get). Documented the monotonic-numbering + lineage + canonical-snapshot + current-pointer-advance semantics and cross-referenced **ADR-0035**. §8 diagram: `Versions` marked α5d.1 (restore/branch α5d.2); `Prompts` re-marked *later* (α5d is versions, not prompts). |

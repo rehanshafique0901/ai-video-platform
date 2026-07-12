@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
     IProjectRepository,
+    IProjectVersionRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -42,6 +43,7 @@ from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
 from app.domain.scenes.scene import Scene
+from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 # ---- Password hasher --------------------------------------------------
 
@@ -629,6 +631,117 @@ class FakeSceneRepository(ISceneRepository):
         return result
 
 
+@dataclass
+class FakeProjectVersionRepository(IProjectVersionRepository):
+    """In-memory ``IProjectVersionRepository`` for α5d.1 use-case unit tests.
+
+    Models the same observable contract as the real
+    ``ProjectVersionRepository``: monotonic per-project ``version_number``
+    (``MAX + 1``), the ``parent_version_id`` lineage link (previous current →
+    parent), the ``current_version_id`` pointer advance + project ``version``
+    bump on capture (α5d Q6), newest-first metadata listing, and UUID-addressed
+    single reads scoped to the project. It reads the SIBLING project + scene
+    fakes (wired by ``FakeUnitOfWork``) so a snapshot faithfully reflects the
+    project's live scenes in order (snapshot BODY fidelity — fat fields,
+    decimal-as-string — is an integration concern; the unit fake carries the
+    slim α5c scene view).
+    """
+
+    _projects: FakeProjectRepository
+    _scenes: FakeSceneRepository
+    _versions: dict[UUID, ProjectVersion] = field(default_factory=dict)
+
+    async def create_snapshot(
+        self,
+        *,
+        project_id: UUID,
+        created_by_user_id: UUID,
+        reason: str,
+    ) -> ProjectVersion:
+        # The use case gate guarantees the project exists + is owned.
+        project = self._projects._rows.get(project_id)
+        assert project is not None, "project vanished between ownership gate and capture"
+
+        existing = [v for v in self._versions.values() if v.project_id == project_id]
+        next_number = max((v.version_number for v in existing), default=0) + 1
+        parent_version_id = project.current_version_id
+
+        scenes = await self._scenes.list_by_project(project_id)  # slim, ordered
+        storyboard_id = self._scenes._default_sb.get(project_id)
+        snapshot: dict[str, Any] = {
+            "schema_version": 1,
+            "project": {
+                "id": str(project.id),
+                "name": project.name,
+                "description": project.description,
+                "aspect_ratio": project.aspect_ratio,
+                "duration_seconds": (
+                    None if project.duration_seconds is None else str(project.duration_seconds)
+                ),
+                "language": project.language,
+                "style": project.style,
+                "settings": project.settings,
+                "version": project.version,
+            },
+            "storyboard": (None if storyboard_id is None else {"id": str(storyboard_id)}),
+            "scenes": [
+                {
+                    "id": str(s.id),
+                    "scene_number": s.scene_number,
+                    "title": s.title,
+                    "duration_seconds": str(s.duration_seconds),
+                    "narration": s.narration,
+                    "subtitle": s.subtitle,
+                }
+                for s in scenes
+            ],
+        }
+
+        now = datetime.now(UTC)
+        version = ProjectVersion(
+            id=uuid4(),
+            project_id=project_id,
+            version_number=next_number,
+            parent_version_id=parent_version_id,
+            created_by_user_id=created_by_user_id,
+            reason=reason,
+            snapshot=snapshot,
+            diff_summary=None,
+            created_at=now,
+        )
+        self._versions[version.id] = version
+        # Advance the current pointer + bump project version (mirrors Q6).
+        self._projects._rows[project_id] = replace(
+            project,
+            current_version_id=version.id,
+            version=project.version + 1,
+            updated_at=now,
+        )
+        return version
+
+    async def list_by_project(self, project_id: UUID) -> list[ProjectVersionSummary]:
+        versions = [v for v in self._versions.values() if v.project_id == project_id]
+        versions.sort(key=lambda v: v.version_number, reverse=True)
+        return [
+            ProjectVersionSummary(
+                id=v.id,
+                project_id=v.project_id,
+                version_number=v.version_number,
+                parent_version_id=v.parent_version_id,
+                created_by_user_id=v.created_by_user_id,
+                reason=v.reason,
+                created_at=v.created_at,
+            )
+            for v in versions
+        ]
+
+    async def get_owned(self, project_id: UUID, version_id: UUID) -> ProjectVersion | None:
+        version = self._versions.get(version_id)
+        if version is None or version.project_id != project_id:
+            return None
+        return version
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -643,6 +756,7 @@ class FakeUnitOfWork(IUnitOfWork):
         roles: FakeRoleRepository | None = None,
         projects: FakeProjectRepository | None = None,
         scenes: FakeSceneRepository | None = None,
+        versions: FakeProjectVersionRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -650,6 +764,12 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_roles = roles or FakeRoleRepository()
         self._fake_projects = projects or FakeProjectRepository()
         self._fake_scenes = scenes or FakeSceneRepository()
+        # The version fake reads the SAME project + scene fakes so a captured
+        # snapshot reflects the live scenes (and the current-pointer advance
+        # writes back to the shared project fake).
+        self._fake_versions = versions or FakeProjectVersionRepository(
+            _projects=self._fake_projects, _scenes=self._fake_scenes
+        )
         self.commits = 0
         self.rollbacks = 0
 
@@ -660,6 +780,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.roles = self._fake_roles
         self.projects = self._fake_projects
         self.scenes = self._fake_scenes
+        self.versions = self._fake_versions
         return self
 
     async def __aexit__(

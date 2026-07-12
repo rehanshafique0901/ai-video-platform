@@ -6,6 +6,79 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5d.1 — Project Versions (capture / list / get) (2026-07-12)
+
+Establishes the **Project Version** ledger — immutable, append-only content
+snapshots of a project plus its ordered scenes. This is the *product* "version
+history" feature and the foundation for restore/branch (α5d.2). It is
+deliberately distinct from the row-OCC `projects.version` concurrency counter:
+the ledger is a user-facing history, the row `version` is a write guard
+(**ADR-0035** D1). A capture serializes on the project row (reusing the α5c
+lock), assigns a monotonic `version_number`, links a `parent_version_id`
+lineage chain, stores a canonical JSONB snapshot, and advances
+`projects.current_version_id`. No migration — `project_versions`, its
+immutability trigger, and the current pointer all exist in the α1 baseline.
+See `docs/domain/PROJECT_AGGREGATE.md` §6, **ADR-0035**, and
+`docs/engineering/PHASE3_ALPHA5D_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/versions`** (`CurrentUserDep`) —
+  capture an immutable snapshot. `reason` is server-set to `manual_save`
+  (α5d.1 takes **no** client input; `extra="forbid"` → `422`). Assigns the
+  next `version_number` (1, 2, 3 …) under the project-row lock, links
+  `parent_version_id` to the previous current version, advances
+  `current_version_id` (bumps the row `version` by one), returns `201` with
+  the full `ProjectVersionDetail` (metadata + `snapshot`). An empty project
+  is valid (`snapshot.scenes == []`). `404` if the project is missing / not
+  the caller's.
+- **`GET …/versions`** — the project's version history as **metadata-only**
+  `ProjectVersionPublic`, newest-first by `version_number`, un-paginated
+  (bounded editorial history). No snapshot bodies. `404` on an unowned
+  project.
+- **`GET …/versions/{version_id}`** — one version WITH its immutable
+  `snapshot` (`ProjectVersionDetail`), addressed by UUID `id` (α5d Q3), or
+  the uniform `404` (two-level gate: project owned → version belongs to it).
+- **Snapshot boundary** (ADR-0035 D3) — project root fields + capture-time
+  `version` + the default storyboard identity + all live scenes ordered by
+  `scene_number`, each as its **full physical row** (restore-ready). Canonical
+  serialization: leading `schema_version`, `Numeric` durations as lossless
+  decimal strings, scene `id`s preserved (α5c Q8). Excludes prompts / media /
+  render / timeline / tags / folder (not yet API-managed).
+- **`ProjectVersion` + `ProjectVersionSummary` domain entities**
+  (`app/domain/versions/`) — frozen; the summary is a metadata-only read model
+  so the list never drags snapshots off the DB.
+- **`IProjectVersionRepository` + `ProjectVersionRepository`** —
+  `create_snapshot` (project-row-locked numbering + lineage + snapshot
+  assembly + current-pointer advance), `list_by_project` (metadata columns
+  only), `get_owned` (UUID-scoped). Extended on the unit-test
+  `FakeProjectVersionRepository` and the integration `_TestUnitOfWork`; `.versions`
+  added to the UoW.
+- **Three use cases** (`CreateProjectVersion` / `ListProjectVersions` /
+  `GetProjectVersion`) — all run the project ownership gate first;
+  each pairs its payload with the project's `current_version_id`
+  (`VersionResult` / `VersionListResult`) so the router derives the
+  `is_current` DTO flag without a second query.
+- **DTOs** `ProjectVersionCreateRequest` (empty, `extra="forbid"`) /
+  `ProjectVersionPublic` (metadata + derived `is_current`) /
+  `ProjectVersionDetail` (+ `snapshot`, `diff_summary`); router
+  `app/api/v1/routers/versions.py` mounted at `/api/v1`; container factories +
+  `deps` aliases.
+- **Tests** — 12 use-case unit tests (`tests/unit/.../versions/`),
+  `ProjectVersionRepository` integration tests (numbering + lineage, snapshot
+  fidelity incl. ordering / fat fields / decimal strings, DB-enforced
+  immutability — direct UPDATE rejected), and 13 HTTP integration tests
+  (`tests/integration/api/test_versions.py`).
+
+#### Documentation
+- `API_CONTRACT.md` §3.3 (Project Versions) filled in with the shipped
+  capture + browse surface.
+- New `docs/decisions/ADR-0035-project-version-snapshots.md` (immutable
+  ledger, restore-by-new-version, identity preservation, hard-delete
+  constraint); `PROJECT_AGGREGATE.md` §6 updated to mark the ledger shipped.
+
+#### Version
+- `0.4.8-phase3-alpha5d-dev`.
+
 ### Phase 3 Slice α5c — Scenes (create / list / get / patch / move / soft-delete) (2026-07-11)
 
 Establishes the **Scene** aggregate — the first child aggregate under a

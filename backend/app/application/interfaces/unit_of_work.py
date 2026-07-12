@@ -23,6 +23,7 @@ from typing import Self
 
 from app.application.interfaces.repositories import (
     IProjectRepository,
+    IProjectVersionRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -54,6 +55,7 @@ class IUnitOfWork(ABC):
     roles: IRoleRepository
     projects: IProjectRepository  # α5a
     scenes: ISceneRepository  # α5c
+    versions: IProjectVersionRepository  # α5d
 
     async def __aenter__(self) -> Self:
         return self

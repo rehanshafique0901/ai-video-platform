@@ -51,6 +51,9 @@ from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
+from app.application.use_cases.versions.create_version import CreateProjectVersion
+from app.application.use_cases.versions.get_version import GetProjectVersion
+from app.application.use_cases.versions.list_versions import ListProjectVersions
 from app.core import container
 from app.core.errors import UnauthorizedError
 from app.domain.identity.user import User
@@ -109,6 +112,18 @@ GetSceneDep = Annotated[GetScene, Depends(container.get_get_scene_use_case)]
 UpdateSceneDep = Annotated[UpdateScene, Depends(container.get_update_scene_use_case)]
 MoveSceneDep = Annotated[MoveScene, Depends(container.get_move_scene_use_case)]
 DeleteSceneDep = Annotated[DeleteScene, Depends(container.get_delete_scene_use_case)]
+
+# ---- Use-case dependencies (Slice α5d.1 — Project Versions) -----------
+
+CreateProjectVersionDep = Annotated[
+    CreateProjectVersion, Depends(container.get_create_project_version_use_case)
+]
+ListProjectVersionsDep = Annotated[
+    ListProjectVersions, Depends(container.get_list_project_versions_use_case)
+]
+GetProjectVersionDep = Annotated[
+    GetProjectVersion, Depends(container.get_get_project_version_use_case)
+]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

@@ -36,6 +36,7 @@ from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
 from app.domain.scenes.scene import Scene
+from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 
 class IUserRepository(ABC):
@@ -536,6 +537,82 @@ class ISceneRepository(ABC):
         responses (create/get/patch/move) without exposing the raw sparse
         ``scene_number`` (Q6); the list endpoint enumerates positions from
         the already-sorted :meth:`list_by_project` result instead.
+        """
+        ...
+
+
+class IProjectVersionRepository(ABC):
+    """Persistence surface for ``project_versions``. Introduced by Slice α5d.
+
+    Snapshots are **append-only and immutable** (DB ``reject_mutation``
+    trigger, α5d DS7): there is no ``update`` / ``delete`` — the only write is
+    :meth:`create_snapshot`. Every method is project-scoped; the use case has
+    ALREADY established project ownership via
+    :meth:`IProjectRepository.get_owned` before reaching this port (the same
+    two-level visibility gate as α5c), so a version that belongs to another
+    project simply returns ``None`` / is omitted (anti-enumeration, inherited
+    from α3/α5a).
+
+    The port owns the snapshot ASSEMBLY (reading the live project + default
+    storyboard + ordered scenes and denormalizing them into the canonical
+    JSONB blob), the monotonic ``version_number`` assignment, the
+    ``parent_version_id`` lineage link, and the ``projects.current_version_id``
+    pointer advance — all under a ``SELECT … FOR UPDATE`` lock of the parent
+    ``projects`` row (α5d Q6) so concurrent captures cannot collide on
+    ``version_number``.
+    """
+
+    @abstractmethod
+    async def create_snapshot(
+        self,
+        *,
+        project_id: UUID,
+        created_by_user_id: UUID,
+        reason: str,
+    ) -> ProjectVersion:
+        """Capture an immutable snapshot of the project's current state.
+
+        Takes the parent ``projects`` row lock (held for the transaction) so
+        the ``MAX(version_number) + 1`` read + insert is race-free (α5d Q6).
+        Assembles the canonical snapshot from the live project, its implicit
+        default storyboard, and the storyboard's live scenes ordered by
+        ``scene_number`` (α5d Q7 — decimals as strings, scene ``id`` preserved
+        verbatim for restore round-tripping). Sets ``parent_version_id`` to the
+        project's current ``current_version_id`` (``None`` for the first
+        snapshot), inserts the row, then advances
+        ``projects.current_version_id`` to the new version — which itself
+        bumps ``projects.version`` via the guarded row trigger (α5d Q6). An
+        empty project (no scenes / no storyboard) is valid: ``scenes`` is
+        ``[]`` (α5d Q9). Returns the fully-populated
+        :class:`~app.domain.versions.project_version.ProjectVersion`.
+        """
+        ...
+
+    @abstractmethod
+    async def list_by_project(self, project_id: UUID) -> list[ProjectVersionSummary]:
+        """Return the project's version history as metadata, newest first.
+
+        Ordered by ``version_number`` DESC (monotonic, so this is newest-first
+        by capture time). Returns lightweight
+        :class:`~app.domain.versions.project_version.ProjectVersionSummary`
+        rows **without** the snapshot / diff blobs (α5d Q4): the list view
+        selects only metadata columns so a long history never drags snapshot
+        bodies off the database. Not paginated in α5d.1 (a project's version
+        count is bounded editorial history).
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(self, project_id: UUID, version_id: UUID) -> ProjectVersion | None:
+        """Return the project's version with ``version_id``, or ``None``.
+
+        Addressed by UUID ``id`` (α5d Q3 — keeps the whole API UUID-addressed);
+        ``version_number`` is the user-facing label, not the routing key.
+        ``None`` when the version is missing OR belongs to a different project —
+        deliberately indistinguishable so
+        ``GET /projects/{id}/versions/{version_id}`` maps both to a uniform
+        ``404`` (α5d, mirroring α5c D6). Returns the FULL entity including the
+        ``snapshot`` blob (this is the detail read).
         """
         ...
 

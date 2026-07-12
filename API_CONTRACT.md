@@ -229,10 +229,47 @@ DELETE /projects/{project_id}/scenes/{scene_id}      soft delete
 ```
 GET   /projects/{id}/versions                        list
 GET   /projects/{id}/versions/{version_id}
-POST  /projects/{id}/versions                        body: { reason: "manual_save", note?: string }
+POST  /projects/{id}/versions                        capture a snapshot (α5d.1)
 POST  /projects/{id}/versions/{version_id}/restore   → creates new version pointing at the restored snapshot
 GET   /projects/{id}/versions/{version_id}/diff?against={other_version_id}
 ```
+
+> **Shipped in Phase 3 α5d.1 (capture + browse).** A project version is an
+> **immutable content snapshot** of the project plus its ordered scenes —
+> distinct from the row-OCC `version` counter that guards live mutations. The
+> `project_versions` ledger is append-only (a DB `reject_mutation` trigger
+> rejects UPDATE/DELETE). All three endpoints are authenticated
+> (`CurrentUserDep`) and run the project ownership gate first (missing / not
+> the caller's → uniform `404 NOT_FOUND`). Versions are **addressed by their
+> UUID `id`** in the path (keeping the whole API UUID-addressed);
+> `version_number` is the user-facing label carried in the body, not the
+> routing key.
+>
+> * **`POST …/versions`** — captures a snapshot under a project-row lock:
+>   assigns the next monotonic `version_number` (1, 2, 3 …), links
+>   `parent_version_id` to the project's previous current version (a linear
+>   lineage chain), advances `projects.current_version_id` (which bumps
+>   `projects.version` by exactly 1), and stores the denormalized snapshot.
+>   `reason` is server-set to `manual_save` (the body carries **no** fields in
+>   α5d.1; `extra="forbid"` → `422`). Returns `201` with the full
+>   `ProjectVersionDetail` (metadata + `snapshot`). An empty project (no
+>   scenes) is valid — `snapshot.scenes` is `[]`.
+> * **`GET …/versions`** — lists the project's version history as
+>   **metadata only** (`ProjectVersionPublic`: `id`, `version_number`,
+>   `reason`, `parent_version_id`, `created_by_user_id`, `created_at`), newest
+>   first by `version_number`. No snapshot bodies (fetch a single version for
+>   those). Not paginated in α5d.1.
+> * **`GET …/versions/{version_id}`** — one version WITH its immutable
+>   `snapshot` (`ProjectVersionDetail`), or the uniform `404` (missing, or the
+>   version belongs to another project). The `snapshot` is a self-describing
+>   JSON blob carrying `schema_version` + the project's business columns + the
+>   default storyboard + the ordered scenes (full "fat" columns, scene `id`
+>   preserved for future restore round-tripping; `Numeric` durations as
+>   lossless strings).
+>
+> **Deferred to α5d.2+:** `…/versions/{version_id}/restore`, `…/diff`,
+> branching, autosave. See `docs/domain/PROJECT_AGGREGATE.md` §6 and
+> `docs/decisions/ADR-0035-project-version-snapshots.md`.
 
 ### 3.4 Workflows (CR-7) — replaces the old "/generate" endpoint
 

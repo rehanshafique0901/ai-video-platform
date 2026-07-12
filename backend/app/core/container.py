@@ -49,6 +49,9 @@ from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
+from app.application.use_cases.versions.create_version import CreateProjectVersion
+from app.application.use_cases.versions.get_version import GetProjectVersion
+from app.application.use_cases.versions.list_versions import ListProjectVersions
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
@@ -309,3 +312,20 @@ def get_move_scene_use_case() -> MoveScene:
 
 def get_delete_scene_use_case() -> DeleteScene:
     return DeleteScene(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α5d.1 — Project Versions create + read)
+# ---------------------------------------------------------------------
+
+
+def get_create_project_version_use_case() -> CreateProjectVersion:
+    return CreateProjectVersion(uow=get_unit_of_work())
+
+
+def get_list_project_versions_use_case() -> ListProjectVersions:
+    return ListProjectVersions(uow=get_unit_of_work())
+
+
+def get_get_project_version_use_case() -> GetProjectVersion:
+    return GetProjectVersion(uow=get_unit_of_work())
