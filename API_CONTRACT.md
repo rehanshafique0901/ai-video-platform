@@ -234,7 +234,8 @@ POST  /projects/{id}/versions/{version_id}/restore   → creates new version poi
 GET   /projects/{id}/versions/{version_id}/diff?against={other_version_id}
 ```
 
-> **Shipped in Phase 3 α5d.1 (capture + browse).** A project version is an
+> **Shipped in Phase 3 α5d.1 (capture + browse) and α5d.2 (restore + diff).**
+> A project version is an
 > **immutable content snapshot** of the project plus its ordered scenes —
 > distinct from the row-OCC `version` counter that guards live mutations. The
 > `project_versions` ledger is append-only (a DB `reject_mutation` trigger
@@ -264,11 +265,33 @@ GET   /projects/{id}/versions/{version_id}/diff?against={other_version_id}
 >   version belongs to another project). The `snapshot` is a self-describing
 >   JSON blob carrying `schema_version` + the project's business columns + the
 >   default storyboard + the ordered scenes (full "fat" columns, scene `id`
->   preserved for future restore round-tripping; `Numeric` durations as
+>   preserved for restore round-tripping; `Numeric` durations as
 >   lossless strings).
+> * **`POST …/versions/{version_id}/restore`** — makes a historical snapshot the
+>   project's **live** content again **without rewriting history** (ADR-0035 D2):
+>   it appends a new `reason=restore` version parented on the source and repoints
+>   `projects.current_version_id` to it. The body carries the **aggregate OCC
+>   token** `{ version }` — the `projects.version` the caller last observed.
+>   Per the **Aggregate OCC Rule**, `projects.version` guards the whole aggregate,
+>   so any scene mutation between the caller's read and the restore invalidates a
+>   stale token. Two-level `404` gate (project, then version) runs **before** the
+>   fence (anti-enumeration); a stale token → `412 VERSION_CONFLICT` with **zero
+>   writes**; a missing `version` or an extra field → `422`. The whole restore
+>   (scene reconcile keyed by `id` — surviving scenes kept, removed scenes
+>   soft-deleted, added scenes dropped; root rewrite; trailing capture) runs in
+>   **one transaction** and produces **exactly one** `projects.version` bump.
+>   Returns `200` with the new head as `ProjectVersionDetail`.
+> * **`GET …/versions/{version_id}/diff?against={base_version_id}`** — a **coarse**
+>   change summary between the `against` base and the `{version_id}` target,
+>   computed **on demand** from the two stored snapshots (nothing persisted).
+>   Both versions are gated to the caller's owned project (uniform `404` on
+>   either side); `against` is required (missing/malformed → `422`). Returns
+>   `200` with `ProjectVersionDiff` — `base_version_number`,
+>   `target_version_number`, `project_changed` (business columns differ), and
+>   `scene_changes` (`added` / `removed` / `modified` counts keyed by scene `id`).
 >
-> **Deferred to α5d.2+:** `…/versions/{version_id}/restore`, `…/diff`,
-> branching, autosave. See `docs/domain/PROJECT_AGGREGATE.md` §6 and
+> **Deferred to α5d.3+:** `…/versions/{version_id}/branch`, autosave. See
+> `docs/domain/PROJECT_AGGREGATE.md` §6 and
 > `docs/decisions/ADR-0035-project-version-snapshots.md`.
 
 ### 3.4 Workflows (CR-7) — replaces the old "/generate" endpoint

@@ -199,14 +199,30 @@ else is server-derived or deferred.
 The Project participates in **two distinct versioning mechanisms** that
 must not be confused:
 
-1. **Optimistic-concurrency `version` (root row).** An integer on the
-   `projects` row, starting at `1`, used exactly as α4/ADR-0034 defined
-   for users: the client round-trips the last-observed `version` on a
-   mutation, the repository does a compare-and-swap, and a stale value
-   yields `412 VERSION_CONFLICT`. It increments **only when a persisted
-   field actually changes** — never on read, never on a same-value PATCH.
-   `ProjectPublic` exposes it so α5b's `PATCH` has its fence. This is the
-   only versioning surface α5a touches.
+1. **Optimistic-concurrency `version` (root row) — the *aggregate* OCC token.**
+   An integer on the `projects` row, starting at `1`, used as α4/ADR-0034
+   defined: the client round-trips the last-observed `version` on a mutation,
+   the repository does a compare-and-swap, and a stale value yields
+   `412 VERSION_CONFLICT`. It increments **only when a persisted field actually
+   changes** — never on read, never on a same-value PATCH. `ProjectPublic`
+   exposes it so α5b's `PATCH` has its fence.
+
+   **Aggregate OCC Rule (α5d.2, Q1/Option A).** As of α5d.2, `projects.version`
+   is promoted to the optimistic-concurrency token for the **entire Project
+   aggregate**, not just the root row's own columns:
+
+   > **`projects.version` is the optimistic-concurrency token for the entire
+   > Project aggregate. Any mutation of any aggregate child that changes
+   > externally observable project state MUST increment `projects.version`.**
+
+   Consequences: scene `create` / `update` / `move` / `delete` each bump
+   `projects.version` (the α5c paths were extended to call
+   `IProjectRepository.touch_version`, guarded so a no-op edit does **not**
+   bump); restore bumps it once; and every future child aggregate (Timeline,
+   Assets, Tags, Branch) inherits the same contract. This makes the α5d.2
+   restore fence semantically honest — *"restore only if nothing in this
+   aggregate changed since I last read it"* — with no silent overwrite of unseen
+   scene edits.
 
 2. **`project_versions` snapshot ledger (child aggregate, CR-6).** An
    immutable, append-only history of full project snapshots
@@ -223,7 +239,15 @@ must not be confused:
    `current_version_id` (which bumps the row `version` by one). The ledger
    is append-only, DB-enforced by a `reject_mutation` trigger. Full
    semantics — restore-by-new-version, identity preservation, the hard-delete
-   constraint — live in **ADR-0035**. Restore / branch / diff are α5d.2.
+   constraint — live in **ADR-0035**.
+   **Restore + diff shipped in α5d.2:** restore appends a `reason=restore`
+   version parented on the source, reconciles the live scene set to the snapshot
+   (upsert by scene `id`, soft-delete removed, insert added), rewrites the
+   mutable root, advances `current_version_id`, and bumps `projects.version` by
+   **exactly one** — all in one transaction, fenced on the aggregate token
+   (stale → `412`, no writes). Diff is computed **on demand** from two stored
+   snapshots (coarse `project_changed` + scene `added` / `removed` / `modified`
+   counts; nothing persisted). Branch / autosave are α5d.3+.
 
 **Do not conflate them:** the row `version` is a concurrency guard; the
 `project_versions` ledger is a user-facing history. A capture (and, later, a
@@ -243,7 +267,10 @@ is the versioning act (ADR-0035 D1).
 4. Every scoped query filters `deleted_at IS NULL`.
 5. Reads/writes are scoped by caller `tenant_id` **and** `owner_user_id`;
    out-of-scope access is `404`, not `403`.
-6. `version` increments monotonically and only on a real persisted change.
+6. `version` increments monotonically and only on a real persisted change —
+   including a change to **any aggregate child** that alters observable project
+   state (Aggregate OCC Rule, §6): scene create/update/move/delete and restore
+   each bump it; a no-op edit does not.
 7. The Project is created through the application layer (a use case), which
    generates the `id` and initial `version`; the client never supplies them.
 
@@ -259,7 +286,7 @@ Project (root)
  ├── Media Assets      media_assets.project_id          (α6) ← generated *from* scenes
  ├── Timeline          timelines.project_id (1:1)       (α6b) → Tracks → Clips → media_assets
  ├── Render Jobs       render_jobs.project_id           (α7)
- ├── Versions          project_versions.project_id      (α5d.1 capture+read; restore/branch α5d.2)
+ ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; branch α5d.3)
  ├── Tags              project_tags (join)              (later)
  └── Folder (parent)   folders.id  ← projects.folder_id (later move-to-folder)
 ```
@@ -288,3 +315,4 @@ model.
 | 2026-07-11 | Added §2.1 (identity & addressing — no slug; documented future slug policy) per α5a reviewer sign-off (pre-flight D15). |
 | 2026-07-11 | **Corrected child-aggregate drift ahead of α5c (Scenes):** the boundary now reads *Project owns Storyboards, Storyboard owns Scenes* (`scenes.storyboard_id`, not the previously-listed `scenes.project_id`). §8 diagram redrawn with the `Project → Storyboard → Scene` hierarchy and the `Scene → Media Asset → Clip → Timeline` media-pipeline direction. See `docs/domain/SCENE_AGGREGATE.md` and `docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md` (D1/D4). |
 | 2026-07-12 | **§6 updated for α5d.1 (Project Versions capture + read):** the snapshot ledger is now shipped (capture / list / get). Documented the monotonic-numbering + lineage + canonical-snapshot + current-pointer-advance semantics and cross-referenced **ADR-0035**. §8 diagram: `Versions` marked α5d.1 (restore/branch α5d.2); `Prompts` re-marked *later* (α5d is versions, not prompts). |
+| 2026-07-12 | **§6 updated for α5d.2 (restore + diff):** added the **Aggregate OCC Rule** — `projects.version` is now the OCC token for the entire aggregate; scene create/update/move/delete each bump it (guarded against no-ops), and restore bumps it exactly once. Documented the restore-by-new-version + scene-reconcile + one-transaction semantics and the on-demand diff. Invariant #6 extended to child mutations. §8 diagram: `Versions` marked α5d.2 restore+diff (branch α5d.3). |

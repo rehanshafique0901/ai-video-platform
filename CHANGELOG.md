@@ -6,6 +6,73 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5d.2 — Project Version Restore + Diff (2026-07-12)
+
+Makes the version ledger *actionable*: a historical snapshot can be **restored**
+into live state, and two versions can be **diffed**. Restore never rewrites
+history (**ADR-0035** D2) — it appends a new `reason=restore` version parented on
+the source and repoints `current_version_id`. The load-bearing decision is the
+**Aggregate OCC Rule**: `projects.version` is promoted to the concurrency token
+for the *entire* Project aggregate, so a scene mutation now also bumps
+`projects.version`. This gives restore a single, honest fence: the token the
+caller last observed is invalidated by *any* observable aggregate change
+(project column **or** scene edit) since their read. No migration — restore
+reuses the α5c project lock and the existing guarded version-bump trigger. See
+`docs/domain/PROJECT_AGGREGATE.md` §6, **ADR-0035**, and
+`docs/engineering/PHASE3_ALPHA5D2_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/versions/{version_id}/restore`**
+  (`CurrentUserDep`) — restore a snapshot into live content. Body is the
+  aggregate OCC token `{ version }` (required; `extra="forbid"` → `422`).
+  Two-level `404` gate (project owned → version belongs to it) runs **before**
+  the fence (anti-enumeration); a stale `projects.version` → `412
+  VERSION_CONFLICT` with **zero writes**. On success, appends a
+  `reason=restore` version (`parent_version_id` = source), reconciles the live
+  scene set to the snapshot (upsert by `id`, soft-delete removed, insert added),
+  rewrites the mutable project root, advances `current_version_id`, and bumps
+  `projects.version` by **exactly one** — all in **one transaction**. Returns
+  `200` with the new head `ProjectVersionDetail`.
+- **`GET …/versions/{version_id}/diff?against={base_version_id}`** — a coarse,
+  **on-demand** change summary between the `against` base and the `{version_id}`
+  target, computed from the two stored snapshots (nothing persisted). Uniform
+  `404` if either version is missing / not the caller's; `against` required
+  (missing/malformed → `422`). Returns `200` with `ProjectVersionDiff`
+  (`base_version_number`, `target_version_number`, `project_changed`,
+  `scene_changes` = `added` / `removed` / `modified`).
+- **Aggregate OCC Rule** — `IProjectRepository.touch_version` (+ real repo and
+  fake) bumps `projects.version` explicitly; wired into all four scene use cases
+  (`create` / `update` / `move` / `delete`), guarded so **no-op** edits (an
+  update to an identical value, a move that doesn't change order) do **not** bump.
+- **`IProjectVersionRepository.restore`** (+ real repo and fake) — project-row
+  lock, aggregate OCC fence, source-snapshot load, `aspect_ratio` immutability
+  assert, default-storyboard rehome, scene reconcile (blanket soft-delete →
+  upsert-by-`id`, reviving soft-deleted rows in place), trailing capture, and a
+  single project UPDATE that rewrites the root + advances the pointer + bumps the
+  version in one statement.
+- **`RestoreProjectVersion` / `DiffProjectVersions` use cases** — restore runs
+  the project + source-version gates then delegates to `versions.restore`
+  (`None` → `412`); diff is a pure function over the two snapshots (no repo
+  method). DTOs `ProjectVersionRestoreRequest` (`{ version }`, `extra="forbid"`)
+  and `ProjectVersionDiff` (+ `SceneChangeCounts`); container factories + `deps`
+  aliases; two new router endpoints.
+- **Tests** — 8 restore/diff use-case unit tests + 6 Aggregate-OCC-bump
+  regression tests (`tests/unit/.../versions/`, `tests/unit/.../scenes/`);
+  5 `ProjectVersionRepository.restore` integration tests (round-trip fidelity
+  incl. fat columns + decimal strings, revive-soft-deleted, stale-fence
+  no-write, one-transaction rollback on injected failure, history immutability);
+  8 HTTP integration tests (restore happy / 412 / 404 / 422; diff happy / 404 /
+  422).
+
+#### Documentation
+- `API_CONTRACT.md` §3.3 — restore + diff documented as shipped; branching /
+  autosave deferred to α5d.3+.
+- `PROJECT_AGGREGATE.md` §6 + **ADR-0035** — Aggregate OCC Rule invariant,
+  restore algorithm, and on-demand diff recorded.
+
+#### Version
+- `0.4.9-phase3-alpha5d2-dev`.
+
 ### Phase 3 Slice α5d.1 — Project Versions (capture / list / get) (2026-07-12)
 
 Establishes the **Project Version** ledger — immutable, append-only content
