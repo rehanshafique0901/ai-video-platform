@@ -120,6 +120,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.application.interfaces.repositories import (
         IProjectRepository,
         IProjectVersionRepository,
+        IPromptRepository,
         IRoleRepository,
         ISceneRepository,
         ISessionRepository,
@@ -131,6 +132,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.project_version_repository import (
         ProjectVersionRepository,
     )
+    from app.infrastructure.repositories.prompt_repository import PromptRepository
     from app.infrastructure.repositories.role_repository import RoleRepository
     from app.infrastructure.repositories.scene_repository import SceneRepository
     from app.infrastructure.repositories.session_repository import SessionRepository
@@ -180,6 +182,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.versions = cast(
                     IProjectVersionRepository, ProjectVersionRepository(self._session)
                 )
+                self.prompts = cast(IPromptRepository, PromptRepository(self._session))
                 return self
 
             async def __aexit__(

@@ -6,6 +6,88 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α6.1 — Prompt Aggregate (generation-input CRUD) (2026-07-12)
+
+Introduces the **Prompt aggregate** — the first *generation-input* content — as
+an owner-scoped CRUD surface nested under a project
+(`/projects/{id}/prompts`), backed by the existing baseline `prompts` table
+(no migration — table + all three indexes already exist). A prompt is authored
+text (`kind` + `text_content`) with an **optional** live-scene link and an
+**optional** validated `ai_models` link. The load-bearing decision (α6.1
+pre-flight Q1/Q8, **ADR-0036**): the baseline gave `prompts` **no `version`
+column** on purpose — prompts are **generation inputs, not versioned editorial
+content**. So they take **no per-row OCC**, a `PATCH` is **last-writer-wins**
+(no `version` on the wire, no `412`), mutations do **not** bump
+`projects.version`, and prompts are **excluded** from `project_versions`
+snapshots / restore / diff. The versioned aggregate stays {project root +
+scenes}; generated media (α6.2) may later retain the prompt used for provenance
+independently of the current prompt record. All endpoints reuse the α5c
+patterns: `CurrentUserDep`, owner+tenant scoping via the project gate,
+two-level `404`-anti-enumeration, soft-delete idempotent-by-404. See
+`docs/domain/PROMPT_AGGREGATE.md`, **ADR-0036**, and
+`docs/engineering/PHASE3_ALPHA6_1_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/prompts`** (`CurrentUserDep`) — create
+  a prompt. Body `{ kind, text_content, scene_id?, model_id?, extra? }`;
+  `kind` validated against the `prompt_kind` enum (8 modality kinds), 
+  `text_content` `1 ≤ len ≤ 10000` (stripped). A non-null `scene_id` must be a
+  **live scene in the same project** (else `422 VALIDATION_FAILED`, not `404`);
+  a non-null `model_id` must be a live, non-`retired` `ai_models` row (else
+  `422`). Identity + `generated_by_agent` are server-owned (`extra="forbid"` →
+  `422`). `404` if the project is missing / not the caller's. Returns `201` +
+  `PromptPublic`.
+- **`GET /api/v1/projects/{project_id}/prompts`** — list the project's live
+  prompts newest-first (`created_at` desc, `id` desc) with optional
+  `?kind=<enum>` and `?scene_id=<uuid>` filters (combined = AND; bad enum /
+  non-UUID → `422`). Not paginated. Empty → `200 []`. `404` on unowned project.
+- **`GET /api/v1/projects/{project_id}/prompts/{prompt_id}`** — one prompt
+  (`200`) or the uniform two-level `404`.
+- **`PATCH /api/v1/projects/{project_id}/prompts/{prompt_id}`** — partial,
+  content-only, **no version fence**. Body = any subset of `{ text_content,
+  kind, model_id, extra }`; tri-state via `exclude_unset` (explicit
+  `model_id: null` clears the link; a non-null `model_id` is re-validated →
+  `422`; `text_content`/`kind` non-nullable). `scene_id` immutable (not
+  accepted, `extra="forbid"` → `422`); empty patch → `422`; same-value patch is
+  a `200` no-op. Returns `200` + `PromptPublic`. No `projects.version` bump.
+- **`DELETE /api/v1/projects/{project_id}/prompts/{prompt_id}`** — owner-scoped
+  soft delete (`204`), no version fence, idempotent-by-404.
+- **Domain** `app/domain/prompts/prompt.py` — frozen `Prompt` entity (slim view
+  of the physical row; **no `version` field** by design).
+- **`IPromptRepository`** + `SqlAlchemyPromptRepository` (`add`, `list_owned`
+  + `kind`/`scene_id` filters, `get_owned`, `update_owned`,
+  `soft_delete_owned`, `model_is_linkable`) — all project-scoped + soft-delete
+  excluded. Wired onto the real `UnitOfWork`, the integration `_TestUnitOfWork`,
+  and `FakeUnitOfWork` (+ `FakePromptRepository`).
+- **Use cases** `app/application/use_cases/prompts/` — `CreatePrompt`,
+  `ListPrompts`, `GetPrompt`, `UpdatePrompt`, `DeletePrompt` (two-level gate,
+  scene/model link validation, same-value no-op detection, structured logs
+  that never carry `text_content`/`extra` values).
+- **DTOs** `app/api/v1/schemas/prompts.py` — `PromptCreateRequest`,
+  `PromptUpdateRequest` (tri-state, `extra="forbid"`), `PromptPublic` (no
+  `version`; `generated_by_agent`/`deleted_at` omitted); container factories +
+  `deps` aliases + `routers/prompts.py`, mounted in `app/main.py`.
+- **Tests** — unit matrix for the 5 use cases (happy / scene-link-foreign→422 /
+  model-link-unknown→422 / not-owned→404 / filters / same-value no-op /
+  explicit-null clears / idempotent-by-404); repository integration incl. the
+  load-bearing **F6** test (a prompt's `scene_id` link **survives** a scene
+  *soft-delete* — `ON DELETE SET NULL` fires only on a hard delete); HTTP
+  integration `test_prompts.py` (A1–A15 end-to-end: 201/200/204/404/422/401,
+  two-level 404, filters, tri-state PATCH, idempotent-by-404).
+
+#### Documentation
+- `API_CONTRACT.md` §2 + new §3.2.2 — prompts documented as shipped; the
+  `/prompts/{id}` stub reconciled to the nested `/projects/{id}/prompts/{id}`
+  shape (α6.1 pre-flight Q2).
+- `docs/domain/PROMPT_AGGREGATE.md` (new) + **ADR-0036** (new) — the
+  generation-input identity, the no-OCC / no-snapshot rationale, and the
+  governing principle recorded verbatim.
+- `docs/domain/PROJECT_AGGREGATE.md` §6/§8 — prompts noted as **outside** the
+  versioned snapshot boundary; §8 map updated with the α6.1 Prompt child.
+
+#### Version
+- `0.4.11-phase3-alpha6.1-dev`.
+
 ### Phase 3 Slice α5d.3 — Project Version Branch (fork to a new project) (2026-07-12)
 
 Completes the versioning story: a historical snapshot can now be **branched** —

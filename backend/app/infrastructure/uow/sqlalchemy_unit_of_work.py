@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.application.interfaces.repositories import (
     IProjectRepository,
     IProjectVersionRepository,
+    IPromptRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -32,6 +33,7 @@ from app.infrastructure.repositories.project_repository import ProjectRepository
 from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
 )
+from app.infrastructure.repositories.prompt_repository import PromptRepository
 from app.infrastructure.repositories.role_repository import RoleRepository
 from app.infrastructure.repositories.scene_repository import SceneRepository
 from app.infrastructure.repositories.session_repository import SessionRepository
@@ -67,6 +69,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.projects = cast(IProjectRepository, ProjectRepository(self._session))
         self.scenes = cast(ISceneRepository, SceneRepository(self._session))
         self.versions = cast(IProjectVersionRepository, ProjectVersionRepository(self._session))
+        self.prompts = cast(IPromptRepository, PromptRepository(self._session))
         return self
 
     async def __aexit__(
