@@ -312,6 +312,20 @@ in any case. **ADR-0037** adopts ADR-0036's concurrency model for the output sid
 Media→project/scene/prompt links likewise survive a parent soft-delete and a
 restore (`ON DELETE SET NULL` fires only on a hard parent delete).
 
+**The Timeline is a THIRD posture — its own OCC aggregate, still outside the
+ledger (α6.3a, ADR-0038).** Unlike prompts/media, the `timelines` root **does**
+carry a `version` (baseline `VersionMixin` + guarded bump trigger), so it is a
+**self-contained optimistic-concurrency aggregate**: `timelines.version` is the
+single OCC token for `{timeline + tracks + clips}` (children carry no version of
+their own). But a timeline edit is a **composition** change, not versioned
+editorial content — it does **NOT** bump `projects.version` and is **not**
+captured/restored/diffed in the `project_versions` ledger. So the three postures
+are now explicit: projects+scenes (aggregate OCC, *in* the ledger) · prompts+media
+(no OCC, excluded) · timeline (its **own** OCC, excluded). **ADR-0038** adopts
+ADR-0035's snapshot-exclusion stance while introducing the third concurrency
+model. `timelines.project_version_id` is a read-only forward-provenance link (write
+path α7+).
+
 ---
 
 ## 7. Invariants (must always hold)
@@ -341,7 +355,7 @@ Project (root)
  │     └── Scenes      scenes.storyboard_id             (α5c — ordered by scene_number)
  ├── Prompts           prompts.project_id               (α6.1 — generation inputs; optional scene_id link; NO OCC, NOT in snapshots)
  ├── Media Assets      media_assets.project_id (NULLABLE) (α6.2 — generation OUTPUTS; owner-level, top-level /media; NO OCC, NOT in snapshots) ← linked *from* prompts
- ├── Timeline          timelines.project_id (1:1)       (α6.3) → Tracks → Clips → media_assets
+ ├── Timeline          timelines.project_id (1:1)       (α6.3a root+tracks; α6.3b clips) → Tracks → Clips → media_assets; OWN OCC (timelines.version), NOT in project snapshots (ADR-0038)
  ├── Render Jobs       render_jobs.project_id           (α6.4)
  ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; α5d.3 branch=fork-to-new-project via branched_from)
  ├── Tags              project_tags (join)              (later)
@@ -376,3 +390,4 @@ model.
 | 2026-07-12 | **§6 updated for α5d.3 (branch = fork to a new project):** documented branch as a source-immutable fork into a new caller-owned aggregate (fresh scene ids, `reason=branch` v1, `parent_version_id` NULL) with a self-contained `branched_from` provenance breadcrumb (`{project_id, version_id, version_number}`); no OCC fence, no source version bump, new project's version follows the created + first-capture arc → 2. Recorded that an in-project multi-head model is deferred (needs a migration). §8 diagram: `Versions` marked α5d.3 branch. See **ADR-0035** D12. |
 | 2026-07-12 | **§3/§6/§8 updated for α6.1 (Prompt aggregate):** the Prompts child is now shipped as an owner-scoped CRUD surface (`/projects/{id}/prompts`) and re-marked in §3 as a **generation input** explicitly **outside** the versioned content boundary — no `version` column, no per-row OCC, no `projects.version` bump, and **not** captured in `project_versions` snapshots/restore/diff (a decision, not an omission). Added the "Generation inputs are outside both mechanisms" note in §6 with the ADR-0036 governing principle verbatim. §8 diagram: `Prompts` promoted to a direct project child (α6.1) feeding Media Assets (α6.2). See `docs/domain/PROMPT_AGGREGATE.md` and **ADR-0036**. |
 | 2026-07-13 | **§3/§6/§8 updated for α6.2 (Media Asset aggregate):** media is now shipped as a **top-level, owner-scoped** CRUD surface (`/media`) — NOT a project child (its own `tenant_id`+`owner_user_id`, nullable `project_id`). §3 re-marks it as a **generation output** outside the versioned boundary (no `version`, no OCC, no `projects.version` bump, not in snapshots/restore/diff). Added the "Generation outputs are outside both mechanisms" note in §6 (**ADR-0037** adopts ADR-0036). §8 diagram: Media Assets marked α6.2 shipped, owner-level, nullable `project_id`. See `docs/domain/MEDIA_AGGREGATE.md` and **ADR-0037**. |
+| 2026-07-13 | **§6/§8 updated for α6.3a (Timeline aggregate — root + tracks):** documented the Timeline as a **third concurrency posture** — its **own** self-contained OCC aggregate fenced by `timelines.version` (the single token for `{timeline + tracks + clips}`; children carry no version), yet **still outside** the project version ledger (no `projects.version` bump, not in snapshots/restore/diff). Added the "Timeline is a THIRD posture" note in §6. §8 diagram: Timeline line annotated (α6.3a root+tracks, α6.3b clips; OWN OCC, not in project snapshots). See `docs/domain/TIMELINE_AGGREGATE.md` and **ADR-0038** (adopts ADR-0035). |

@@ -27,6 +27,7 @@ from app.application.interfaces.repositories import (
     ISceneRepository,
     ISessionRepository,
     ITenantRepository,
+    ITimelineRepository,
     IUserRepository,
 )
 from app.application.interfaces.unit_of_work import IUnitOfWork
@@ -40,6 +41,7 @@ from app.infrastructure.repositories.role_repository import RoleRepository
 from app.infrastructure.repositories.scene_repository import SceneRepository
 from app.infrastructure.repositories.session_repository import SessionRepository
 from app.infrastructure.repositories.tenant_repository import TenantRepository
+from app.infrastructure.repositories.timeline_repository import TimelineRepository
 from app.infrastructure.repositories.user_repository import UserRepository
 
 
@@ -73,6 +75,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.versions = cast(IProjectVersionRepository, ProjectVersionRepository(self._session))
         self.prompts = cast(IPromptRepository, PromptRepository(self._session))
         self.media = cast(IMediaRepository, MediaRepository(self._session))
+        self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
         return self
 
     async def __aexit__(

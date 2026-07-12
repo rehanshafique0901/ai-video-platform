@@ -60,6 +60,13 @@ from app.application.use_cases.scenes.get_scene import GetScene
 from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
+from app.application.use_cases.timeline.create_track import CreateTrack
+from app.application.use_cases.timeline.delete_track import DeleteTrack
+from app.application.use_cases.timeline.get_timeline import GetTimeline
+from app.application.use_cases.timeline.list_tracks import ListTracks
+from app.application.use_cases.timeline.provision_timeline import ProvisionTimeline
+from app.application.use_cases.timeline.update_timeline import UpdateTimeline
+from app.application.use_cases.timeline.update_track import UpdateTrack
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.application.use_cases.versions.branch_version import BranchProjectVersion
 from app.application.use_cases.versions.create_version import CreateProjectVersion
@@ -168,6 +175,18 @@ ListMediaDep = Annotated[ListMedia, Depends(container.get_list_media_use_case)]
 GetMediaDep = Annotated[GetMedia, Depends(container.get_get_media_use_case)]
 UpdateMediaDep = Annotated[UpdateMedia, Depends(container.get_update_media_use_case)]
 DeleteMediaDep = Annotated[DeleteMedia, Depends(container.get_delete_media_use_case)]
+
+# ---- Use-case dependencies (Slice α6.3a — Timeline + Tracks) ----------
+
+ProvisionTimelineDep = Annotated[
+    ProvisionTimeline, Depends(container.get_provision_timeline_use_case)
+]
+GetTimelineDep = Annotated[GetTimeline, Depends(container.get_get_timeline_use_case)]
+UpdateTimelineDep = Annotated[UpdateTimeline, Depends(container.get_update_timeline_use_case)]
+CreateTrackDep = Annotated[CreateTrack, Depends(container.get_create_track_use_case)]
+ListTracksDep = Annotated[ListTracks, Depends(container.get_list_tracks_use_case)]
+UpdateTrackDep = Annotated[UpdateTrack, Depends(container.get_update_track_use_case)]
+DeleteTrackDep = Annotated[DeleteTrack, Depends(container.get_delete_track_use_case)]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

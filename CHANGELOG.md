@@ -6,6 +6,95 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α6.3a — Timeline Aggregate (root + tracks) (2026-07-13)
+
+Introduces the **Timeline aggregate** — the *composition layer* that places
+registered media (α6.2) onto ordered **tracks** (α6.3b adds clips) — backed by the
+existing baseline `timelines` / `tracks` tables (no migration — tables, the
+`uq_timelines_project_id` / `uq_tracks_timeline_id_z_index` partial uniques, and
+the `frame_rate` CHECK already exist). The Timeline is a **self-contained
+optimistic-concurrency aggregate** (α6.3 pre-flight Q1, **ADR-0038**) — a **third**
+posture, distinct from projects+scenes (aggregate OCC *in* the version ledger) and
+prompts+media (last-writer-wins, no OCC): the root carries `version` (baseline
+`VersionMixin` + guarded bump trigger), its children do **not**, so
+**`timelines.version` is the single OCC token for the whole tree** (root + tracks +
+clips, Q13). A timeline edit is a composition change — it fences on / bumps
+`timelines.version` but does **NOT** bump `projects.version` and is **excluded**
+from `project_versions` snapshots / restore / diff (**adopts ADR-0035**).
+Endpoints are **project-nested** (Q4); the timeline is created **explicitly** (Q3,
+one per project — second → `409`); `z_index` is **client-assigned** and unique per
+live timeline (Q5, collision → `409`). See `docs/domain/TIMELINE_AGGREGATE.md`,
+**ADR-0038**, and `docs/engineering/PHASE3_ALPHA6_3_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/timeline`** (`CurrentUserDep`) — provision
+  the single timeline (explicit, non-lazy). Body `{ aspect_ratio?, frame_rate?,
+  background_color? }`; `aspect_ratio` defaults from the project orientation
+  (`horizontal→16:9`, `vertical→9:16`, `square→1:1`) when omitted; `frame_rate`
+  `1–240`; `background_color` hex. Returns `201` + `TimelinePublic` (`version = 1`,
+  `tracks = []`). Second provision → `409 CONFLICT` (`uq_timelines_project_id`
+  backstop). Missing/foreign project → `404`.
+- **`GET /api/v1/projects/{project_id}/timeline`** — the timeline root + its live
+  tracks ordered by `z_index` ASC. Un-provisioned timeline → `404`.
+- **`PATCH /api/v1/projects/{project_id}/timeline`** — version-fenced root update.
+  Body `{ version, aspect_ratio?, frame_rate?, background_color?,
+  duration_seconds? }`; net **+1** on a real change; `412` on stale; `200` no-op on
+  same-value; empty patch → `422`. No `projects.version` bump.
+- **`POST /api/v1/projects/{project_id}/timeline/tracks`** — append a track. Body
+  `{ kind, z_index, name, locked?, muted?, version? }`; `kind` a `track_kind` enum
+  (`video/audio/subtitle/effect`); `z_index ≥ 0`, unique per live timeline
+  (collision → `409`). `version` is **optional** (a child create cannot be
+  harmfully stale — Q13): omitted → bumps `timelines.version` unconditionally;
+  supplied → fence (stale → `412`). Returns `201` + `TrackPublic` (**no
+  `version`**) with the token in `meta.timeline_version`.
+- **`GET /api/v1/projects/{project_id}/timeline/tracks`** — the live tracks
+  (`z_index` ASC); token in `meta.timeline_version`.
+- **`PATCH /api/v1/projects/{project_id}/timeline/tracks/{track_id}`** — required
+  `version` (the **timeline's**); body any subset of `{ kind, z_index, name,
+  locked, muted }`; z_index collision → `409`; bumps the token; `412` on stale;
+  `200` no-op on same-value; empty patch → `422`. 404-before-412.
+- **`DELETE /api/v1/projects/{project_id}/timeline/tracks/{track_id}?version=<n>`**
+  — required `?version=`; soft-deletes (frees the `z_index`), bumps the token;
+  `204`. **Idempotent-by-404** (repeat delete → `404`, not `412`).
+- **Domain** `app/domain/timeline/timeline.py` (frozen `Timeline`, **with**
+  `version`), `app/domain/timeline/track.py` (frozen `Track`, **no** `version`).
+- **`ITimelineRepository`** + `TimelineRepository` (`add` [unique→`ConflictError`],
+  `get_by_project`, `update_owned` [version-fenced CAS, net +1], `bump_version`
+  [fenced vs unconditional aggregate roll-up], `add_track` / `list_tracks` /
+  `get_track` / `update_track` [z_index→`ConflictError`] / `soft_delete_track`).
+  Wired onto the real `UnitOfWork`, the integration `_TestUnitOfWork`, and
+  `FakeUnitOfWork` (+ `FakeTimelineRepository`).
+- **Use cases** `app/application/use_cases/timeline/` — `ProvisionTimeline`,
+  `GetTimeline`, `UpdateTimeline`, `CreateTrack`, `ListTracks`, `UpdateTrack`,
+  `DeleteTrack` (+ `TimelineResult` / `TrackResult`). None call
+  `IProjectRepository.touch_version`.
+- **DTOs** `app/api/v1/schemas/timeline.py` — `TimelineProvisionRequest`,
+  `TimelineUpdateRequest`, `TrackCreateRequest`, `TrackUpdateRequest`,
+  `TimelinePublic`, `TrackPublic` (no `version`; `extra="forbid"`; empty PATCH →
+  `422`); container factories + `deps` aliases + `routers/timeline.py`, mounted in
+  `app/main.py`.
+- **Tests** — unit matrix for the 7 use cases (provision happy / aspect default /
+  second→409 / 404; fenced root PATCH incl. same-value no-op / stale→412; track
+  create with optional-fence / z_index→409 / stale→412; update fenced incl.
+  404-before-412; delete incl. idempotent-by-404 + z_index slot freeing);
+  repository integration (`add`→409, fenced CAS net +1, `bump_version` fenced vs
+  unconditional, z_index uniqueness, ordered listing, soft-delete slot reuse); HTTP
+  integration `test_timeline.py` (A1–A16 end-to-end: 201/200/204/404/409/412/422/401,
+  cross-owner isolation, `meta.timeline_version`, `projects.version` untouched).
+
+#### Documentation
+- `API_CONTRACT.md` §2 resource map + new §3.2.4 — timeline documented as shipped
+  (project-nested, self-contained OCC via `timelines.version`, `meta.timeline_version`).
+- `docs/domain/TIMELINE_AGGREGATE.md` (new) + **ADR-0038** (new, adopts ADR-0035) —
+  the composition-layer identity, self-contained OCC aggregate model, explicit
+  provision, client-assigned `z_index`, and the exclusion from the project version
+  ledger.
+- `docs/domain/PROJECT_AGGREGATE.md` §6/§8 — timeline noted as **outside** the
+  versioned snapshot boundary; §8 map updated with the α6.3a Timeline composition.
+
+#### Version
+- `0.4.13-phase3-alpha6.3a-dev`.
+
 ### Phase 3 Slice α6.2 — Media Asset Aggregate (generation-output CRUD) (2026-07-13)
 
 Introduces the **Media Asset aggregate** — the first *generation-output* content

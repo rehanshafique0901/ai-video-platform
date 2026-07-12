@@ -58,6 +58,13 @@ from app.application.use_cases.scenes.get_scene import GetScene
 from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
+from app.application.use_cases.timeline.create_track import CreateTrack
+from app.application.use_cases.timeline.delete_track import DeleteTrack
+from app.application.use_cases.timeline.get_timeline import GetTimeline
+from app.application.use_cases.timeline.list_tracks import ListTracks
+from app.application.use_cases.timeline.provision_timeline import ProvisionTimeline
+from app.application.use_cases.timeline.update_timeline import UpdateTimeline
+from app.application.use_cases.timeline.update_track import UpdateTrack
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.application.use_cases.versions.branch_version import BranchProjectVersion
 from app.application.use_cases.versions.create_version import CreateProjectVersion
@@ -414,3 +421,36 @@ def get_update_media_use_case() -> UpdateMedia:
 
 def get_delete_media_use_case() -> DeleteMedia:
     return DeleteMedia(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α6.3a — Timeline + Tracks)
+# ---------------------------------------------------------------------
+
+
+def get_provision_timeline_use_case() -> ProvisionTimeline:
+    return ProvisionTimeline(uow=get_unit_of_work())
+
+
+def get_get_timeline_use_case() -> GetTimeline:
+    return GetTimeline(uow=get_unit_of_work())
+
+
+def get_update_timeline_use_case() -> UpdateTimeline:
+    return UpdateTimeline(uow=get_unit_of_work())
+
+
+def get_create_track_use_case() -> CreateTrack:
+    return CreateTrack(uow=get_unit_of_work())
+
+
+def get_list_tracks_use_case() -> ListTracks:
+    return ListTracks(uow=get_unit_of_work())
+
+
+def get_update_track_use_case() -> UpdateTrack:
+    return UpdateTrack(uow=get_unit_of_work())
+
+
+def get_delete_track_use_case() -> DeleteTrack:
+    return DeleteTrack(uow=get_unit_of_work())

@@ -30,6 +30,7 @@ from app.application.interfaces.repositories import (
     ISceneRepository,
     ISessionRepository,
     ITenantRepository,
+    ITimelineRepository,
     IUserRepository,
 )
 from app.application.interfaces.security import (
@@ -47,6 +48,8 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
+from app.domain.timeline.timeline import Timeline
+from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 # ---- Password hasher --------------------------------------------------
@@ -1258,6 +1261,180 @@ class FakeMediaRepository(IMediaRepository):
         return model_id in self._linkable_models
 
 
+# ---- Timeline repository ----------------------------------------------
+
+
+@dataclass
+class FakeTimelineRepository(ITimelineRepository):
+    """In-memory ``ITimelineRepository`` for α6.3a use-case unit tests.
+
+    Models the real ``TimelineRepository`` observable contract: one live timeline
+    per project (``add`` raises ``ConflictError`` on a second), the version-fenced
+    root CAS (``update_owned`` bumps ``version`` by exactly 1 on a real change),
+    the single-token aggregate roll-up (``bump_version`` — fenced when
+    ``expected_version`` is given, unconditional when ``None``), z_index
+    uniqueness per live timeline (``add_track`` / ``update_track`` raise
+    ``ConflictError`` → 409), and timeline-scoped track visibility ordered by
+    ``z_index``. The fake models the post-filter (live-rows-only) view: a row
+    present in ``_timelines`` / ``_tracks`` is live; soft delete drops it. No row
+    ever bumps ``projects.version`` (ADR-0035/ADR-0038).
+    """
+
+    _timelines: dict[UUID, Timeline] = field(default_factory=dict)
+    _tracks: dict[UUID, Track] = field(default_factory=dict)
+
+    # ---- timeline root ----
+
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        aspect_ratio: str,
+        frame_rate: int,
+        background_color: str,
+    ) -> Timeline:
+        for existing in self._timelines.values():
+            if existing.project_id == project_id:
+                raise ConflictError(
+                    "project already has a timeline",
+                    details={"constraint": "uq_timelines_project_id"},
+                )
+        now = datetime.now(UTC)
+        timeline = Timeline(
+            id=uuid4(),
+            project_id=project_id,
+            project_version_id=None,
+            duration_seconds=0.0,
+            aspect_ratio=aspect_ratio,
+            frame_rate=frame_rate,
+            background_color=background_color,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        self._timelines[timeline.id] = timeline
+        return timeline
+
+    async def get_by_project(self, project_id: UUID) -> Timeline | None:
+        for timeline in self._timelines.values():
+            if timeline.project_id == project_id:
+                return timeline
+        return None
+
+    async def update_owned(
+        self,
+        project_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Timeline | None:
+        timeline = await self.get_by_project(project_id)
+        if timeline is None or timeline.version != expected_version:
+            return None
+        updated = replace(
+            timeline,
+            **dict(changes),
+            version=timeline.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._timelines[timeline.id] = updated
+        return updated
+
+    async def bump_version(
+        self,
+        project_id: UUID,
+        expected_version: int | None,
+    ) -> int | None:
+        timeline = await self.get_by_project(project_id)
+        if timeline is None:
+            return None
+        if expected_version is not None and timeline.version != expected_version:
+            return None
+        updated = replace(
+            timeline,
+            version=timeline.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._timelines[timeline.id] = updated
+        return updated.version
+
+    # ---- tracks ----
+
+    def _z_index_taken(
+        self, timeline_id: UUID, z_index: int, *, exclude: UUID | None = None
+    ) -> bool:
+        return any(
+            t.timeline_id == timeline_id and t.z_index == z_index and t.id != exclude
+            for t in self._tracks.values()
+        )
+
+    async def add_track(
+        self,
+        *,
+        timeline_id: UUID,
+        kind: str,
+        z_index: int,
+        name: str,
+        locked: bool,
+        muted: bool,
+    ) -> Track:
+        if self._z_index_taken(timeline_id, z_index):
+            raise ConflictError(
+                "track z_index already in use for this timeline",
+                details={"constraint": "uq_tracks_timeline_id_z_index"},
+            )
+        now = datetime.now(UTC)
+        track = Track(
+            id=uuid4(),
+            timeline_id=timeline_id,
+            kind=kind,
+            z_index=z_index,
+            locked=locked,
+            muted=muted,
+            name=name,
+            created_at=now,
+            updated_at=now,
+        )
+        self._tracks[track.id] = track
+        return track
+
+    async def list_tracks(self, timeline_id: UUID) -> list[Track]:
+        rows = [t for t in self._tracks.values() if t.timeline_id == timeline_id]
+        rows.sort(key=lambda t: t.z_index)
+        return rows
+
+    async def get_track(self, timeline_id: UUID, track_id: UUID) -> Track | None:
+        track = self._tracks.get(track_id)
+        if track is None or track.timeline_id != timeline_id:
+            return None
+        return track
+
+    async def update_track(
+        self,
+        timeline_id: UUID,
+        track_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Track | None:
+        track = await self.get_track(timeline_id, track_id)
+        if track is None:
+            return None
+        new_z = changes.get("z_index", track.z_index)
+        if new_z != track.z_index and self._z_index_taken(timeline_id, new_z, exclude=track_id):
+            raise ConflictError(
+                "track z_index already in use for this timeline",
+                details={"constraint": "uq_tracks_timeline_id_z_index"},
+            )
+        updated = replace(track, updated_at=datetime.now(UTC), **dict(changes))
+        self._tracks[track_id] = updated
+        return updated
+
+    async def soft_delete_track(self, timeline_id: UUID, track_id: UUID) -> bool:
+        track = self._tracks.get(track_id)
+        if track is None or track.timeline_id != timeline_id:
+            return False
+        del self._tracks[track_id]
+        return True
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1275,6 +1452,7 @@ class FakeUnitOfWork(IUnitOfWork):
         versions: FakeProjectVersionRepository | None = None,
         prompts: FakePromptRepository | None = None,
         media: FakeMediaRepository | None = None,
+        timeline: FakeTimelineRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1290,6 +1468,7 @@ class FakeUnitOfWork(IUnitOfWork):
         )
         self._fake_prompts = prompts or FakePromptRepository()
         self._fake_media = media or FakeMediaRepository()
+        self._fake_timeline = timeline or FakeTimelineRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -1303,6 +1482,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.versions = self._fake_versions
         self.prompts = self._fake_prompts
         self.media = self._fake_media
+        self.timeline = self._fake_timeline
         return self
 
     async def __aexit__(

@@ -30,6 +30,7 @@ from app.application.interfaces.repositories import (
     ISceneRepository,
     ISessionRepository,
     ITenantRepository,
+    ITimelineRepository,
     IUserRepository,
 )
 
@@ -60,6 +61,7 @@ class IUnitOfWork(ABC):
     versions: IProjectVersionRepository  # α5d
     prompts: IPromptRepository  # α6.1
     media: IMediaRepository  # α6.2
+    timeline: ITimelineRepository  # α6.3a
 
     async def __aenter__(self) -> Self:
         return self

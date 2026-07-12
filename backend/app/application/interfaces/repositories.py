@@ -38,6 +38,8 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
+from app.domain.timeline.timeline import Timeline
+from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 
@@ -850,6 +852,194 @@ class IMediaRepository(ABC):
         failure, before the row is written (``media_assets.model_id`` is ``ON
         DELETE RESTRICT``, but the FK alone would still accept a since-retired
         model; this is the app-level gate). ``ai_models`` has no soft-delete.
+        """
+        ...
+
+
+class ITimelineRepository(ABC):
+    """Persistence surface for ``timelines`` + ``tracks``. Introduced by Slice α6.3a.
+
+    The **Timeline aggregate** is a *self-contained OCC aggregate* (ADR-0038): the
+    ``Timeline`` is the root (1:1 with a project — the ``timelines`` partial-unique
+    index on ``project_id`` enforces one live timeline per project), and ``Track``
+    (and — α6.3b — ``Clip``) are its children. Ownership is **derived through the
+    project** (the tables carry no ``tenant_id`` / ``owner_user_id``); the use case
+    has ALREADY established project ownership via
+    :meth:`IProjectRepository.get_owned` before reaching this port, so a timeline /
+    track of another project simply returns ``None`` / is omitted / reports
+    ``False`` (anti-enumeration, inherited from α5a/α5c).
+
+    **Single-token optimistic concurrency (ADR-0038 / Q1 / Q13).** Only the
+    ``timelines`` row carries a ``version`` (``VersionMixin`` + the guarded
+    ``tg_timelines_biu_version_bump`` trigger); ``tracks`` do **not**. Therefore
+    ``timelines.version`` is the OCC token for the *entire* aggregate:
+
+    * :meth:`update_owned` is the version-fenced CAS on the root's own columns
+      (mirrors :meth:`IProjectRepository.update_owned`).
+    * :meth:`bump_version` is the aggregate roll-up a child (track/clip) mutation
+      calls to advance the token — optionally fenced (``expected_version`` given →
+      CAS → ``None`` on mismatch → ``412``; ``None`` → unconditional bump, used by
+      child ``POST`` where a create cannot be harmfully stale, Q13).
+
+    The aggregate is **excluded** from the project-version ledger (ADR-0035):
+    timeline/track mutations do **NOT** bump ``projects.version`` and are **NOT**
+    captured in ``project_versions`` snapshots. ``updated_at`` is trigger-owned.
+    """
+
+    # ---- timeline root -------------------------------------------------
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        aspect_ratio: str,
+        frame_rate: int,
+        background_color: str,
+    ) -> Timeline:
+        """Insert the project's single timeline and return the persisted entity.
+
+        ``version`` (=1) / timestamps are DB-populated; ``project_version_id`` is
+        left ``NULL`` (its write path is deferred to α7+, ADR-0035). Raises
+        ``ConflictError`` if the partial-unique index ``uq_timelines_project_id``
+        (live rows only) is violated — i.e. the project already has a live
+        timeline (the use case maps it to ``409``, Q3). The unique index is the
+        race-safe backstop; a project is 1:1 with its timeline.
+        """
+        ...
+
+    @abstractmethod
+    async def get_by_project(self, project_id: UUID) -> Timeline | None:
+        """Return the project's live timeline, or ``None`` if none exists yet.
+
+        ``None`` when the project has no timeline (not yet provisioned) or it is
+        soft-deleted. The caller has already established project ownership, so a
+        ``None`` here is "no timeline" → the use case maps it to ``404`` (Q3).
+        """
+        ...
+
+    @abstractmethod
+    async def update_owned(
+        self,
+        project_id: UUID,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> Timeline | None:
+        """Version-fenced partial update of the project's live timeline (α6.3a).
+
+        Applies ``changes`` (root columns — ``aspect_ratio`` / ``frame_rate`` /
+        ``background_color`` / ``duration_seconds``) to the row matching
+        ``project_id`` + ``deleted_at IS NULL`` + ``version = expected_version``
+        via a compare-and-swap (mirrors :meth:`IProjectRepository.update_owned`,
+        hand-setting ``version + 1`` over the guarded trigger → net +1). Returns
+        the updated :class:`Timeline` on success, or ``None`` when the CAS matched
+        no row — a concurrent bump/delete after the use case's ``get_by_project``
+        (the visibility ``404`` was decided upstream) → ``412``. ``changes`` MUST
+        be non-empty and contain only mutable root columns.
+        """
+        ...
+
+    @abstractmethod
+    async def bump_version(
+        self,
+        project_id: UUID,
+        expected_version: int | None,
+    ) -> int | None:
+        """Advance the aggregate OCC token after a child (track/clip) mutation.
+
+        The **single-token rule** (ADR-0038 / Q13): a track/clip create/update/
+        delete changes the aggregate, so it advances ``timelines.version``. Two
+        modes:
+
+        * ``expected_version is None`` — **unconditional** bump (used by child
+          ``POST``; a create cannot be harmfully stale). Returns the new
+          ``version`` (or ``None`` only if the timeline vanished concurrently).
+        * ``expected_version`` given — **fenced** CAS (``WHERE version =
+          expected``); returns the new ``version`` on match, or ``None`` on a
+          stale token (the use case maps ``None`` → ``412``). Used by child
+          ``PATCH`` / ``DELETE``.
+
+        Hand-sets ``version + 1`` over the guarded ``tg_timelines_biu_version_bump``
+        trigger (net +1). Scoped ``project_id`` + ``deleted_at IS NULL``. Does
+        **NOT** touch ``projects.version`` (ADR-0035).
+        """
+        ...
+
+    # ---- tracks --------------------------------------------------------
+
+    @abstractmethod
+    async def add_track(
+        self,
+        *,
+        timeline_id: UUID,
+        kind: str,
+        z_index: int,
+        name: str,
+        locked: bool,
+        muted: bool,
+    ) -> Track:
+        """Insert a track under ``timeline_id`` and return the persisted entity.
+
+        ``id`` / timestamps are DB-populated. Raises ``ConflictError`` if the
+        partial-unique index ``uq_tracks_timeline_id_z_index`` (live rows) is
+        violated — i.e. another live track of this timeline already holds
+        ``z_index`` (the use case maps it to ``409``, Q5). Does **not** bump the
+        timeline version — the use case calls :meth:`bump_version` for the
+        aggregate roll-up in the same transaction (ADR-0038).
+        """
+        ...
+
+    @abstractmethod
+    async def list_tracks(self, timeline_id: UUID) -> list[Track]:
+        """Return the timeline's live tracks ordered by ``z_index`` ASC.
+
+        Read-only and side-effect-free. Soft-deleted tracks are excluded. Not
+        paginated (a timeline's track set is a bounded editorial list).
+        """
+        ...
+
+    @abstractmethod
+    async def get_track(self, timeline_id: UUID, track_id: UUID) -> Track | None:
+        """Return the timeline's live track with ``track_id``, or ``None``.
+
+        ``None`` when the track is missing, soft-deleted, or belongs to a
+        different timeline — deliberately indistinguishable so the route maps all
+        of them to a uniform ``404`` (mirroring α5c D6).
+        """
+        ...
+
+    @abstractmethod
+    async def update_track(
+        self,
+        timeline_id: UUID,
+        track_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Track | None:
+        """Partial update of the timeline's live track (α6.3a).
+
+        Applies ``changes`` (mutable columns — ``kind`` / ``z_index`` / ``name`` /
+        ``locked`` / ``muted``) to the row matching ``track_id`` + ``timeline_id``
+        + ``deleted_at IS NULL``. Tracks have **no own version** — the OCC fence is
+        the parent timeline's, applied by the use case via :meth:`bump_version`
+        (ADR-0038). Returns the updated :class:`Track`, or ``None`` when no live
+        row matched (concurrent delete → the use case maps it to ``404``). Raises
+        ``ConflictError`` if the new ``z_index`` collides with another live track
+        of the timeline (``409``, Q5). ``changes`` MUST be non-empty and contain
+        only mutable columns.
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_track(self, timeline_id: UUID, track_id: UUID) -> bool:
+        """Soft-delete (``deleted_at = now()``) the timeline's live track (α6.3a).
+
+        Scoped ``timeline_id`` + ``deleted_at IS NULL``. Returns ``True`` if a live
+        track was found and marked, ``False`` otherwise (missing, already
+        soft-deleted, or another timeline's track). The use case maps ``False`` →
+        ``404`` so a repeat delete — and any GET/PATCH after delete — is a uniform
+        ``404`` (idempotent-by-404). Frees the ``z_index`` slot (the partial-unique
+        index only covers live rows). The aggregate roll-up
+        (:meth:`bump_version`) is the use case's job.
         """
         ...
 

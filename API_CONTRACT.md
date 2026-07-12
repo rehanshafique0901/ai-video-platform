@@ -61,7 +61,7 @@ Error:
 | AI — Videos | `/ai/videos` |
 | AI — Voice | `/ai/voice` |
 | AI — Subtitles | `/ai/subtitles` |
-| Timeline | `/projects/{id}/timeline` |
+| Timeline (α6.3a) | `/projects/{id}/timeline`, `/projects/{id}/timeline/tracks`, `/projects/{id}/timeline/tracks/{track_id}` |
 | Render | `/projects/{id}/render` |
 | Export | `/projects/{id}/export` |
 | Asset Library (CR-8) | `/library/assets`, `/library/assets/{id}` |
@@ -363,6 +363,76 @@ DELETE /media/{media_id}     soft delete
 > *restore* (the FK `ON DELETE SET NULL` fires only on a hard parent delete,
 > which the API never performs). See `docs/domain/MEDIA_AGGREGATE.md` and
 > `docs/decisions/ADR-0037-media-generation-outputs.md`.
+
+#### 3.2.4 Timeline & tracks (Phase 3 α6.3a)
+
+```
+POST   /projects/{project_id}/timeline                    provision the single timeline (explicit)
+GET    /projects/{project_id}/timeline                    timeline root + ordered tracks
+PATCH  /projects/{project_id}/timeline                    version-fenced root update
+POST   /projects/{project_id}/timeline/tracks             append a track (version optional)
+GET    /projects/{project_id}/timeline/tracks             list tracks (z_index ASC)
+PATCH  /projects/{project_id}/timeline/tracks/{track_id}  version-fenced track update
+DELETE /projects/{project_id}/timeline/tracks/{track_id}?version=<n>   version-fenced soft delete
+```
+
+> **Shipped in Phase 3 α6.3a (Timeline + Tracks).** The Timeline is the
+> **composition layer** — it places registered media (α6.2) onto ordered **tracks**
+> as time-ranged clips (`Scene → Media → Clip → Timeline`; clips are α6.3b). It is
+> **1:1 with a project** and **project-nested**; ownership is derived through the
+> project, so every access runs a two-level gate (project ownership → timeline
+> resolution, both `404`).
+>
+> **The Timeline is a self-contained OCC aggregate (ADR-0038, adopts ADR-0035).**
+> The `timelines` root carries a `version` (its children — tracks, clips — do
+> not), so **`timelines.version` is the single OCC token for the whole tree**: a
+> timeline/track/clip mutation fences on and bumps it. A timeline edit is a
+> composition change — it does **NOT** bump `projects.version` and is **excluded**
+> from `project_versions` snapshots / restore / diff. The **track wire carries no
+> `version`** — the aggregate token travels in the response `meta.timeline_version`,
+> which the client carries into the next fenced write.
+>
+> * **`POST …/timeline`** — **explicit, non-lazy** creation (one per project). Body
+>   `{ aspect_ratio?, frame_rate?, background_color? }`; `aspect_ratio` defaults
+>   from the project orientation (`horizontal→16:9`, `vertical→9:16`,
+>   `square→1:1`) when omitted; `frame_rate` `1–240`; `background_color` hex
+>   (`#rrggbb`). A second provision → **`409 CONFLICT`**. Returns `201` +
+>   `TimelinePublic` (`version = 1`, `tracks = []`). Missing/foreign project →
+>   `404`.
+> * **`GET …/timeline`** — the timeline root plus its live tracks ordered by
+>   `z_index` ASC. Un-provisioned timeline → `404`.
+> * **`PATCH …/timeline`** — version-fenced. Body `{ version, aspect_ratio?,
+>   frame_rate?, background_color?, duration_seconds? }`; `version` (the aggregate
+>   token) required plus ≥ 1 mutable field (empty patch → `422`). A real change
+>   advances `version` by **+1**; a stale `version` → **`412`**; a same-value patch
+>   is a `200` no-op. No `projects.version` bump.
+> * **`POST …/timeline/tracks`** — body `{ kind, z_index, name, locked?, muted?,
+>   version? }`. `kind` a `track_kind` enum (`video, audio, subtitle, effect`);
+>   `z_index ≥ 0`, **client-assigned** and unique per live timeline (collision →
+>   **`409`** — the server does not silently reorder). `version` is **optional** (a
+>   child create cannot be harmfully stale): omitted → bump the token
+>   unconditionally; supplied → fence (stale → `412`). Returns `201` +
+>   `TrackPublic` with `meta.timeline_version`.
+> * **`GET …/timeline/tracks`** — the live tracks (`z_index` ASC);
+>   `meta.timeline_version`.
+> * **`PATCH …/timeline/tracks/{track_id}`** — body `{ version, kind?, z_index?,
+>   name?, locked?, muted? }`; `version` (the **timeline's**) **required** plus ≥ 1
+>   mutable field (empty → `422`). z_index collision → `409`; stale `version` →
+>   `412`; same-value → `200` no-op. **404-before-412** (a missing track is `404`
+>   even with a stale token). Returns `200` + `TrackPublic` with
+>   `meta.timeline_version`.
+> * **`DELETE …/timeline/tracks/{track_id}?version=<n>`** — the expected timeline
+>   `version` is a **required** query parameter. Soft-deletes (frees the `z_index`),
+>   bumps the token; `204`. **Idempotent-by-404**: a repeat delete — or deleting an
+>   unknown / another owner's track — is `404` (not `412`), decided before the fence.
+>
+> `TimelinePublic` = `{ id, project_id, project_version_id (read-only, α7+),
+> aspect_ratio, frame_rate, background_color, duration_seconds, version,
+> created_at, updated_at, tracks: [TrackPublic, …] }`. `TrackPublic` = `{ id,
+> timeline_id, kind, z_index, name, locked, muted, created_at, updated_at }` —
+> **no `version`** (the aggregate token is `meta.timeline_version`). See
+> `docs/domain/TIMELINE_AGGREGATE.md` and
+> `docs/decisions/ADR-0038-timeline-self-contained-occ-aggregate.md`.
 
 ### 3.3 Project Versions (CR-6)
 
