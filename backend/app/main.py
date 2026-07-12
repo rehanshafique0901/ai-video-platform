@@ -34,7 +34,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from app.api.v1.routers import auth, health, projects, scenes, users
+from app.api.v1.routers import auth, health, projects, scenes, users, versions
 from app.core import container
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
@@ -83,7 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="AI Video Platform — backend",
-        version="0.4.7-phase3-alpha5c-dev",
+        version="0.4.8-phase3-alpha5d-dev",
         lifespan=lifespan,
     )
 
@@ -97,5 +97,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(users.router, prefix="/api/v1")
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(scenes.router, prefix="/api/v1")
+    app.include_router(versions.router, prefix="/api/v1")
 
     return app
