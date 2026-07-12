@@ -24,6 +24,7 @@ from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
     IProjectRepository,
     IProjectVersionRepository,
+    IPromptRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -42,6 +43,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
+from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
@@ -999,6 +1001,102 @@ class FakeProjectVersionRepository(IProjectVersionRepository):
         return self._projects._rows[new_project_id], version
 
 
+# ---- Prompt repository ------------------------------------------------
+
+
+@dataclass
+class FakePromptRepository(IPromptRepository):
+    """In-memory ``IPromptRepository`` for α6.1 use-case unit tests.
+
+    Models the real ``PromptRepository`` observable contract: project-scoped
+    visibility, newest-first listing with ``kind`` / ``scene_id`` filters, and —
+    per ADR-0036 — **no** version fence and **no** ``projects.version`` bump on
+    any mutation (last-writer-wins). ``_scenes`` is included as an insertion
+    ordinal so newest-first is deterministic without real timestamps.
+    ``_linkable_models`` is the set of ``ai_models`` ids a test declares
+    linkable (:meth:`model_is_linkable` returns membership); a model NOT in the
+    set models a missing/retired model → the use case raises ``422``.
+    """
+
+    _prompts: dict[UUID, Prompt] = field(default_factory=dict)
+    _linkable_models: set[UUID] = field(default_factory=set)
+    _order: dict[UUID, int] = field(default_factory=dict)
+    _seq: int = 0
+
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        scene_id: UUID | None,
+        kind: str,
+        text_content: str,
+        model_id: UUID | None,
+        extra: dict[str, Any],
+    ) -> Prompt:
+        now = datetime.now(UTC)
+        prompt = Prompt(
+            id=uuid4(),
+            project_id=project_id,
+            scene_id=scene_id,
+            kind=kind,
+            text_content=text_content,
+            model_id=model_id,
+            extra=dict(extra),
+            created_at=now,
+            updated_at=now,
+        )
+        self._prompts[prompt.id] = prompt
+        self._seq += 1
+        self._order[prompt.id] = self._seq
+        return prompt
+
+    async def list_owned(
+        self,
+        project_id: UUID,
+        *,
+        kind: str | None = None,
+        scene_id: UUID | None = None,
+    ) -> list[Prompt]:
+        rows = [p for p in self._prompts.values() if p.project_id == project_id]
+        if kind is not None:
+            rows = [p for p in rows if p.kind == kind]
+        if scene_id is not None:
+            rows = [p for p in rows if p.scene_id == scene_id]
+        # Newest-first: insertion ordinal DESC mirrors (created_at, id) DESC.
+        rows.sort(key=lambda p: self._order.get(p.id, 0), reverse=True)
+        return rows
+
+    async def get_owned(self, project_id: UUID, prompt_id: UUID) -> Prompt | None:
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None or prompt.project_id != project_id:
+            return None
+        return prompt
+
+    async def update_owned(
+        self,
+        project_id: UUID,
+        prompt_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Prompt | None:
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None or prompt.project_id != project_id:
+            return None
+        # No version fence (ADR-0036): last-writer-wins. updated_at advances.
+        updated = replace(prompt, updated_at=datetime.now(UTC), **dict(changes))
+        self._prompts[prompt_id] = updated
+        return updated
+
+    async def soft_delete_owned(self, project_id: UUID, prompt_id: UUID) -> bool:
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None or prompt.project_id != project_id:
+            return False
+        del self._prompts[prompt_id]
+        return True
+
+    async def model_is_linkable(self, model_id: UUID) -> bool:
+        return model_id in self._linkable_models
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1014,6 +1112,7 @@ class FakeUnitOfWork(IUnitOfWork):
         projects: FakeProjectRepository | None = None,
         scenes: FakeSceneRepository | None = None,
         versions: FakeProjectVersionRepository | None = None,
+        prompts: FakePromptRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1027,6 +1126,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_versions = versions or FakeProjectVersionRepository(
             _projects=self._fake_projects, _scenes=self._fake_scenes
         )
+        self._fake_prompts = prompts or FakePromptRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -1038,6 +1138,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.projects = self._fake_projects
         self.scenes = self._fake_scenes
         self.versions = self._fake_versions
+        self.prompts = self._fake_prompts
         return self
 
     async def __aexit__(

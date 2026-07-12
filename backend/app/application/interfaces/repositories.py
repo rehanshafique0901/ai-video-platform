@@ -35,6 +35,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.projects.project import Project
+from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
@@ -566,6 +567,128 @@ class ISceneRepository(ABC):
         responses (create/get/patch/move) without exposing the raw sparse
         ``scene_number`` (Q6); the list endpoint enumerates positions from
         the already-sorted :meth:`list_by_project` result instead.
+        """
+        ...
+
+
+class IPromptRepository(ABC):
+    """Persistence surface for ``prompts``. Soft-deleted rows are excluded.
+
+    Introduced by Slice α6.1. A prompt is a **generation input** owned by a
+    project (the table carries no ``tenant_id`` / ``owner_user_id``; ownership
+    is derived through ``project_id``). Every method is project-scoped — the use
+    case has ALREADY established project ownership via
+    :meth:`IProjectRepository.get_owned` before reaching this port (the α5c
+    two-level visibility gate), so a prompt of another project simply returns
+    ``None`` / is omitted / reports ``False`` (anti-enumeration).
+
+    **No optimistic concurrency (ADR-0036 / α6.1 Q1 = Option A).** The
+    ``prompts`` table has no ``version`` column and is absent from the
+    version-bump trigger set, so prompt mutations are **last-writer-wins**: no
+    CAS fence, and — crucially — a prompt create/update/delete does **NOT** bump
+    ``projects.version`` and is **NOT** captured in project version snapshots.
+    Prompts are generation inputs, not versioned editorial content; the versioned
+    aggregate stays {project root + scenes}. ``updated_at`` is trigger-owned.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        scene_id: UUID | None,
+        kind: str,
+        text_content: str,
+        model_id: UUID | None,
+        extra: dict[str, Any],
+    ) -> Prompt:
+        """Insert a new prompt under ``project_id`` and return the persisted entity.
+
+        ``scene_id`` / ``model_id`` may be ``None`` (a project-level prompt / an
+        unpinned prompt). The caller (``CreatePrompt``) has ALREADY validated
+        that a non-``None`` ``scene_id`` references a live scene in this project
+        (via :meth:`ISceneRepository.get_owned_scene`) and that a non-``None``
+        ``model_id`` is linkable (via :meth:`model_is_linkable`). ``id`` /
+        timestamps are DB-populated; the returned entity carries the
+        authoritative values. ``generated_by_agent`` is left ``NULL``
+        (server-owned provenance, α8 — not part of α6.1).
+        """
+        ...
+
+    @abstractmethod
+    async def list_owned(
+        self,
+        project_id: UUID,
+        *,
+        kind: str | None = None,
+        scene_id: UUID | None = None,
+    ) -> list[Prompt]:
+        """Return the project's live prompts, newest first, optionally filtered.
+
+        Ordered by ``created_at DESC, id DESC`` (a total order — no duplicate /
+        skip under timestamp ties). ``kind`` (a ``prompt_kind`` value) and
+        ``scene_id`` narrow the result when provided (combined = AND). Not
+        paginated in α6.1 (Q9 — a project's prompt set is a bounded working
+        list). Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(self, project_id: UUID, prompt_id: UUID) -> Prompt | None:
+        """Return the project's live prompt with ``prompt_id``, or ``None``.
+
+        ``None`` when the prompt is missing, soft-deleted, or belongs to a
+        different project — deliberately indistinguishable so
+        ``GET /projects/{id}/prompts/{prompt_id}`` maps all of them to a uniform
+        ``404`` (α6.1 D2, mirroring α5c D6).
+        """
+        ...
+
+    @abstractmethod
+    async def update_owned(
+        self,
+        project_id: UUID,
+        prompt_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Prompt | None:
+        """Partial update of the project's live prompt (α6.1).
+
+        Applies ``changes`` (a mapping of mutable columns — ``text_content`` /
+        ``kind`` / ``model_id`` / ``extra``) to the row matching ``prompt_id`` +
+        ``project_id`` + ``deleted_at IS NULL``. **No version fence** (ADR-0036 /
+        Q1 = Option A — prompts have no OCC column); ``updated_at`` is bumped by
+        the trigger. Returns the updated :class:`Prompt`, or ``None`` when no
+        live owned row matched (missing / soft-deleted / another project's — the
+        use case maps ``None`` → ``404``, never ``412``: there is no concurrency
+        outcome to surface). ``changes`` MUST be non-empty and contain only
+        mutable columns (the use case resolves the empty-patch ``422`` upstream);
+        a non-``None`` ``model_id`` in ``changes`` was validated linkable by the
+        use case first.
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_owned(self, project_id: UUID, prompt_id: UUID) -> bool:
+        """Soft-delete (``deleted_at = now()``) the project's live prompt (α6.1).
+
+        Scoped to ``project_id`` + ``deleted_at IS NULL``. Returns ``True`` if a
+        live prompt was found and marked, ``False`` otherwise (missing, already
+        soft-deleted, or another project's prompt). The use case maps ``False``
+        → ``404`` so a repeat delete — and any GET/PATCH after delete — is a
+        uniform ``404`` (idempotent-by-404, α6.1 D4). No version fence.
+        """
+        ...
+
+    @abstractmethod
+    async def model_is_linkable(self, model_id: UUID) -> bool:
+        """True iff ``model_id`` references an ``ai_models`` row usable as a prompt target.
+
+        A model is linkable when the row exists and its ``status`` is **not**
+        ``retired`` (α6.1 Q4). Used by ``CreatePrompt`` / ``UpdatePrompt`` to
+        validate a client-supplied ``model_id`` → ``422`` on failure, before the
+        row is written (``prompts.model_id`` is ``ON DELETE SET NULL`` so the FK
+        alone would silently accept a since-retired model; this is the app-level
+        gate). ``ai_models`` is a system registry with no soft-delete.
         """
         ...
 

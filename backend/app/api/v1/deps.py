@@ -44,6 +44,11 @@ from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
 from app.application.use_cases.projects.list_projects import ListProjects
 from app.application.use_cases.projects.update_project import UpdateProject
+from app.application.use_cases.prompts.create_prompt import CreatePrompt
+from app.application.use_cases.prompts.delete_prompt import DeletePrompt
+from app.application.use_cases.prompts.get_prompt import GetPrompt
+from app.application.use_cases.prompts.list_prompts import ListPrompts
+from app.application.use_cases.prompts.update_prompt import UpdatePrompt
 from app.application.use_cases.scenes.create_scene import CreateScene
 from app.application.use_cases.scenes.delete_scene import DeleteScene
 from app.application.use_cases.scenes.get_scene import GetScene
@@ -142,6 +147,14 @@ DiffProjectVersionsDep = Annotated[
 BranchProjectVersionDep = Annotated[
     BranchProjectVersion, Depends(container.get_branch_project_version_use_case)
 ]
+
+# ---- Use-case dependencies (Slice α6.1 — Prompts) ---------------------
+
+CreatePromptDep = Annotated[CreatePrompt, Depends(container.get_create_prompt_use_case)]
+ListPromptsDep = Annotated[ListPrompts, Depends(container.get_list_prompts_use_case)]
+GetPromptDep = Annotated[GetPrompt, Depends(container.get_get_prompt_use_case)]
+UpdatePromptDep = Annotated[UpdatePrompt, Depends(container.get_update_prompt_use_case)]
+DeletePromptDep = Annotated[DeletePrompt, Depends(container.get_delete_prompt_use_case)]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

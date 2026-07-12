@@ -129,7 +129,14 @@ endpoints:
   regeneration is a feature. (Schema fact corrected 2026-07-11: earlier
   revisions of this doc wrongly listed `scenes.project_id` — the ORM has
   always keyed Scene to `storyboard_id`.)
-- **Prompts** (`prompts.*`) — generation inputs.
+- **Prompts** (`prompts.project_id`, `ON DELETE CASCADE`) — **generation
+  inputs**, shipped as an owner-scoped CRUD aggregate under the project in
+  α6.1 (`/projects/{id}/prompts`). Deliberately **outside** the versioned
+  content boundary: the baseline gave `prompts` no `version` column, so they
+  take no per-row OCC, do **not** bump `projects.version`, and are **not**
+  captured in `project_versions` snapshots (see §6 and ADR-0036). A prompt may
+  optionally link a live scene (`scene_id`, immutable after create) and an
+  `ai_models` row (`model_id`). See `docs/domain/PROMPT_AGGREGATE.md`.
 - **Media assets** (`media_assets.project_id`) — rendered/uploaded media.
 - **Render jobs** (`render_jobs.project_id`) — render lifecycle.
 - **Project versions** (`project_versions.project_id`) — the immutable
@@ -271,6 +278,22 @@ restore) appends to the ledger and, via the `current_version_id` repoint,
 bumps the row `version` as incidental bookkeeping — the append, not the bump,
 is the versioning act (ADR-0035 D1).
 
+**Generation inputs are outside both mechanisms (α6.1, ADR-0036).** The
+snapshot boundary is **{project root + default storyboard + ordered scenes}**
+and nothing more. Prompts — shipped in α6.1 — are **generation inputs**, not
+editorial content: they have **no `version` column**, take **no per-row OCC**,
+do **not** bump `projects.version` (the Aggregate OCC Rule above does *not*
+extend to them), and are **not** captured/restored/diffed in the ledger. This
+is a **decision, not an omission** (ADR-0036): restore's silence on prompts is
+deliberate. The governing principle — *project versions capture editorial
+state, not generation inputs; generated media may retain the prompt used for
+provenance independently of the current prompt record* — is recorded verbatim
+in ADR-0036 and is the precedent that later generation aggregates (media α6.2,
+timeline α6.3) also follow. (A durability nuance: because scenes are
+soft-deleted, a prompt's `scene_id` link survives both a scene soft-delete and
+a version restore — the FK's `ON DELETE SET NULL` fires only on a hard scene
+delete, which the API never performs.)
+
 ---
 
 ## 7. Invariants (must always hold)
@@ -298,10 +321,10 @@ is the versioning act (ADR-0035 D1).
 Project (root)
  ├── Storyboards       storyboards.project_id           (α5c; one default auto-created)
  │     └── Scenes      scenes.storyboard_id             (α5c — ordered by scene_number)
- │            └── Prompts   prompts.* (scene-scoped)    (later)
- ├── Media Assets      media_assets.project_id          (α6) ← generated *from* scenes
- ├── Timeline          timelines.project_id (1:1)       (α6b) → Tracks → Clips → media_assets
- ├── Render Jobs       render_jobs.project_id           (α7)
+ ├── Prompts           prompts.project_id               (α6.1 — generation inputs; optional scene_id link; NO OCC, NOT in snapshots)
+ ├── Media Assets      media_assets.project_id          (α6.2) ← generated *from* prompts
+ ├── Timeline          timelines.project_id (1:1)       (α6.3) → Tracks → Clips → media_assets
+ ├── Render Jobs       render_jobs.project_id           (α6.4)
  ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; α5d.3 branch=fork-to-new-project via branched_from)
  ├── Tags              project_tags (join)              (later)
  └── Folder (parent)   folders.id  ← projects.folder_id (later move-to-folder)
@@ -333,3 +356,4 @@ model.
 | 2026-07-12 | **§6 updated for α5d.1 (Project Versions capture + read):** the snapshot ledger is now shipped (capture / list / get). Documented the monotonic-numbering + lineage + canonical-snapshot + current-pointer-advance semantics and cross-referenced **ADR-0035**. §8 diagram: `Versions` marked α5d.1 (restore/branch α5d.2); `Prompts` re-marked *later* (α5d is versions, not prompts). |
 | 2026-07-12 | **§6 updated for α5d.2 (restore + diff):** added the **Aggregate OCC Rule** — `projects.version` is now the OCC token for the entire aggregate; scene create/update/move/delete each bump it (guarded against no-ops), and restore bumps it exactly once. Documented the restore-by-new-version + scene-reconcile + one-transaction semantics and the on-demand diff. Invariant #6 extended to child mutations. §8 diagram: `Versions` marked α5d.2 restore+diff (branch α5d.3). |
 | 2026-07-12 | **§6 updated for α5d.3 (branch = fork to a new project):** documented branch as a source-immutable fork into a new caller-owned aggregate (fresh scene ids, `reason=branch` v1, `parent_version_id` NULL) with a self-contained `branched_from` provenance breadcrumb (`{project_id, version_id, version_number}`); no OCC fence, no source version bump, new project's version follows the created + first-capture arc → 2. Recorded that an in-project multi-head model is deferred (needs a migration). §8 diagram: `Versions` marked α5d.3 branch. See **ADR-0035** D12. |
+| 2026-07-12 | **§3/§6/§8 updated for α6.1 (Prompt aggregate):** the Prompts child is now shipped as an owner-scoped CRUD surface (`/projects/{id}/prompts`) and re-marked in §3 as a **generation input** explicitly **outside** the versioned content boundary — no `version` column, no per-row OCC, no `projects.version` bump, and **not** captured in `project_versions` snapshots/restore/diff (a decision, not an omission). Added the "Generation inputs are outside both mechanisms" note in §6 with the ADR-0036 governing principle verbatim. §8 diagram: `Prompts` promoted to a direct project child (α6.1) feeding Media Assets (α6.2). See `docs/domain/PROMPT_AGGREGATE.md` and **ADR-0036**. |

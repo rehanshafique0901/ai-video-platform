@@ -53,7 +53,7 @@ Error:
 | Projects | `/projects`, `/projects/{id}` |
 | Project Versions (CR-6) | `/projects/{id}/versions`, `/projects/{id}/versions/{version_id}` |
 | Scenes | `/projects/{id}/scenes`, `/projects/{id}/scenes/{scene_id}`, `/projects/{id}/scenes/{scene_id}/move` |
-| Prompts | `/projects/{id}/prompts`, `/prompts/{id}` |
+| Prompts (α6.1) | `/projects/{id}/prompts`, `/projects/{id}/prompts/{prompt_id}` |
 | AI — Script | `/ai/script` |
 | AI — Storyboard | `/ai/storyboard` |
 | AI — Images | `/ai/images` |
@@ -223,6 +223,71 @@ DELETE /projects/{project_id}/scenes/{scene_id}      soft delete
 > restore re-materialises under the same `id`, never minting new ones).
 > Richer per-scene aggregates (prompt, voice, camera, assets) are deferred.
 > See `docs/domain/SCENE_AGGREGATE.md`.
+
+#### 3.2.2 Prompts (Phase 3 α6.1)
+
+```
+POST   /projects/{project_id}/prompts                create
+GET    /projects/{project_id}/prompts                list (newest-first, filters: ?kind= ?scene_id=)
+GET    /projects/{project_id}/prompts/{prompt_id}
+PATCH  /projects/{project_id}/prompts/{prompt_id}    partial content update (no version fence)
+DELETE /projects/{project_id}/prompts/{prompt_id}    soft delete
+```
+
+> **Shipped in Phase 3 α6.1 (Prompt CRUD).** A prompt is a **generation
+> input** — authored text (`kind` + `text_content`) that later drives media
+> generation — owned by a project and *optionally* linked to a scene. Prompts
+> are nested under a project and run the same **two-level visibility gate** as
+> scenes: the caller must own the live project (else uniform `404 NOT_FOUND`),
+> then the prompt must live under it (else the same `404`).
+>
+> **Prompts are NOT versioned editorial content (ADR-0036).** They have **no
+> `version` column**, do **not** participate in optimistic concurrency, and are
+> **excluded** from `project_versions` snapshots / restore / diff. A `PATCH` is
+> therefore **last-writer-wins** — there is no `version` on the wire and no
+> `412`. Mutating a prompt does **not** bump `projects.version`. This keeps the
+> versioned aggregate = {project root + scenes}; generation inputs (prompts,
+> and later media/timeline) have their own lifecycle.
+>
+> * **`POST …/prompts`** — body `{ kind, text_content, scene_id?, model_id?,
+>   extra? }`. `kind` is required and validated against the `prompt_kind` enum
+>   (`image, video, animation, negative, camera, motion, lighting, style` —
+>   modality kinds, **not** chat roles); `text_content` is required
+>   (`1 ≤ len ≤ 10000`, whitespace-stripped). `scene_id` is optional — when
+>   present it must reference a **live scene in the same project** (else `422
+>   VALIDATION_FAILED`, not `404` — the route project is fine, the *body* is
+>   invalid). `model_id` is optional — when present it must reference a live
+>   `ai_models` row that is not `retired` (else `422`). `extra` is a free-form
+>   JSON object (default `{}`). Identity + provenance are server-owned
+>   (`generated_by_agent` stays server-`NULL`; `extra="forbid"` → any
+>   non-declared key such as `id` / `generated_by_agent` is `422`). Returns
+>   `201` + `PromptPublic`.
+> * **`GET …/prompts`** — the project's live prompts, ordered **newest-first**
+>   (`created_at` desc, `id` desc). Optional `?kind=<enum>` and
+>   `?scene_id=<uuid>` filters narrow the result (combined = AND); a bad enum /
+>   non-UUID is `422`. Not paginated. Empty → `200 []`.
+> * **`GET …/prompts/{prompt_id}`** — one prompt (`200`), or the uniform `404`
+>   (unknown / another project / soft-deleted).
+> * **`PATCH …/prompts/{prompt_id}`** — partial, **content-only**, **no version
+>   fence**. Body = any subset of `{ text_content, kind, model_id, extra }`.
+>   Tri-state: absent = unchanged; explicit `null` clears the nullable
+>   `model_id` (a re-validated non-null `model_id` must be linkable → else
+>   `422`); `text_content` / `kind` are non-nullable (explicit `null` → `422`).
+>   `scene_id` is **immutable** (no re-parenting in α6.1) and **not** accepted
+>   (`extra="forbid"` → `422`). An empty patch → `422`. A same-value patch is a
+>   `200` no-op. Returns `200` + `PromptPublic`.
+> * **`DELETE …/prompts/{prompt_id}`** — owner-scoped **soft** delete (`204`),
+>   no version fence, idempotent **by-404** (a second delete — and any
+>   `GET`/`PATCH` after delete — is `404`; deleting another user's prompt or an
+>   unknown id is the same `404`).
+>
+> `PromptPublic` = `{ id, project_id, scene_id, kind, text_content, model_id,
+> extra, created_at, updated_at }` — **no `version`**; `generated_by_agent` and
+> `deleted_at` are server-internal and omitted. A prompt's `scene_id` link
+> **survives** a scene *soft-delete* and a version *restore* (the FK
+> `ON DELETE SET NULL` fires only on a hard scene delete, which the API never
+> performs). See `docs/domain/PROMPT_AGGREGATE.md` and
+> `docs/decisions/ADR-0036-prompts-generation-inputs.md`.
 
 ### 3.3 Project Versions (CR-6)
 
