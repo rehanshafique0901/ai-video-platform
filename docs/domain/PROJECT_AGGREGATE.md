@@ -247,7 +247,23 @@ must not be confused:
    **exactly one** — all in one transaction, fenced on the aggregate token
    (stale → `412`, no writes). Diff is computed **on demand** from two stored
    snapshots (coarse `project_changed` + scene `added` / `removed` / `modified`
-   counts; nothing persisted). Branch / autosave are α5d.3+.
+   counts; nothing persisted).
+   **Branch shipped in α5d.3 (fork to a new project):** a historical version can
+   be **forked** into a brand-new, independently-editable project (α5d.3 Q1
+   Option A; ADR-0035 D12). Branch does **not** touch the source — it creates a
+   fresh caller-owned aggregate seeded from the chosen snapshot (root fields +
+   scenes materialized with **freshly-minted** ids), whose `v1` is
+   `reason=branch` (`parent_version_id` NULL) and carries a structured
+   **`branched_from`** provenance block (`{ project_id, version_id,
+   version_number }` of the source) inside its snapshot. Because nothing on the
+   source is mutated, branch has **no OCC fence** and does **not** bump the
+   source `projects.version`; the new project's own `version` follows the normal
+   "created + first capture" arc → 2. Lineage stays self-contained per project:
+   the only cross-project link is the one-way `branched_from` breadcrumb (a
+   provenance record, never a live coupling). This is the only migration-free
+   reading of "branch" distinct from restore — a true in-project multi-head model
+   (a second live head, branch labels/switching/merge) would require a new table
+   and is deferred. Autosave / field-level diff are α5d.4+.
 
 **Do not conflate them:** the row `version` is a concurrency guard; the
 `project_versions` ledger is a user-facing history. A capture (and, later, a
@@ -286,7 +302,7 @@ Project (root)
  ├── Media Assets      media_assets.project_id          (α6) ← generated *from* scenes
  ├── Timeline          timelines.project_id (1:1)       (α6b) → Tracks → Clips → media_assets
  ├── Render Jobs       render_jobs.project_id           (α7)
- ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; branch α5d.3)
+ ├── Versions          project_versions.project_id      (α5d.1 capture+read; α5d.2 restore+diff; α5d.3 branch=fork-to-new-project via branched_from)
  ├── Tags              project_tags (join)              (later)
  └── Folder (parent)   folders.id  ← projects.folder_id (later move-to-folder)
 ```
@@ -316,3 +332,4 @@ model.
 | 2026-07-11 | **Corrected child-aggregate drift ahead of α5c (Scenes):** the boundary now reads *Project owns Storyboards, Storyboard owns Scenes* (`scenes.storyboard_id`, not the previously-listed `scenes.project_id`). §8 diagram redrawn with the `Project → Storyboard → Scene` hierarchy and the `Scene → Media Asset → Clip → Timeline` media-pipeline direction. See `docs/domain/SCENE_AGGREGATE.md` and `docs/engineering/PHASE3_ALPHA5C_PREFLIGHT.md` (D1/D4). |
 | 2026-07-12 | **§6 updated for α5d.1 (Project Versions capture + read):** the snapshot ledger is now shipped (capture / list / get). Documented the monotonic-numbering + lineage + canonical-snapshot + current-pointer-advance semantics and cross-referenced **ADR-0035**. §8 diagram: `Versions` marked α5d.1 (restore/branch α5d.2); `Prompts` re-marked *later* (α5d is versions, not prompts). |
 | 2026-07-12 | **§6 updated for α5d.2 (restore + diff):** added the **Aggregate OCC Rule** — `projects.version` is now the OCC token for the entire aggregate; scene create/update/move/delete each bump it (guarded against no-ops), and restore bumps it exactly once. Documented the restore-by-new-version + scene-reconcile + one-transaction semantics and the on-demand diff. Invariant #6 extended to child mutations. §8 diagram: `Versions` marked α5d.2 restore+diff (branch α5d.3). |
+| 2026-07-12 | **§6 updated for α5d.3 (branch = fork to a new project):** documented branch as a source-immutable fork into a new caller-owned aggregate (fresh scene ids, `reason=branch` v1, `parent_version_id` NULL) with a self-contained `branched_from` provenance breadcrumb (`{project_id, version_id, version_number}`); no OCC fence, no source version bump, new project's version follows the created + first-capture arc → 2. Recorded that an in-project multi-head model is deferred (needs a migration). §8 diagram: `Versions` marked α5d.3 branch. See **ADR-0035** D12. |

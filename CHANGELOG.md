@@ -6,6 +6,70 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α5d.3 — Project Version Branch (fork to a new project) (2026-07-12)
+
+Completes the versioning story: a historical snapshot can now be **branched** —
+forked into a **new, independently-editable project** (α5d.3 pre-flight Q1
+Option A). Unlike restore (which rewinds *this* project onto an old snapshot),
+branch leaves the source untouched and spins up a fresh aggregate seeded from
+the chosen version's content — the "fork this save into a new project"
+operation. This is the only migration-free reading of "branch" that is
+genuinely distinct from restore: the schema has a single `current_version_id`
+per project and per-project-unique `version_number`, so true in-project
+multi-head branches would need a new table (deferred). Provenance is preserved
+by a structured `branched_from` block (`{ project_id, version_id,
+version_number }` of the source) embedded in the new project's `v1` snapshot
+and echoed in the response `meta` — a one-way historical link, not a live
+coupling. No migration — `reason=branch` already exists in the enum and the fork
+reuses the α5d restore scene-materialization helpers and the guarded version-bump
+trigger. See `docs/domain/PROJECT_AGGREGATE.md` §6, **ADR-0035** (D12), and
+`docs/engineering/PHASE3_ALPHA5D3_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/versions/{version_id}/branch`**
+  (`CurrentUserDep`) — fork a snapshot into a new project. Body is `{ name }`
+  (the new project's name; every other root field, including the immutable
+  `aspect_ratio`, is inherited from the snapshot; `extra="forbid"` → `422`).
+  Two-level `404` gate (source project owned → version belongs to it) runs
+  **before** any write (anti-enumeration); a duplicate live project name for the
+  caller → `409 CONFLICT`. On success, creates a new caller-owned project,
+  materializes the snapshot scenes with **fresh** ids (ordered by
+  `scene_number`, full fat columns), captures the new project's `reason=branch`
+  `v1` (`parent_version_id` NULL) with a `branched_from` provenance block, and
+  advances the new project's `current_version_id` — all in **one transaction**.
+  There is **no OCC fence** and **no source `projects.version` bump** (the source
+  is not mutated). Returns `201` with the **new project** as `ProjectPublic`
+  (its `version` = 2, i.e. created + first capture) plus `meta.branched_from`.
+- **`IProjectVersionRepository.branch`** (+ real repo and fake) — inserts the new
+  project row (name-collision → `ConflictError` before any child write),
+  materializes scenes via the shared restore writer (`_scene_write_values`) with
+  fresh ids, captures `v1` via the canonical snapshot builder with an embedded
+  `branched_from` block, and advances the new project's pointer (guarded trigger
+  bumps its `version` to 2). The source aggregate is provably untouched.
+- **`BranchProjectVersion` use case** — runs the source project + version gates,
+  delegates to `versions.branch`, and re-raises `ConflictError` (→ `409`).
+  DTO `ProjectVersionBranchRequest` (`{ name }`, 1..200 chars, `extra="forbid"`);
+  reuses `ProjectPublic` for the response; provenance echoed via a new
+  `envelope(..., extra_meta=...)` helper param; container factory + `deps` alias
+  + router endpoint.
+- **Tests** — 5 branch use-case unit tests (happy fork + provenance, fresh scene
+  ids in order, source untouched, duplicate-name `409`, unowned/unknown `404`);
+  4 `ProjectVersionRepository.branch` integration tests (fork fidelity incl. fat
+  columns + decimal strings + fresh ids, source untouched, one-transaction
+  rollback on injected failure, duplicate-name `ConflictError`); 4 HTTP
+  integration tests (branch happy — asserting the new project is a first-class
+  project via follow-up GET project/scenes/`v1` — plus `422` / `404` / `409`).
+
+#### Documentation
+- `API_CONTRACT.md` §3.3 — branch documented as shipped; autosave + field-level
+  diff deferred to α5d.4+.
+- `PROJECT_AGGREGATE.md` §6/§8 + **ADR-0035** (D12) — branch = fork-to-new-project,
+  the `branched_from` lineage/provenance model, and the rejected alternatives
+  (in-project multi-head, restore-alias) recorded.
+
+#### Version
+- `0.4.10-phase3-alpha5d3-dev`.
+
 ### Phase 3 Slice α5d.2 — Project Version Restore + Diff (2026-07-12)
 
 Makes the version ledger *actionable*: a historical snapshot can be **restored**
