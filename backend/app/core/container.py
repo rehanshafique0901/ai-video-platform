@@ -37,6 +37,11 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.media.delete_media import DeleteMedia
+from app.application.use_cases.media.get_media import GetMedia
+from app.application.use_cases.media.list_media import ListMedia
+from app.application.use_cases.media.register_media import RegisterMedia
+from app.application.use_cases.media.update_media import UpdateMedia
 from app.application.use_cases.projects.create_project import CreateProject
 from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
@@ -384,3 +389,28 @@ def get_update_prompt_use_case() -> UpdatePrompt:
 
 def get_delete_prompt_use_case() -> DeletePrompt:
     return DeletePrompt(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α6.2 — Media register/CRUD)
+# ---------------------------------------------------------------------
+
+
+def get_register_media_use_case() -> RegisterMedia:
+    return RegisterMedia(uow=get_unit_of_work())
+
+
+def get_list_media_use_case() -> ListMedia:
+    return ListMedia(uow=get_unit_of_work())
+
+
+def get_get_media_use_case() -> GetMedia:
+    return GetMedia(uow=get_unit_of_work())
+
+
+def get_update_media_use_case() -> UpdateMedia:
+    return UpdateMedia(uow=get_unit_of_work())
+
+
+def get_delete_media_use_case() -> DeleteMedia:
+    return DeleteMedia(uow=get_unit_of_work())

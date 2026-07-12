@@ -22,6 +22,7 @@ from types import TracebackType
 from typing import Self
 
 from app.application.interfaces.repositories import (
+    IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -58,6 +59,7 @@ class IUnitOfWork(ABC):
     scenes: ISceneRepository  # α5c
     versions: IProjectVersionRepository  # α5d
     prompts: IPromptRepository  # α6.1
+    media: IMediaRepository  # α6.2
 
     async def __aenter__(self) -> Self:
         return self
