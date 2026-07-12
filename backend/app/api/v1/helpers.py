@@ -42,16 +42,28 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
-def meta(request: Request, *, next_cursor: str | None = None) -> dict[str, Any]:
+def meta(
+    request: Request,
+    *,
+    next_cursor: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the API_CONTRACT §1.1 ``meta`` block.
 
     Always carries ``request_id`` (from the request-id middleware);
     includes ``next_cursor`` only when provided, so a ``None`` cursor
-    means "last page" by omission.
+    means "last page" by omission. ``extra`` merges endpoint-specific
+    non-cursor meta keys (α5d.3 uses it for the branch ``branched_from``
+    provenance breadcrumb) — supplied keys are added verbatim and never
+    override ``request_id`` / ``next_cursor``.
     """
     block: dict[str, Any] = {"request_id": getattr(request.state, "request_id", "")}
     if next_cursor is not None:
         block["next_cursor"] = next_cursor
+    if extra:
+        for key, value in extra.items():
+            if key not in block:
+                block[key] = value
     return block
 
 
@@ -65,12 +77,22 @@ def _dump(data: Any) -> Any:
     return data
 
 
-def envelope(data: Any, request: Request, *, next_cursor: str | None = None) -> dict[str, Any]:
+def envelope(
+    data: Any,
+    request: Request,
+    *,
+    next_cursor: str | None = None,
+    extra_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Wrap ``data`` in the standard success envelope.
 
     ``data`` may be a Pydantic model, a list of models, or an
     already-JSON-serializable object (dict/list/primitive) — models are
     serialized via :func:`_dump`. Use ``next_cursor`` for paginated list
-    responses.
+    responses; ``extra_meta`` for endpoint-specific meta keys (α5d.3 branch
+    passes ``{"branched_from": {...}}``).
     """
-    return {"data": _dump(data), "meta": meta(request, next_cursor=next_cursor)}
+    return {
+        "data": _dump(data),
+        "meta": meta(request, next_cursor=next_cursor, extra=extra_meta),
+    }

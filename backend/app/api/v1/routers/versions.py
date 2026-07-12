@@ -28,6 +28,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
 from app.api.v1.deps import (
+    BranchProjectVersionDep,
     CreateProjectVersionDep,
     CurrentUserDep,
     DiffProjectVersionsDep,
@@ -36,7 +37,9 @@ from app.api.v1.deps import (
     RestoreProjectVersionDep,
 )
 from app.api.v1.helpers import client_ip, envelope
+from app.api.v1.schemas.projects import ProjectPublic
 from app.api.v1.schemas.versions import (
+    ProjectVersionBranchRequest,
     ProjectVersionCreateRequest,
     ProjectVersionDetail,
     ProjectVersionDiff,
@@ -44,7 +47,8 @@ from app.api.v1.schemas.versions import (
     ProjectVersionRestoreRequest,
     SceneChangeCounts,
 )
-from app.application.use_cases.versions.results import VersionDiffResult
+from app.application.use_cases.versions.results import VersionBranchResult, VersionDiffResult
+from app.domain.projects.project import Project
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 router = APIRouter(prefix="/projects/{project_id}/versions", tags=["versions"])
@@ -80,6 +84,46 @@ def _to_detail(version: ProjectVersion, current_version_id: UUID | None) -> Proj
         snapshot=version.snapshot,
         diff_summary=version.diff_summary,
     )
+
+
+def _project_to_public(project: Project) -> ProjectPublic:
+    """Project a domain ``Project`` into ``ProjectPublic`` (α5d.3 branch response).
+
+    Mirrors ``routers/projects._to_public`` — the branch endpoint returns the
+    NEW project as a first-class ``ProjectPublic`` (Q6), so the client can
+    navigate straight to it. Kept local (a small, stable projection) rather
+    than importing another router's private helper, keeping the routers
+    decoupled.
+    """
+    return ProjectPublic(
+        id=project.id,
+        tenant_id=project.tenant_id,
+        owner_user_id=project.owner_user_id,
+        folder_id=project.folder_id,
+        name=project.name,
+        description=project.description,
+        aspect_ratio=project.aspect_ratio,
+        language=project.language,
+        style=project.style,
+        settings=project.settings,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+        version=project.version,
+    )
+
+
+def _branched_from(result: VersionBranchResult) -> dict[str, object]:
+    """Build the ``branched_from`` provenance breadcrumb (Q3/Q7).
+
+    The same structured block persisted inside the new project's v1 snapshot,
+    echoed into the branch response ``meta`` so a client learns the origin
+    without a second fetch.
+    """
+    return {
+        "project_id": str(result.source_project_id),
+        "version_id": str(result.source_version_id),
+        "version_number": result.source_version_number,
+    }
 
 
 def _to_diff(result: VersionDiffResult) -> ProjectVersionDiff:
@@ -227,3 +271,40 @@ async def diff_versions(
         tenant_id=current_user.tenant_id,
     )
     return JSONResponse(content=envelope(_to_diff(result), request))
+
+
+@router.post("/{version_id}/branch", status_code=status.HTTP_201_CREATED)
+async def branch_version(
+    project_id: UUID,
+    version_id: UUID,
+    body: ProjectVersionBranchRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: BranchProjectVersionDep,
+) -> JSONResponse:
+    """Fork a historical snapshot into a new independent project (α5d.3).
+
+    Creates a brand-new project owned by the caller, seeded from the chosen
+    version's snapshot (root fields + scenes with fresh ids), whose ``v1`` is
+    ``reason=branch`` and records a ``branched_from`` provenance block. The
+    **source project is untouched** (no OCC fence). Returns ``201`` with the
+    NEW project as ``ProjectPublic`` (Q6) plus ``meta.branched_from`` (Q7).
+    ``404`` source project/version gate (two-level, anti-enumeration); ``409``
+    if the caller already has a live project with ``name``; ``422`` bad body.
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        version_id=version_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        name=body.name,
+        ip=client_ip(request),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content=envelope(
+            _project_to_public(result.project),
+            request,
+            extra_meta={"branched_from": _branched_from(result)},
+        ),
+    )

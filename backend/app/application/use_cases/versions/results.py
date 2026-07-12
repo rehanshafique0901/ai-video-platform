@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.domain.projects.project import Project
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
 
 
@@ -51,3 +52,22 @@ class VersionDiffResult:
     scenes_added: int
     scenes_removed: int
     scenes_modified: int
+
+
+@dataclass(frozen=True, slots=True)
+class VersionBranchResult:
+    """Outcome of a successful ``BranchProjectVersion.execute`` — α5d.3.
+
+    ``project`` is the **new** independent project forked from the source
+    version's snapshot (its ``version`` reflects the post-branch OCC token, so
+    the router's ``ProjectPublic`` reports the correct handle). The ``source_*``
+    fields carry the provenance breadcrumb the router echoes into the response
+    ``meta.branched_from`` (Q7) — the same block persisted inside the new
+    project's v1 snapshot. The two projects are independent after the fork;
+    ``branched_from`` is a one-way historical link, not a live coupling.
+    """
+
+    project: Project
+    source_project_id: UUID
+    source_version_id: UUID
+    source_version_number: int

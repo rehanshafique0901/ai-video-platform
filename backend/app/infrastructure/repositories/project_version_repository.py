@@ -36,9 +36,12 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.interfaces.repositories import IProjectVersionRepository
+from app.core.errors import ConflictError
+from app.domain.projects.project import Project as ProjectEntity
 from app.domain.versions.project_version import (
     ProjectVersion as ProjectVersionEntity,
     ProjectVersionSummary,
@@ -50,6 +53,16 @@ from app.infrastructure.db.models.projects import (
 from app.infrastructure.db.models.scenes import (
     Scene as SceneRow,
     Storyboard as StoryboardRow,
+)
+
+# Reused from the sibling projects adapter so the ``branch`` fork returns a
+# faithfully-converted domain ``Project`` (incl. the ``Numeric`` →​ ``float``
+# duration coercion) without re-implementing the row→entity mapping or the
+# psycopg constraint-name extraction. Aliased to avoid clashing with THIS
+# module's ``_row_to_entity`` (which maps a ``project_versions`` row).
+from app.infrastructure.repositories.project_repository import (
+    _extract_constraint_name,
+    _row_to_entity as _project_row_to_entity,
 )
 
 # Bump when the snapshot BODY shape changes (new/removed fields, restructured
@@ -365,6 +378,96 @@ class ProjectVersionRepository(IProjectVersionRepository):
 
         await self._session.refresh(row)
         return _row_to_entity(row)
+
+    # ---- α5d.3: branch (fork to a new independent project) --------------
+
+    async def branch(
+        self,
+        *,
+        source_project_id: UUID,
+        source_version_id: UUID,
+        source_version_number: int,
+        source_snapshot: dict[str, Any],
+        new_project_name: str,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> tuple[ProjectEntity, ProjectVersionEntity]:
+        snap_project: dict[str, Any] = source_snapshot["project"]
+        snap_scenes: list[dict[str, Any]] = source_snapshot.get("scenes", [])
+
+        # 1. Create the new project row from the source snapshot's mutable root
+        #    (name ← caller; aspect_ratio carried verbatim — it is immutable but
+        #    a fork legitimately seeds it). Owned by the caller. A live-name
+        #    collision → ConflictError BEFORE any child write (§6, no debris).
+        new_project = ProjectRow(
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            name=new_project_name,
+            description=snap_project["description"],
+            aspect_ratio=snap_project["aspect_ratio"],
+            duration_seconds=_to_numeric(snap_project["duration_seconds"]),
+            language=snap_project["language"],
+            style=snap_project["style"],
+            settings=snap_project["settings"],
+        )
+        self._session.add(new_project)
+        try:
+            await self._session.flush()
+        except IntegrityError as e:
+            # ``uq_projects_tenant_id_owner_user_id_name`` (live rows) → 409,
+            # identical to ``ProjectRepository.add`` (α5b D9).
+            raise ConflictError(
+                "project already exists",
+                details={"constraint": _extract_constraint_name(e) or "unknown"},
+            ) from e
+        new_project_id = new_project.id
+
+        # 2. Default storyboard for the new project, then materialize the
+        #    snapshot scenes with FRESH ids (Q5), ordered by scene_number, with
+        #    the full fat column set (reuses the restore writer for round-trip
+        #    fidelity). ``id`` is intentionally NOT passed → DB mints a new UUID.
+        storyboard = StoryboardRow(project_id=new_project_id, generated_by="system")
+        self._session.add(storyboard)
+        await self._session.flush()
+        for s in sorted(snap_scenes, key=lambda d: d["scene_number"]):
+            self._session.add(SceneRow(storyboard_id=storyboard.id, **_scene_write_values(s)))
+        await self._session.flush()
+
+        # 3. Seed the ledger: capture v1 (reason=branch) from the now-live new
+        #    project + scenes via the canonical builder, embedding structured
+        #    provenance. parent_version_id stays NULL (fresh root, Q3/R1).
+        await self._session.refresh(new_project)
+        scenes = await self._live_scenes(storyboard.id)
+        snapshot = _build_snapshot(new_project, storyboard, scenes)
+        snapshot["branched_from"] = {
+            "project_id": str(source_project_id),
+            "version_id": str(source_version_id),
+            "version_number": source_version_number,
+        }
+        row = ProjectVersionRow(
+            project_id=new_project_id,
+            version_number=1,
+            parent_version_id=None,
+            created_by_user_id=owner_user_id,
+            reason="branch",
+            snapshot=snapshot,
+            diff_summary=None,
+        )
+        self._session.add(row)
+        await self._session.flush()
+
+        # 4. Advance the new project's current pointer → v1. This UPDATE does
+        #    NOT set ``version``, so the guarded trigger bumps it (1 → 2), the
+        #    same "created + first capture" arc every project follows (α5d Q6).
+        await self._session.execute(
+            update(ProjectRow)
+            .where(ProjectRow.id == new_project_id)
+            .values(current_version_id=row.id)
+        )
+
+        await self._session.refresh(new_project)
+        await self._session.refresh(row)
+        return _project_row_to_entity(new_project), _row_to_entity(row)
 
 
 def _num(value: Decimal | float | None) -> str | None:

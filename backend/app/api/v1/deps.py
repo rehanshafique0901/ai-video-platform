@@ -51,6 +51,7 @@ from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
+from app.application.use_cases.versions.branch_version import BranchProjectVersion
 from app.application.use_cases.versions.create_version import CreateProjectVersion
 from app.application.use_cases.versions.diff_versions import DiffProjectVersions
 from app.application.use_cases.versions.get_version import GetProjectVersion
@@ -134,6 +135,12 @@ RestoreProjectVersionDep = Annotated[
 ]
 DiffProjectVersionsDep = Annotated[
     DiffProjectVersions, Depends(container.get_diff_project_versions_use_case)
+]
+
+# ---- Use-case dependencies (Slice α5d.3 — branch / fork) --------------
+
+BranchProjectVersionDep = Annotated[
+    BranchProjectVersion, Depends(container.get_branch_project_version_use_case)
 ]
 
 

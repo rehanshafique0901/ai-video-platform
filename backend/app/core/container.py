@@ -49,6 +49,7 @@ from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
 from app.application.use_cases.users.update_profile import UpdateUserProfile
+from app.application.use_cases.versions.branch_version import BranchProjectVersion
 from app.application.use_cases.versions.create_version import CreateProjectVersion
 from app.application.use_cases.versions.diff_versions import DiffProjectVersions
 from app.application.use_cases.versions.get_version import GetProjectVersion
@@ -344,3 +345,12 @@ def get_restore_project_version_use_case() -> RestoreProjectVersion:
 
 def get_diff_project_versions_use_case() -> DiffProjectVersions:
     return DiffProjectVersions(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α5d.3 — Project Version branch / fork)
+# ---------------------------------------------------------------------
+
+
+def get_branch_project_version_use_case() -> BranchProjectVersion:
+    return BranchProjectVersion(uow=get_unit_of_work())

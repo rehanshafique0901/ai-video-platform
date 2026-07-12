@@ -687,6 +687,58 @@ class IProjectVersionRepository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def branch(
+        self,
+        *,
+        source_project_id: UUID,
+        source_version_id: UUID,
+        source_version_number: int,
+        source_snapshot: dict[str, Any],
+        new_project_name: str,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+    ) -> tuple[Project, ProjectVersion]:
+        """Fork ``source_snapshot`` into a **new independent project** — α5d.3.
+
+        One transaction, all-or-nothing (α5d.3 pre-flight §3, Q1 Option A). The
+        source project/version were already fetched + ownership-gated by the use
+        case (``projects.get_owned`` + ``versions.get_owned`` → 404); branch
+        does **not** touch the source (no OCC fence — the source snapshot is
+        immutable), it only *reads* ``source_snapshot`` and *creates* a fresh
+        aggregate owned by the caller:
+
+        1. **Create the new project row** — mutable root columns
+           (``name`` ← ``new_project_name``, ``description`` /
+           ``duration_seconds`` / ``language`` / ``style`` / ``settings`` /
+           ``aspect_ratio``) copied from ``source_snapshot['project']``,
+           ``current_version_id = NULL``, ``version`` server-default ``1``. A
+           live-name collision for this ``(tenant, owner)`` violates
+           ``uq_projects_tenant_id_owner_user_id_name`` → ``ConflictError``
+           (the use case maps it to ``409``); raised **before** any child rows
+           so a rejected branch leaves no debris (§6).
+        2. **Materialize scenes** — create the new project's default storyboard,
+           then insert each snapshot scene ordered by ``scene_number`` with the
+           full **fat** column set (reuses the restore writer), assigning
+           **fresh** scene ``id``s (Q5: a new project is a new identity space).
+        3. **Seed the ledger** — capture the new project's ``version_number = 1``
+           ``reason=branch`` version via the canonical snapshot builder, with a
+           structured ``branched_from`` provenance block
+           (``{project_id, version_id, version_number}`` of the source, Q3)
+           embedded in the snapshot; ``parent_version_id = NULL`` (fresh root).
+        4. **Advance the pointer** — set the new project's
+           ``current_version_id`` → the v1 row (the guarded row trigger bumps
+           the new project's ``version`` to ``2``, exactly like any project's
+           first capture — α5d Q6).
+
+        Returns ``(new_project, new_v1)`` — both refreshed to their post-commit
+        DB state (the project's ``version`` reflects the pointer-advance bump, so
+        the caller's ``ProjectPublic`` reports the correct OCC token). The source
+        aggregate is provably unchanged (§4/R... — asserted by the integration
+        suite).
+        """
+        ...
+
 
 class IRoleRepository(ABC):
     """Persistence surface for ``roles`` + ``roles_users`` join.
