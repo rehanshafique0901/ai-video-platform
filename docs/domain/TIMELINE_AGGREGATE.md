@@ -89,6 +89,31 @@ The domain `Track` is a slim, frozen view of the `tracks` row:
 - `name` — free text, `NOT NULL`. **Mutable.**
 - `created_at` / `updated_at` — timestamps; `updated_at` is trigger-owned.
 
+### 2.2b The child — `Clip` (α6.3b, no version of its own)
+
+The domain `Clip` is a slim, frozen view of the `clips` row — the third tier of
+the aggregate, a **child of a `Track`** (which is itself a child of the timeline):
+
+- `id` — durable UUID, server-minted.
+- `track_id` — the parent link (`ON DELETE CASCADE`). **Immutable** in α6.3b — a
+  cross-track move is modelled as delete + recreate (pre-flight Q4).
+- `media_asset_id` — optional link to a **live media asset the caller owns**;
+  validated on create and on any PATCH that sets it (else `422`). An explicit
+  `null` on PATCH **unlinks**. **Mutable.**
+- `start_seconds` / `end_seconds` — the clip's placement on the track timeline;
+  `end_seconds > start_seconds` (DB CHECK + DTO). Overlaps between clips are
+  **allowed** (pre-flight Q6). **Mutable.**
+- `source_start_seconds` / `source_end_seconds` — the trim window into the source
+  asset; `source_end_seconds ≥ source_start_seconds` (default `0`). **Mutable.**
+- `volume` — playback gain `0–4`, server-default `1`. **Mutable.**
+- `locked` — clip flag, server-default `false`. **Mutable.**
+- `transition_in_id` / `transition_out_id` / `effects` — **read-only** in α6.3b
+  (write paths deferred to α6.4); surfaced as-persisted (`effects` defaults `[]`).
+- `created_at` / `updated_at` — timestamps; `updated_at` is trigger-owned.
+
+Clips are ordered by `start_seconds` ASC (`id` ASC tiebreak) and embedded into
+`TrackPublic.clips[]` in composition reads (`GET …/timeline`, `GET …/tracks`).
+
 ### 2.3 The defining fact: only the root carries `version`
 
 `Timeline` is `UUIDPrimaryKeyMixin + TimestampMixin + SoftDeleteMixin +
@@ -220,12 +245,13 @@ Timeline lifecycle events are logged with identifiers + field names only:
 
 ---
 
-## 8. Open evolution (explicitly out of α6.3a)
+## 8. Open evolution (explicitly out of α6.3)
 
-- **Clips (α6.3b).** `clips.media_asset_id` places a registered asset on a track;
-  clip create/update/delete fences on / bumps the same `timelines.version`.
-  Validation covers a valid media link (`422`), non-negative start, positive
-  duration. **Overlaps allowed** (Q6) — editorial constraints deferred.
+- **Clips (α6.3b) — shipped.** `clips.media_asset_id` places a registered asset on
+  a track; clip create/update/delete fences on / bumps the same
+  `timelines.version`. Validation covers a valid media link (`422`), non-negative
+  start, `end > start`, `source_end ≥ source_start`. **Overlaps allowed** (Q6);
+  `track_id` immutable (Q4); `effects` / transitions read-only (write → α6.4).
 - **Editorial rules.** Snapping / ripple / trim / split / magnetic timeline /
   grouping — later phases; not enforced at the schema/API level in α6.3.
 - **Transitions.** `clips.transition_in_id` / `transition_out_id` exist in
@@ -242,3 +268,4 @@ Timeline lifecycle events are logged with identifiers + field names only:
 | Date | Change |
 |---|---|
 | 2026-07-13 | Initial authoring for Phase 3 α6.3a (Timeline + Tracks). Establishes the composition-layer identity, derived (project-scoped) ownership + two-level visibility gate, explicit non-lazy provision (second → 409), client-assigned `z_index` uniqueness (→ 409), the self-contained OCC aggregate model (`timelines.version` as the single token; root fenced CAS; child roll-up via `bump_version`; child-POST version optional, child-PATCH/DELETE required; 404-before-412), exclusion from the project version ledger (no `projects.version` bump, no snapshot), and the lifecycle. Adopts ADR-0038 (which adopts ADR-0035). Clips are α6.3b. |
+| 2026-07-14 | Phase 3 α6.3b (Clips). Adds the third aggregate tier — `Clip` (child of a track, no `version`), fenced by the same `timelines.version`. Nested clip CRUD under `…/tracks/{track_id}/clips`; `media_asset_id` ownership validation (`422`); `end > start` + `source_end ≥ source_start` (incl. merged-range check on PATCH); ordered by `start_seconds` (`id` tiebreak); overlaps allowed; `track_id` immutable (Q4); `effects`/transitions read-only (write → α6.4); `duration_seconds` stays client-controlled (Q5). Clips embedded in `TrackPublic.clips[]` on composition reads. Idempotent-by-404 soft delete; 404-before-412. |

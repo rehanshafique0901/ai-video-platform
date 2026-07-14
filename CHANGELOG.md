@@ -6,6 +6,81 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α6.3b — Timeline Aggregate (clips) (2026-07-14)
+
+Completes the **Timeline aggregate** (Timeline → Tracks → **Clips**) by placing
+registered media (α6.2) onto tracks (α6.3a) as time-bounded **clips**, backed by
+the existing baseline `clips` table (no migration — the table, its FKs, and the
+`start_seconds` / `end_seconds` / `volume` CHECKs already exist). Clips are pure
+**children of the Timeline aggregate** (α6.3 pre-flight Q13, **ADR-0038**): they
+carry **no `version`** column, so **`timelines.version` remains the single OCC
+token** for the whole tree. A clip write fences on / bumps `timelines.version`
+and never touches `projects.version` (adopts ADR-0035). `track_id` is
+**immutable** in this slice (α6.3b pre-flight Q4 — a cross-track move is a
+delete + recreate); `effects` is **read-only** (write path deferred to α6.4,
+Q1); clip **overlaps are allowed** (α6.3 Q6); timeline `duration_seconds` stays
+**client-controlled** (no auto-growth from clips, Q5). See
+`docs/engineering/PHASE3_ALPHA6_3B_PREFLIGHT.md`.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips`** —
+  append a clip. Body `{ media_asset_id?, start_seconds, end_seconds,
+  source_start_seconds?, source_end_seconds?, volume?, locked?, version? }`;
+  `end_seconds > start_seconds` and `source_end_seconds ≥ source_start_seconds`
+  (else `422`); `volume` `0–4`. `media_asset_id`, when set, must reference a
+  **live media asset you own** (else `422`, Q… link validation). `version` is
+  **optional** (a child create cannot be harmfully stale): omitted → bumps
+  `timelines.version` unconditionally; supplied → fence (stale → `412`). Returns
+  `201` + `ClipPublic` (**no `version`**) with the token in `meta.timeline_version`.
+  Unknown project / timeline / track → `404`.
+- **`GET  …/tracks/{track_id}/clips`** — the track's live clips ordered by
+  `start_seconds` ASC (`id` ASC tiebreak); token in `meta.timeline_version`.
+- **`GET  …/tracks/{track_id}/clips/{clip_id}`** — one live clip. Four-level gate
+  (project → timeline → track → clip); any miss → `404`; cross-track → `404`.
+- **`PATCH …/tracks/{track_id}/clips/{clip_id}`** — required `version` (the
+  **timeline's**); body any subset of `{ media_asset_id, start_seconds,
+  end_seconds, source_start_seconds, source_end_seconds, volume, locked }`.
+  `media_asset_id` re-validated when present (explicit `null` unlinks); the
+  **merged** time range is validated against stored values (else `422`) so an
+  invalid state never reaches the DB CHECK. Bumps the token; `412` on stale;
+  `200` no-op on same-value; empty patch → `422`. 404-before-412.
+- **`DELETE …/tracks/{track_id}/clips/{clip_id}?version=<n>`** — required
+  `?version=`; soft-deletes, bumps the token; `204`. **Idempotent-by-404**
+  (repeat delete → `404`, not `412`, Q3).
+- **Domain** `app/domain/timeline/clip.py` (frozen `Clip`, **no** `version`;
+  `effects: list[Any]` read-only).
+- **`ITimelineRepository`** + `TimelineRepository` — `add_clip`, `list_clips`,
+  `list_clips_for_timeline` (grouped by `track_id` for composition reads),
+  `get_clip`, `update_clip`, `soft_delete_clip`. Mirrored on `FakeTimelineRepository`.
+- **Use cases** `app/application/use_cases/timeline/` — `CreateClip`, `ListClips`,
+  `GetClip`, `UpdateClip`, `DeleteClip` (+ `ClipResult` / `ClipListResult`, and
+  `TimelineResult.clips_by_track`). `_links.validate_clip_media_link` re-uses the
+  media aggregate's `get_owned`. None call `IProjectRepository.touch_version`.
+- **DTOs** `app/api/v1/schemas/timeline.py` — `ClipCreateRequest`,
+  `ClipUpdateRequest`, `ClipPublic` (no `version`; `extra="forbid"`; cross-field
+  range checks); `TrackPublic.clips[]` now embeds `ClipPublic` (ordered) in
+  composition reads (`GET …/timeline`, `GET …/tracks`); container factories +
+  `deps` aliases + 5 nested routes on `routers/timeline.py`.
+- **Tests** — unit matrix for the 5 clip use cases (create with optional-fence /
+  valid+unknown media / stale→412 / 404s; list ordering + isolation; get 4-level
+  gate + cross-track→404; update incl. relink / unlink / merged-range→422 /
+  stale→412; delete idempotent-by-404 + 404-before-412); repository integration
+  (R11–R15: ordered listing excl. soft-deleted, `id` tiebreak, track isolation,
+  real-change update, idempotent soft delete, grouped `list_clips_for_timeline`);
+  HTTP integration `test_timeline.py` (A17–A26: 201/200/204/404/412/422,
+  media validation, stale fence, composition-tree embedding).
+
+#### Documentation
+- `docs/engineering/PHASE3_ALPHA6_3B_PREFLIGHT.md` (new) — the five resolved
+  open questions and the approved slice scope.
+- `docs/domain/TIMELINE_AGGREGATE.md` — clips documented as the third tier of the
+  aggregate (children, no `version`, `media_asset_id` validation, immutable
+  `track_id`, read-only `effects`).
+- `API_CONTRACT.md` §3.2.4 — the five clip endpoints + `TrackPublic.clips[]`.
+
+#### Version
+- `0.4.14-phase3-alpha6.3b-dev`.
+
 ### Phase 3 Slice α6.3a — Timeline Aggregate (root + tracks) (2026-07-13)
 
 Introduces the **Timeline aggregate** — the *composition layer* that places

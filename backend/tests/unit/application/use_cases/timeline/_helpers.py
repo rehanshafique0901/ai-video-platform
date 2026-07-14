@@ -15,10 +15,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
+from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
 from app.domain.timeline.track import Track
 from tests.unit.application.use_cases.auth._fakes import (
+    FakeMediaRepository,
     FakeProjectRepository,
     FakeTimelineRepository,
     FakeUnitOfWork,
@@ -62,13 +65,14 @@ class Env:
     uow: FakeUnitOfWork
     projects: FakeProjectRepository
     timeline: FakeTimelineRepository
+    media: FakeMediaRepository
     owner_user_id: UUID
     tenant_id: UUID
     project_id: UUID
 
 
 def build_env(*, aspect_ratio: str = "horizontal") -> Env:
-    """Wire a UoW with one owned live project + an empty timeline repo."""
+    """Wire a UoW with one owned live project + empty timeline & media repos."""
     owner_user_id = uuid4()
     tenant_id = uuid4()
     project = make_project(
@@ -76,11 +80,13 @@ def build_env(*, aspect_ratio: str = "horizontal") -> Env:
     )
     projects = FakeProjectRepository(_rows={project.id: project})
     timeline = FakeTimelineRepository()
-    uow = FakeUnitOfWork(projects=projects, timeline=timeline)
+    media = FakeMediaRepository()
+    uow = FakeUnitOfWork(projects=projects, timeline=timeline, media=media)
     return Env(
         uow=uow,
         projects=projects,
         timeline=timeline,
+        media=media,
         owner_user_id=owner_user_id,
         tenant_id=tenant_id,
         project_id=project.id,
@@ -121,4 +127,54 @@ async def seed_track(
         name=name,
         locked=locked,
         muted=muted,
+    )
+
+
+async def seed_clip(
+    env: Env,
+    track: Track,
+    *,
+    media_asset_id: UUID | None = None,
+    start_seconds: float = 0.0,
+    end_seconds: float = 5.0,
+    source_start_seconds: float = 0.0,
+    source_end_seconds: float = 0.0,
+    volume: float = 1.0,
+    locked: bool = False,
+) -> Clip:
+    """Append one clip to ``track`` (bypassing the use case)."""
+    return await env.timeline.add_clip(
+        track_id=track.id,
+        media_asset_id=media_asset_id,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        source_start_seconds=source_start_seconds,
+        source_end_seconds=source_end_seconds,
+        volume=volume,
+        locked=locked,
+    )
+
+
+async def seed_media_asset(env: Env, *, kind: str = "video") -> MediaAsset:
+    """Register one owned media asset for ``env`` (bypassing the use case)."""
+    return await env.media.add(
+        tenant_id=env.tenant_id,
+        owner_user_id=env.owner_user_id,
+        kind=kind,
+        source="upload",
+        storage_backend="s3",
+        storage_bucket="assets",
+        storage_key=f"clips/{uuid4().hex}.mp4",
+        mime_type="video/mp4",
+        size_bytes=1024,
+        checksum_sha256=b"\x00" * 32,
+        project_id=None,
+        scene_id=None,
+        prompt_id=None,
+        model_id=None,
+        provider=None,
+        width=1920,
+        height=1080,
+        duration_seconds=5.0,
+        source_metadata={},
     )

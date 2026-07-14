@@ -22,6 +22,13 @@ Coverage map (α6.3 pre-flight §5.2):
 * R9 — ``update_track`` real change; z_index collision → ``ConflictError`` (409).
 * R10 — ``soft_delete_track`` happy / already-deleted → ``True`` / ``False``;
   frees the z_index slot for re-insert.
+* R11 — ``add_clip`` + ``list_clips`` ordered by ``start_seconds`` ASC (``id``
+  tiebreak), excludes soft-deleted.
+* R12 — ``get_clip`` track isolation → ``None``.
+* R13 — ``update_clip`` real change; concurrent-delete → ``None``.
+* R14 — ``soft_delete_clip`` happy / already-deleted → ``True`` / ``False``.
+* R15 — ``list_clips_for_timeline`` groups by track; excludes soft-deleted
+  clips/tracks.
 """
 
 from __future__ import annotations
@@ -75,6 +82,38 @@ async def _add_timeline(repo: TimelineRepository, project_id: UUID) -> TimelineE
         frame_rate=30,
         background_color="#000000",
     )
+
+
+async def _add_track(repo: TimelineRepository, timeline_id: UUID, *, z_index: int = 0) -> UUID:
+    track = await repo.add_track(
+        timeline_id=timeline_id,
+        kind="video",
+        z_index=z_index,
+        name=f"t{z_index}",
+        locked=False,
+        muted=False,
+    )
+    return track.id
+
+
+async def _add_clip(
+    repo: TimelineRepository,
+    track_id: UUID,
+    *,
+    start_seconds: float = 0.0,
+    end_seconds: float = 5.0,
+) -> UUID:
+    clip = await repo.add_clip(
+        track_id=track_id,
+        media_asset_id=None,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        source_start_seconds=0.0,
+        source_end_seconds=0.0,
+        volume=1.0,
+        locked=False,
+    )
+    return clip.id
 
 
 # ---- R1 — add + duplicate → 409 --------------------------------------
@@ -321,3 +360,125 @@ async def test_r10_soft_delete_idempotent_frees_slot(session: AsyncSession) -> N
     )
     assert reused.z_index == 0
     assert reused.id != track.id
+
+
+# ---- R11 — add_clip + list_clips ordered, excludes soft-deleted ------
+
+
+@pytest.mark.integration
+async def test_r11_list_clips_ordered_excludes_soft_deleted(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_id = await _add_track(repo, timeline.id)
+
+    late = await _add_clip(repo, track_id, start_seconds=10.0, end_seconds=12.0)
+    early = await _add_clip(repo, track_id, start_seconds=0.0, end_seconds=5.0)
+    mid = await _add_clip(repo, track_id, start_seconds=5.0, end_seconds=7.0)
+
+    listed = await repo.list_clips(track_id)
+    assert [c.id for c in listed] == [early, mid, late]
+
+    await repo.soft_delete_clip(track_id, early)
+    listed = await repo.list_clips(track_id)
+    assert [c.id for c in listed] == [mid, late]
+
+
+# ---- R11b — equal start_seconds → id tiebreak (total order) ----------
+
+
+@pytest.mark.integration
+async def test_r11b_equal_start_seconds_id_tiebreak(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_id = await _add_track(repo, timeline.id)
+
+    a = await _add_clip(repo, track_id, start_seconds=3.0, end_seconds=4.0)
+    b = await _add_clip(repo, track_id, start_seconds=3.0, end_seconds=4.0)
+
+    listed = await repo.list_clips(track_id)
+    assert [c.id for c in listed] == sorted([a, b])
+
+
+# ---- R12 — get_clip track isolation → None ---------------------------
+
+
+@pytest.mark.integration
+async def test_r12_get_clip_track_isolation(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_id = await _add_track(repo, timeline.id, z_index=0)
+    other_track_id = await _add_track(repo, timeline.id, z_index=1)
+    clip_id = await _add_clip(repo, track_id)
+
+    assert (await repo.get_clip(track_id, clip_id)).id == clip_id
+    # Wrong track → None.
+    assert await repo.get_clip(other_track_id, clip_id) is None
+
+
+# ---- R13 — update_clip real change; concurrent delete → None ---------
+
+
+@pytest.mark.integration
+async def test_r13_update_clip_real_change(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_id = await _add_track(repo, timeline.id)
+    clip_id = await _add_clip(repo, track_id, start_seconds=0.0, end_seconds=5.0)
+
+    updated = await repo.update_clip(track_id, clip_id, {"volume": 2.5, "locked": True})
+    assert updated is not None
+    assert updated.volume == 2.5
+    assert updated.locked is True
+
+    # Soft-delete then update → None (no live row).
+    await repo.soft_delete_clip(track_id, clip_id)
+    assert await repo.update_clip(track_id, clip_id, {"volume": 3.0}) is None
+
+
+# ---- R14 — soft_delete_clip idempotency ------------------------------
+
+
+@pytest.mark.integration
+async def test_r14_soft_delete_clip_idempotent(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_id = await _add_track(repo, timeline.id)
+    clip_id = await _add_clip(repo, track_id)
+
+    assert await repo.soft_delete_clip(track_id, clip_id) is True
+    # Already deleted → False (idempotent).
+    assert await repo.soft_delete_clip(track_id, clip_id) is False
+    assert await repo.get_clip(track_id, clip_id) is None
+
+
+# ---- R15 — list_clips_for_timeline groups + excludes soft-deleted ----
+
+
+@pytest.mark.integration
+async def test_r15_list_clips_for_timeline_grouped(session: AsyncSession) -> None:
+    project_id = await _seed_project(session)
+    repo = TimelineRepository(session)
+    timeline = await _add_timeline(repo, project_id)
+    track_a = await _add_track(repo, timeline.id, z_index=0)
+    track_b = await _add_track(repo, timeline.id, z_index=1)
+
+    a1 = await _add_clip(repo, track_a, start_seconds=0.0, end_seconds=1.0)
+    a2 = await _add_clip(repo, track_a, start_seconds=2.0, end_seconds=3.0)
+    b1 = await _add_clip(repo, track_b, start_seconds=0.0, end_seconds=1.0)
+    gone = await _add_clip(repo, track_b, start_seconds=5.0, end_seconds=6.0)
+    await repo.soft_delete_clip(track_b, gone)
+
+    grouped = await repo.list_clips_for_timeline(timeline.id)
+    assert [c.id for c in grouped[track_a]] == [a1, a2]
+    assert [c.id for c in grouped[track_b]] == [b1]
+
+    # A soft-deleted track's clips are excluded entirely.
+    await repo.soft_delete_track(timeline.id, track_a)
+    grouped = await repo.list_clips_for_timeline(timeline.id)
+    assert track_a not in grouped
+    assert [c.id for c in grouped[track_b]] == [b1]

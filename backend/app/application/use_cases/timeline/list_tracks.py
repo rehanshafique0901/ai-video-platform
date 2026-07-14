@@ -8,9 +8,10 @@ Contract (API_CONTRACT §3.2.4):
       → 401  { error: { code: UNAUTHENTICATED, ... } }  (via CurrentUserDep)
 
 Two-level gate (project → timeline, both ``404``), then the timeline's live
-tracks ordered by ``z_index`` ASC. Returns the timeline too so the caller can
-surface the aggregate OCC token (``timelines.version``) for subsequent fenced
-writes. Read-only.
+tracks ordered by ``z_index`` ASC, each embedding its live clips ordered by
+``start_seconds`` (``clips_by_track``, α6.3b). Returns the timeline too so the
+caller can surface the aggregate OCC token (``timelines.version``) for subsequent
+fenced writes. Read-only.
 """
 
 from __future__ import annotations
@@ -55,4 +56,5 @@ class ListTracks:
                 )
 
             tracks = await self._uow.timeline.list_tracks(timeline.id)
-        return TimelineResult(timeline=timeline, tracks=tracks)
+            clips_by_track = await self._uow.timeline.list_clips_for_timeline(timeline.id)
+        return TimelineResult(timeline=timeline, tracks=tracks, clips_by_track=clips_by_track)

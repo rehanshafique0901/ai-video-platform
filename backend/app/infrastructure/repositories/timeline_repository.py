@@ -37,9 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.interfaces.repositories import ITimelineRepository
 from app.core.errors import ConflictError
+from app.domain.timeline.clip import Clip as ClipEntity
 from app.domain.timeline.timeline import Timeline as TimelineEntity
 from app.domain.timeline.track import Track as TrackEntity
-from app.infrastructure.db.models.timeline import Timeline as TimelineRow, Track as TrackRow
+from app.infrastructure.db.models.timeline import (
+    Clip as ClipRow,
+    Timeline as TimelineRow,
+    Track as TrackRow,
+)
 
 
 class TimelineRepository(ITimelineRepository):
@@ -227,6 +232,114 @@ class TimelineRepository(ITimelineRepository):
         marked = (await self._session.execute(stmt)).scalar_one_or_none()
         return marked is not None
 
+    # ---- clips (α6.3b) -------------------------------------------------
+
+    async def add_clip(
+        self,
+        *,
+        track_id: UUID,
+        media_asset_id: UUID | None,
+        start_seconds: float,
+        end_seconds: float,
+        source_start_seconds: float,
+        source_end_seconds: float,
+        volume: float,
+        locked: bool,
+    ) -> ClipEntity:
+        # No unique constraint on clips (overlaps allowed, Q6) — the only
+        # write-time failures are the CHECKs (start>=0, end>start, volume 0-4),
+        # which the DTO already enforces (→ 422), so a violation here would be a
+        # programming error, not a client fault. ``transition_*`` / ``effects``
+        # take server defaults (NULL / []); their write paths are deferred (D9).
+        # The use case validates ``media_asset_id`` (owned + live) before this.
+        row = ClipRow(
+            track_id=track_id,
+            media_asset_id=media_asset_id,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            source_start_seconds=source_start_seconds,
+            source_end_seconds=source_end_seconds,
+            volume=volume,
+            locked=locked,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _clip_to_entity(row)
+
+    async def list_clips(self, track_id: UUID) -> list[ClipEntity]:
+        stmt = (
+            select(ClipRow)
+            .where(ClipRow.track_id == track_id)
+            .where(ClipRow.deleted_at.is_(None))
+            .order_by(ClipRow.start_seconds.asc(), ClipRow.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_clip_to_entity(r) for r in rows]
+
+    async def list_clips_for_timeline(self, timeline_id: UUID) -> dict[UUID, list[ClipEntity]]:
+        # Single join query (clips → tracks) so the composition tree embeds each
+        # track's clips without an N+1 per-track fan-out. Grouped by track_id;
+        # tracks with no live clips are simply absent (caller defaults to []).
+        stmt = (
+            select(ClipRow)
+            .join(TrackRow, TrackRow.id == ClipRow.track_id)
+            .where(TrackRow.timeline_id == timeline_id)
+            .where(TrackRow.deleted_at.is_(None))
+            .where(ClipRow.deleted_at.is_(None))
+            .order_by(ClipRow.start_seconds.asc(), ClipRow.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        grouped: dict[UUID, list[ClipEntity]] = {}
+        for r in rows:
+            grouped.setdefault(r.track_id, []).append(_clip_to_entity(r))
+        return grouped
+
+    async def get_clip(self, track_id: UUID, clip_id: UUID) -> ClipEntity | None:
+        stmt = (
+            select(ClipRow)
+            .where(ClipRow.id == clip_id)
+            .where(ClipRow.track_id == track_id)
+            .where(ClipRow.deleted_at.is_(None))
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _clip_to_entity(row) if row is not None else None
+
+    async def update_clip(
+        self,
+        track_id: UUID,
+        clip_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> ClipEntity | None:
+        # No version fence (clips have no OCC column — the parent timeline's
+        # version is the aggregate token, bumped by the use case via
+        # ``bump_version``). ``track_id`` is immutable (no cross-track move, Q4).
+        # ``updated_at`` is trigger-owned. A None here means the row was
+        # soft-deleted between the visibility gate and the write → uniform 404.
+        assert changes, "update_clip requires at least one changed column"
+        upd = (
+            update(ClipRow)
+            .where(ClipRow.id == clip_id)
+            .where(ClipRow.track_id == track_id)
+            .where(ClipRow.deleted_at.is_(None))
+            .values(**changes)
+            .returning(ClipRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _clip_to_entity(row) if row is not None else None
+
+    async def soft_delete_clip(self, track_id: UUID, clip_id: UUID) -> bool:
+        stmt = (
+            update(ClipRow)
+            .where(ClipRow.id == clip_id)
+            .where(ClipRow.track_id == track_id)
+            .where(ClipRow.deleted_at.is_(None))
+            .values(deleted_at=func.now())
+            .returning(ClipRow.id)
+        )
+        marked = (await self._session.execute(stmt)).scalar_one_or_none()
+        return marked is not None
+
 
 def _timeline_to_entity(row: TimelineRow) -> TimelineEntity:
     return TimelineEntity(
@@ -254,6 +367,27 @@ def _track_to_entity(row: TrackRow) -> TrackEntity:
         locked=row.locked,
         muted=row.muted,
         name=row.name,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _clip_to_entity(row: ClipRow) -> ClipEntity:
+    return ClipEntity(
+        id=row.id,
+        track_id=row.track_id,
+        media_asset_id=row.media_asset_id,
+        # ``Numeric`` columns → psycopg returns ``Decimal``; the domain models
+        # the time/volume fields as ``float`` (same as ``timelines.duration``).
+        start_seconds=float(row.start_seconds),
+        end_seconds=float(row.end_seconds),
+        source_start_seconds=float(row.source_start_seconds),
+        source_end_seconds=float(row.source_end_seconds),
+        volume=float(row.volume),
+        locked=row.locked,
+        transition_in_id=row.transition_in_id,
+        transition_out_id=row.transition_out_id,
+        effects=list(row.effects),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

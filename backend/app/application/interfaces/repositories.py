@@ -38,6 +38,7 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
+from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
 from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
@@ -1040,6 +1041,102 @@ class ITimelineRepository(ABC):
         ``404`` (idempotent-by-404). Frees the ``z_index`` slot (the partial-unique
         index only covers live rows). The aggregate roll-up
         (:meth:`bump_version`) is the use case's job.
+        """
+        ...
+
+    # ---- clips (α6.3b) -------------------------------------------------
+
+    @abstractmethod
+    async def add_clip(
+        self,
+        *,
+        track_id: UUID,
+        media_asset_id: UUID | None,
+        start_seconds: float,
+        end_seconds: float,
+        source_start_seconds: float,
+        source_end_seconds: float,
+        volume: float,
+        locked: bool,
+    ) -> Clip:
+        """Insert a clip under ``track_id`` and return the persisted entity (α6.3b).
+
+        ``id`` / timestamps are DB-populated; ``transition_*`` / ``effects`` take
+        their server defaults (``NULL`` / ``[]``) — their write paths are deferred
+        to α6.4 (D9). ``media_asset_id`` link validity is the use case's job
+        (owned + live → ``422``, D4); this port only persists. Clips may overlap
+        and share ``start_seconds`` — there is no unique constraint (Q6). Does
+        **not** bump the timeline version — the use case calls
+        :meth:`bump_version` for the aggregate roll-up in the same transaction.
+        """
+        ...
+
+    @abstractmethod
+    async def list_clips(self, track_id: UUID) -> list[Clip]:
+        """Return the track's live clips ordered by ``start_seconds`` ASC, ``id`` ASC.
+
+        Read-only and side-effect-free. Soft-deleted clips are excluded. The
+        ``id`` tiebreak makes the order *total* (deterministic under equal
+        ``start_seconds``). Not paginated (a track's clip set is a bounded
+        editorial list).
+        """
+        ...
+
+    @abstractmethod
+    async def list_clips_for_timeline(self, timeline_id: UUID) -> dict[UUID, list[Clip]]:
+        """Return all live clips of the timeline's tracks, grouped by ``track_id``.
+
+        A single query (join ``clips`` → ``tracks``) so the composition tree
+        (``GET …/timeline`` / ``GET …/tracks``) embeds each track's clips without
+        an N+1 per-track fan-out. Each list is ordered ``start_seconds`` ASC,
+        ``id`` ASC; tracks with no live clips are simply absent from the mapping
+        (the caller defaults to ``[]``). Soft-deleted clips/tracks are excluded.
+        """
+        ...
+
+    @abstractmethod
+    async def get_clip(self, track_id: UUID, clip_id: UUID) -> Clip | None:
+        """Return the track's live clip with ``clip_id``, or ``None``.
+
+        ``None`` when the clip is missing, soft-deleted, or belongs to a different
+        track — deliberately indistinguishable so the route maps all of them to a
+        uniform ``404`` (mirroring α5c D6 / α6.3a ``get_track``).
+        """
+        ...
+
+    @abstractmethod
+    async def update_clip(
+        self,
+        track_id: UUID,
+        clip_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Clip | None:
+        """Partial update of the track's live clip (α6.3b).
+
+        Applies ``changes`` (mutable columns — ``media_asset_id`` /
+        ``start_seconds`` / ``end_seconds`` / ``source_start_seconds`` /
+        ``source_end_seconds`` / ``volume`` / ``locked``) to the row matching
+        ``clip_id`` + ``track_id`` + ``deleted_at IS NULL``. ``track_id`` is
+        immutable (no cross-track move, Q4). Clips have **no own version** — the
+        OCC fence is the parent timeline's, applied by the use case via
+        :meth:`bump_version` (ADR-0038). Returns the updated :class:`Clip`, or
+        ``None`` when no live row matched (concurrent delete → ``404``).
+        ``changes`` MUST be non-empty and contain only mutable columns; the DB
+        CHECKs (``start >= 0``, ``end > start``, ``volume`` 0–4) are the backstop
+        for the DTO validation.
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_clip(self, track_id: UUID, clip_id: UUID) -> bool:
+        """Soft-delete (``deleted_at = now()``) the track's live clip (α6.3b).
+
+        Scoped ``track_id`` + ``deleted_at IS NULL``. Returns ``True`` if a live
+        clip was found and marked, ``False`` otherwise (missing, already
+        soft-deleted, or another track's clip). The use case maps ``False`` →
+        ``404`` so a repeat delete — and any GET/PATCH after delete — is a uniform
+        ``404`` (idempotent-by-404). The aggregate roll-up (:meth:`bump_version`)
+        is the use case's job.
         """
         ...
 

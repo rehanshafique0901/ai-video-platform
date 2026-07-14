@@ -48,6 +48,7 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.scenes.scene import Scene
+from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
 from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
@@ -1282,6 +1283,7 @@ class FakeTimelineRepository(ITimelineRepository):
 
     _timelines: dict[UUID, Timeline] = field(default_factory=dict)
     _tracks: dict[UUID, Track] = field(default_factory=dict)
+    _clips: dict[UUID, Clip] = field(default_factory=dict)
 
     # ---- timeline root ----
 
@@ -1432,6 +1434,84 @@ class FakeTimelineRepository(ITimelineRepository):
         if track is None or track.timeline_id != timeline_id:
             return False
         del self._tracks[track_id]
+        return True
+
+    # ---- clips ----
+
+    async def add_clip(
+        self,
+        *,
+        track_id: UUID,
+        media_asset_id: UUID | None,
+        start_seconds: float,
+        end_seconds: float,
+        source_start_seconds: float,
+        source_end_seconds: float,
+        volume: float,
+        locked: bool,
+    ) -> Clip:
+        now = datetime.now(UTC)
+        clip = Clip(
+            id=uuid4(),
+            track_id=track_id,
+            media_asset_id=media_asset_id,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            source_start_seconds=source_start_seconds,
+            source_end_seconds=source_end_seconds,
+            volume=volume,
+            locked=locked,
+            transition_in_id=None,
+            transition_out_id=None,
+            effects=[],
+            created_at=now,
+            updated_at=now,
+        )
+        self._clips[clip.id] = clip
+        return clip
+
+    def _clip_sort_key(self, clip: Clip) -> tuple[float, UUID]:
+        return (clip.start_seconds, clip.id)
+
+    async def list_clips(self, track_id: UUID) -> list[Clip]:
+        rows = [c for c in self._clips.values() if c.track_id == track_id]
+        rows.sort(key=self._clip_sort_key)
+        return rows
+
+    async def list_clips_for_timeline(self, timeline_id: UUID) -> dict[UUID, list[Clip]]:
+        live_track_ids = {t.id for t in self._tracks.values() if t.timeline_id == timeline_id}
+        grouped: dict[UUID, list[Clip]] = {}
+        for clip in self._clips.values():
+            if clip.track_id in live_track_ids:
+                grouped.setdefault(clip.track_id, []).append(clip)
+        for clips in grouped.values():
+            clips.sort(key=self._clip_sort_key)
+        return grouped
+
+    async def get_clip(self, track_id: UUID, clip_id: UUID) -> Clip | None:
+        clip = self._clips.get(clip_id)
+        if clip is None or clip.track_id != track_id:
+            return None
+        return clip
+
+    async def update_clip(
+        self,
+        track_id: UUID,
+        clip_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> Clip | None:
+        clip = await self.get_clip(track_id, clip_id)
+        if clip is None:
+            return None
+        updated = replace(clip, updated_at=datetime.now(UTC), **dict(changes))
+        self._clips[clip_id] = updated
+        return updated
+
+    async def soft_delete_clip(self, track_id: UUID, clip_id: UUID) -> bool:
+        clip = self._clips.get(clip_id)
+        if clip is None or clip.track_id != track_id:
+            return False
+        del self._clips[clip_id]
         return True
 
 

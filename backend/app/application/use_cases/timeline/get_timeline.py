@@ -10,7 +10,8 @@ Contract (API_CONTRACT §3.2.4):
 Two-level gate: project ownership (→ ``404``) then timeline resolution (a project
 without a provisioned timeline is a ``404`` — the timeline is created explicitly,
 Q3). Returns the composition tree: the timeline root plus its live tracks ordered
-by ``z_index`` (α6.3b extends each track with its clips). Read-only.
+by ``z_index``, and each track's live clips ordered by ``start_seconds``
+(``clips_by_track``, α6.3b). Read-only.
 """
 
 from __future__ import annotations
@@ -55,4 +56,5 @@ class GetTimeline:
                 )
 
             tracks = await self._uow.timeline.list_tracks(timeline.id)
-        return TimelineResult(timeline=timeline, tracks=tracks)
+            clips_by_track = await self._uow.timeline.list_clips_for_timeline(timeline.id)
+        return TimelineResult(timeline=timeline, tracks=tracks, clips_by_track=clips_by_track)

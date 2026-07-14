@@ -298,7 +298,14 @@ async def test_a7_register_unknown_model_422(client: AsyncClient) -> None:
 async def test_a8_register_duplicate_coords_409(client: AsyncClient) -> None:
     reg = await _register(client)
     access = reg["access_token"]
-    coords = {"storage_backend": "s3", "storage_bucket": "assets", "storage_key": "dup/k.png"}
+    # Unique-per-run key (reused within the test) — the storage-coords unique
+    # constraint is global, so a hardcoded key is fragile to any residual row
+    # committed by an earlier interrupted run.
+    coords = {
+        "storage_backend": "s3",
+        "storage_bucket": "assets",
+        "storage_key": f"dup/{uuid4()}.png",
+    }
 
     await _register_media(client, access, **coords)
     r = await client.post("/api/v1/media", headers=_auth(access), json=_media_body(**coords))

@@ -29,6 +29,16 @@ Coverage map (α6.3 pre-flight §5.3):
 * A14 patch track happy / stale     → 200 / 412
 * A15 delete track happy / idempotent-by-404 / missing version query → 204 / 404 / 422
 * A16 cross-owner isolation         → 404
+* A17 create clip happy (no version) → 201 + meta.timeline_version, no clip `version`
+* A18 create clip bad time range     → 422 (end <= start)
+* A19 create clip unknown media_asset_id → 422; valid link → 201
+* A20 create clip stale version      → 412
+* A21 list clips ordered by start_seconds → 200 + meta.timeline_version
+* A22 get clip happy / cross-track   → 200 / 404
+* A23 patch clip happy / stale / partial-range → 200 / 412 / 422
+* A24 delete clip happy / idempotent-by-404 / missing version → 204 / 404 / 422
+* A25 composition tree embeds clips per track (GET timeline / GET tracks)
+* A26 clip endpoints unknown track   → 404
 """
 
 from __future__ import annotations
@@ -61,7 +71,25 @@ _TRACK_KEYS = {
     "muted",
     "created_at",
     "updated_at",
+    "clips",
 }
+_CLIP_KEYS = {
+    "id",
+    "track_id",
+    "media_asset_id",
+    "start_seconds",
+    "end_seconds",
+    "source_start_seconds",
+    "source_end_seconds",
+    "volume",
+    "locked",
+    "transition_in_id",
+    "transition_out_id",
+    "effects",
+    "created_at",
+    "updated_at",
+}
+_CHECKSUM_HEX = "ab" * 32
 
 
 def _auth(access: str) -> dict[str, str]:
@@ -113,6 +141,39 @@ async def _create_track(client: AsyncClient, access: str, project_id: str, **ove
     )
     assert r.status_code == 201, r.text
     return r.json()
+
+
+async def _create_clip(
+    client: AsyncClient, access: str, project_id: str, track_id: str, **over: object
+) -> dict:
+    body: dict = {"start_seconds": 0.0, "end_seconds": 5.0}
+    body.update(over)
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips",
+        headers=_auth(access),
+        json=body,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+async def _register_media(client: AsyncClient, access: str) -> str:
+    r = await client.post(
+        "/api/v1/media",
+        headers=_auth(access),
+        json={
+            "kind": "video",
+            "source": "uploaded",
+            "storage_backend": "s3",
+            "storage_bucket": "assets",
+            "storage_key": f"clips/{uuid4()}.mp4",
+            "mime_type": "video/mp4",
+            "size_bytes": 4096,
+            "checksum_sha256": _CHECKSUM_HEX,
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["data"]["id"]
 
 
 # ---- A1 — provision happy ---------------------------------------------
@@ -415,4 +476,241 @@ async def test_a16_cross_owner_isolation(client: AsyncClient) -> None:
 
     other_access = (await _register(client))["access_token"]
     r = await client.get(f"/api/v1/projects/{project_id}/timeline", headers=_auth(other_access))
+    assert r.status_code == 404, r.text
+
+
+# ---- clips (α6.3b) ----------------------------------------------------
+
+
+async def _setup_track(client: AsyncClient) -> tuple[str, str, str]:
+    """Register a user, create a project + timeline + one track. Returns ids + access."""
+    access = (await _register(client))["access_token"]
+    project_id = await _create_project(client, access)
+    await _provision(client, access, project_id)
+    created = await _create_track(client, access, project_id, z_index=0)
+    return access, project_id, created["data"]["id"]
+
+
+# ---- A17 — create clip happy (no version) -----------------------------
+
+
+@pytest.mark.integration
+async def test_a17_create_clip_happy_no_version(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+
+    body = await _create_clip(
+        client, access, project_id, track_id, start_seconds=1.0, end_seconds=4.0
+    )
+    data = body["data"]
+    assert set(data.keys()) == _CLIP_KEYS
+    assert "version" not in data
+    assert data["start_seconds"] == 1.0
+    assert data["end_seconds"] == 4.0
+    assert data["media_asset_id"] is None
+    assert data["effects"] == []
+    # Track create bumped 1 → 2; clip create bumps 2 → 3.
+    assert body["meta"]["timeline_version"] == 3
+
+
+# ---- A18 — create clip bad time range → 422 ---------------------------
+
+
+@pytest.mark.integration
+async def test_a18_create_clip_bad_range(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips",
+        headers=_auth(access),
+        json={"start_seconds": 5.0, "end_seconds": 5.0},  # end <= start
+    )
+    assert r.status_code == 422, r.text
+
+
+# ---- A19 — create clip media_asset_id validation ----------------------
+
+
+@pytest.mark.integration
+async def test_a19_create_clip_media_asset_validation(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+
+    # Unknown asset → 422.
+    bad = await client.post(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips",
+        headers=_auth(access),
+        json={"start_seconds": 0.0, "end_seconds": 5.0, "media_asset_id": str(uuid4())},
+    )
+    assert bad.status_code == 422, bad.text
+
+    # Valid owned asset → 201.
+    media_id = await _register_media(client, access)
+    ok = await _create_clip(client, access, project_id, track_id, media_asset_id=media_id)
+    assert ok["data"]["media_asset_id"] == media_id
+
+
+# ---- A20 — create clip stale version → 412 ----------------------------
+
+
+@pytest.mark.integration
+async def test_a20_create_clip_stale_version(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+
+    r = await client.post(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips",
+        headers=_auth(access),
+        json={"start_seconds": 0.0, "end_seconds": 5.0, "version": 99},
+    )
+    assert r.status_code == 412, r.text
+
+
+# ---- A21 — list clips ordered by start_seconds ------------------------
+
+
+@pytest.mark.integration
+async def test_a21_list_clips_ordered(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+    await _create_clip(client, access, project_id, track_id, start_seconds=10.0, end_seconds=12.0)
+    await _create_clip(client, access, project_id, track_id, start_seconds=0.0, end_seconds=5.0)
+
+    r = await client.get(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips",
+        headers=_auth(access),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [c["start_seconds"] for c in body["data"]] == [0.0, 10.0]
+    assert "timeline_version" in body["meta"]
+
+
+# ---- A22 — get clip happy / cross-track → 200 / 404 -------------------
+
+
+@pytest.mark.integration
+async def test_a22_get_clip_happy_and_cross_track(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+    other = await _create_track(client, access, project_id, z_index=1)
+    other_track_id = other["data"]["id"]
+    created = await _create_clip(client, access, project_id, track_id)
+    clip_id = created["data"]["id"]
+
+    ok = await client.get(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}",
+        headers=_auth(access),
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["data"]["id"] == clip_id
+
+    # Same clip under a different track → 404.
+    cross = await client.get(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{other_track_id}/clips/{clip_id}",
+        headers=_auth(access),
+    )
+    assert cross.status_code == 404, cross.text
+
+
+# ---- A23 — patch clip happy / stale / partial-range -------------------
+
+
+@pytest.mark.integration
+async def test_a23_patch_clip_happy_stale_and_bad_range(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+    created = await _create_clip(
+        client, access, project_id, track_id, start_seconds=0.0, end_seconds=5.0
+    )
+    clip_id = created["data"]["id"]
+    token = created["meta"]["timeline_version"]
+
+    ok = await client.patch(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}",
+        headers=_auth(access),
+        json={"version": token, "volume": 2.0},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["data"]["volume"] == 2.0
+    assert ok.json()["meta"]["timeline_version"] == token + 1
+
+    # Stale token → 412.
+    stale = await client.patch(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}",
+        headers=_auth(access),
+        json={"version": token, "volume": 3.0},
+    )
+    assert stale.status_code == 412, stale.text
+
+    # Partial patch that violates the merged range (start beyond stored end) → 422.
+    bad = await client.patch(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}",
+        headers=_auth(access),
+        json={"version": token + 1, "start_seconds": 9.0},  # stored end == 5.0
+    )
+    assert bad.status_code == 422, bad.text
+
+
+# ---- A24 — delete clip happy / idempotent / missing version -----------
+
+
+@pytest.mark.integration
+async def test_a24_delete_clip_happy_idempotent_and_missing_version(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+    created = await _create_clip(client, access, project_id, track_id)
+    clip_id = created["data"]["id"]
+    token = created["meta"]["timeline_version"]
+
+    # Missing ?version → 422.
+    no_ver = await client.delete(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}",
+        headers=_auth(access),
+    )
+    assert no_ver.status_code == 422, no_ver.text
+
+    ok = await client.delete(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}?version={token}",
+        headers=_auth(access),
+    )
+    assert ok.status_code == 204, ok.text
+
+    # Repeat delete is idempotent-by-404 (not 412), even with the advanced token.
+    repeat = await client.delete(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}"
+        f"?version={token + 1}",
+        headers=_auth(access),
+    )
+    assert repeat.status_code == 404, repeat.text
+
+
+# ---- A25 — composition tree embeds clips per track --------------------
+
+
+@pytest.mark.integration
+async def test_a25_composition_tree_embeds_clips(client: AsyncClient) -> None:
+    access, project_id, track_id = await _setup_track(client)
+    await _create_clip(client, access, project_id, track_id, start_seconds=0.0, end_seconds=5.0)
+    await _create_clip(client, access, project_id, track_id, start_seconds=5.0, end_seconds=9.0)
+
+    # GET /timeline embeds each track's clips (ordered).
+    tl = await client.get(f"/api/v1/projects/{project_id}/timeline", headers=_auth(access))
+    assert tl.status_code == 200, tl.text
+    track = tl.json()["data"]["tracks"][0]
+    assert [c["start_seconds"] for c in track["clips"]] == [0.0, 5.0]
+    assert set(track["clips"][0].keys()) == _CLIP_KEYS
+
+    # GET /tracks embeds them too.
+    tr = await client.get(f"/api/v1/projects/{project_id}/timeline/tracks", headers=_auth(access))
+    assert tr.status_code == 200, tr.text
+    assert len(tr.json()["data"][0]["clips"]) == 2
+
+
+# ---- A26 — clip endpoints unknown track → 404 -------------------------
+
+
+@pytest.mark.integration
+async def test_a26_clip_endpoints_unknown_track(client: AsyncClient) -> None:
+    access = (await _register(client))["access_token"]
+    project_id = await _create_project(client, access)
+    await _provision(client, access, project_id)
+
+    r = await client.get(
+        f"/api/v1/projects/{project_id}/timeline/tracks/{uuid4()}/clips",
+        headers=_auth(access),
+    )
     assert r.status_code == 404, r.text

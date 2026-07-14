@@ -58,11 +58,16 @@ from app.application.use_cases.scenes.get_scene import GetScene
 from app.application.use_cases.scenes.list_scenes import ListScenes
 from app.application.use_cases.scenes.move_scene import MoveScene
 from app.application.use_cases.scenes.update_scene import UpdateScene
+from app.application.use_cases.timeline.create_clip import CreateClip
 from app.application.use_cases.timeline.create_track import CreateTrack
+from app.application.use_cases.timeline.delete_clip import DeleteClip
 from app.application.use_cases.timeline.delete_track import DeleteTrack
+from app.application.use_cases.timeline.get_clip import GetClip
 from app.application.use_cases.timeline.get_timeline import GetTimeline
+from app.application.use_cases.timeline.list_clips import ListClips
 from app.application.use_cases.timeline.list_tracks import ListTracks
 from app.application.use_cases.timeline.provision_timeline import ProvisionTimeline
+from app.application.use_cases.timeline.update_clip import UpdateClip
 from app.application.use_cases.timeline.update_timeline import UpdateTimeline
 from app.application.use_cases.timeline.update_track import UpdateTrack
 from app.application.use_cases.users.update_profile import UpdateUserProfile
@@ -454,3 +459,28 @@ def get_update_track_use_case() -> UpdateTrack:
 
 def get_delete_track_use_case() -> DeleteTrack:
     return DeleteTrack(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α6.3b — Clips)
+# ---------------------------------------------------------------------
+
+
+def get_create_clip_use_case() -> CreateClip:
+    return CreateClip(uow=get_unit_of_work())
+
+
+def get_list_clips_use_case() -> ListClips:
+    return ListClips(uow=get_unit_of_work())
+
+
+def get_get_clip_use_case() -> GetClip:
+    return GetClip(uow=get_unit_of_work())
+
+
+def get_update_clip_use_case() -> UpdateClip:
+    return UpdateClip(uow=get_unit_of_work())
+
+
+def get_delete_clip_use_case() -> DeleteClip:
+    return DeleteClip(uow=get_unit_of_work())

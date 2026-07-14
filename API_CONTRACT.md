@@ -61,7 +61,7 @@ Error:
 | AI — Videos | `/ai/videos` |
 | AI — Voice | `/ai/voice` |
 | AI — Subtitles | `/ai/subtitles` |
-| Timeline (α6.3a) | `/projects/{id}/timeline`, `/projects/{id}/timeline/tracks`, `/projects/{id}/timeline/tracks/{track_id}` |
+| Timeline (α6.3a/b) | `/projects/{id}/timeline`, `/projects/{id}/timeline/tracks`, `/projects/{id}/timeline/tracks/{track_id}`, `…/tracks/{track_id}/clips`, `…/tracks/{track_id}/clips/{clip_id}` |
 | Render | `/projects/{id}/render` |
 | Export | `/projects/{id}/export` |
 | Asset Library (CR-8) | `/library/assets`, `/library/assets/{id}` |
@@ -364,7 +364,7 @@ DELETE /media/{media_id}     soft delete
 > which the API never performs). See `docs/domain/MEDIA_AGGREGATE.md` and
 > `docs/decisions/ADR-0037-media-generation-outputs.md`.
 
-#### 3.2.4 Timeline & tracks (Phase 3 α6.3a)
+#### 3.2.4 Timeline, tracks & clips (Phase 3 α6.3a/b)
 
 ```
 POST   /projects/{project_id}/timeline                    provision the single timeline (explicit)
@@ -374,6 +374,11 @@ POST   /projects/{project_id}/timeline/tracks             append a track (versio
 GET    /projects/{project_id}/timeline/tracks             list tracks (z_index ASC)
 PATCH  /projects/{project_id}/timeline/tracks/{track_id}  version-fenced track update
 DELETE /projects/{project_id}/timeline/tracks/{track_id}?version=<n>   version-fenced soft delete
+POST   /projects/{project_id}/timeline/tracks/{track_id}/clips              append a clip (version optional)
+GET    /projects/{project_id}/timeline/tracks/{track_id}/clips              list clips (start_seconds ASC)
+GET    /projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}    one clip
+PATCH  /projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}    version-fenced clip update
+DELETE /projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}?version=<n>   version-fenced soft delete
 ```
 
 > **Shipped in Phase 3 α6.3a (Timeline + Tracks).** The Timeline is the
@@ -426,12 +431,45 @@ DELETE /projects/{project_id}/timeline/tracks/{track_id}?version=<n>   version-f
 >   bumps the token; `204`. **Idempotent-by-404**: a repeat delete — or deleting an
 >   unknown / another owner's track — is `404` (not `412`), decided before the fence.
 >
+> **Clips (α6.3b).** A **clip** is a time-bounded placement of a media asset on a
+> track — the third tier of the aggregate, and (like tracks) a **child with no
+> `version`**, fenced by the same `timelines.version`. `track_id` is **immutable**
+> (a cross-track move is a delete + recreate); clip **overlaps are allowed**; the
+> timeline `duration_seconds` is **not** auto-grown from clips.
+>
+> * **`POST …/tracks/{track_id}/clips`** — body `{ media_asset_id?, start_seconds,
+>   end_seconds, source_start_seconds?, source_end_seconds?, volume?, locked?,
+>   version? }`. `end_seconds > start_seconds` and `source_end_seconds ≥
+>   source_start_seconds` (else `422`); `volume` `0–4`. `media_asset_id`, when set,
+>   must reference a **live media asset you own** (else `422`). `version` **optional**
+>   (child create can't be stale): omitted → bump unconditionally; supplied → fence
+>   (stale → `412`). `201` + `ClipPublic`, token in `meta.timeline_version`.
+>   Unknown project / timeline / track → `404`.
+> * **`GET …/tracks/{track_id}/clips`** — the track's live clips ordered by
+>   `start_seconds` ASC (`id` tiebreak); `meta.timeline_version`.
+> * **`GET …/tracks/{track_id}/clips/{clip_id}`** — one clip. Four-level gate
+>   (project → timeline → track → clip); any miss / cross-track → `404`.
+> * **`PATCH …/tracks/{track_id}/clips/{clip_id}`** — body `{ version,
+>   media_asset_id?, start_seconds?, end_seconds?, source_start_seconds?,
+>   source_end_seconds?, volume?, locked? }`; `version` (the **timeline's**)
+>   required plus ≥ 1 mutable field (empty → `422`). `media_asset_id` re-validated
+>   when present (explicit `null` unlinks); the **merged** range is validated
+>   against stored values (else `422`). Bumps the token; stale → `412`; same-value
+>   → `200` no-op. **404-before-412**.
+> * **`DELETE …/tracks/{track_id}/clips/{clip_id}?version=<n>`** — required
+>   `?version=`; soft-deletes, bumps the token; `204`. **Idempotent-by-404**.
+>
 > `TimelinePublic` = `{ id, project_id, project_version_id (read-only, α7+),
 > aspect_ratio, frame_rate, background_color, duration_seconds, version,
 > created_at, updated_at, tracks: [TrackPublic, …] }`. `TrackPublic` = `{ id,
-> timeline_id, kind, z_index, name, locked, muted, created_at, updated_at }` —
-> **no `version`** (the aggregate token is `meta.timeline_version`). See
-> `docs/domain/TIMELINE_AGGREGATE.md` and
+> timeline_id, kind, z_index, name, locked, muted, created_at, updated_at, clips:
+> [ClipPublic, …] }` — **no `version`** (the aggregate token is
+> `meta.timeline_version`); `clips` is populated in composition reads
+> (`GET …/timeline`, `GET …/tracks`) and `[]` on mutation responses. `ClipPublic` =
+> `{ id, track_id, media_asset_id, start_seconds, end_seconds, source_start_seconds,
+> source_end_seconds, volume, locked, transition_in_id, transition_out_id (read-only,
+> α6.4+), effects (read-only, α6.4+), created_at, updated_at }` — **no `version`**.
+> See `docs/domain/TIMELINE_AGGREGATE.md` and
 > `docs/decisions/ADR-0038-timeline-self-contained-occ-aggregate.md`.
 
 ### 3.3 Project Versions (CR-6)

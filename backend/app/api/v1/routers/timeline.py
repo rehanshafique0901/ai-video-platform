@@ -12,6 +12,11 @@ timeline root + tracks (clips are α6.3b):
 * ``GET    …/timeline/tracks``             → 200, list tracks (z_index ASC).
 * ``PATCH  …/timeline/tracks/{track_id}``  → 200, version-fenced track update.
 * ``DELETE …/timeline/tracks/{track_id}``  → 204, version-fenced soft delete.
+* ``POST   …/tracks/{track_id}/clips``            → 201, add a clip (version optional).
+* ``GET    …/tracks/{track_id}/clips``            → 200, list clips (start_seconds ASC).
+* ``GET    …/tracks/{track_id}/clips/{clip_id}``  → 200, one clip.
+* ``PATCH  …/tracks/{track_id}/clips/{clip_id}``  → 200, version-fenced clip update.
+* ``DELETE …/tracks/{track_id}/clips/{clip_id}``  → 204, version-fenced soft delete.
 
 Every handler resolves ``project_id`` from the path and delegates to a use case,
 which runs the two-level gate (project ownership → timeline resolution) and, for
@@ -30,17 +35,25 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from app.api.v1.deps import (
+    CreateClipDep,
     CreateTrackDep,
     CurrentUserDep,
+    DeleteClipDep,
     DeleteTrackDep,
+    GetClipDep,
     GetTimelineDep,
+    ListClipsDep,
     ListTracksDep,
     ProvisionTimelineDep,
+    UpdateClipDep,
     UpdateTimelineDep,
     UpdateTrackDep,
 )
 from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.timeline import (
+    ClipCreateRequest,
+    ClipPublic,
+    ClipUpdateRequest,
     TimelineProvisionRequest,
     TimelinePublic,
     TimelineUpdateRequest,
@@ -49,13 +62,38 @@ from app.api.v1.schemas.timeline import (
     TrackUpdateRequest,
 )
 from app.application.use_cases.timeline.results import TimelineResult
+from app.domain.timeline.clip import Clip
 from app.domain.timeline.track import Track
 
 router = APIRouter(prefix="/projects/{project_id}/timeline", tags=["timeline"])
 
 
-def _track_to_public(track: Track) -> TrackPublic:
-    """Project a domain ``Track`` into the wire DTO."""
+def _clip_to_public(clip: Clip) -> ClipPublic:
+    """Project a domain ``Clip`` into the wire DTO."""
+    return ClipPublic(
+        id=clip.id,
+        track_id=clip.track_id,
+        media_asset_id=clip.media_asset_id,
+        start_seconds=clip.start_seconds,
+        end_seconds=clip.end_seconds,
+        source_start_seconds=clip.source_start_seconds,
+        source_end_seconds=clip.source_end_seconds,
+        volume=clip.volume,
+        locked=clip.locked,
+        transition_in_id=clip.transition_in_id,
+        transition_out_id=clip.transition_out_id,
+        effects=clip.effects,
+        created_at=clip.created_at,
+        updated_at=clip.updated_at,
+    )
+
+
+def _track_to_public(track: Track, clips: list[Clip] | None = None) -> TrackPublic:
+    """Project a domain ``Track`` into the wire DTO, embedding its clips (if given).
+
+    ``clips`` is supplied only in the composition-tree reads (D8); track-mutation
+    responses pass ``None`` → an empty ``clips`` list.
+    """
     return TrackPublic(
         id=track.id,
         timeline_id=track.timeline_id,
@@ -66,11 +104,12 @@ def _track_to_public(track: Track) -> TrackPublic:
         muted=track.muted,
         created_at=track.created_at,
         updated_at=track.updated_at,
+        clips=[_clip_to_public(c) for c in (clips or [])],
     )
 
 
 def _timeline_to_public(result: TimelineResult) -> TimelinePublic:
-    """Project a ``TimelineResult`` (root + ordered tracks) into the wire DTO."""
+    """Project a ``TimelineResult`` (root + ordered tracks + clips) into the wire DTO."""
     timeline = result.timeline
     return TimelinePublic(
         id=timeline.id,
@@ -83,7 +122,7 @@ def _timeline_to_public(result: TimelineResult) -> TimelinePublic:
         version=timeline.version,
         created_at=timeline.created_at,
         updated_at=timeline.updated_at,
-        tracks=[_track_to_public(t) for t in result.tracks],
+        tracks=[_track_to_public(t, result.clips_by_track.get(t.id, [])) for t in result.tracks],
     )
 
 
@@ -223,7 +262,7 @@ async def list_tracks(
     )
     return JSONResponse(
         content=envelope(
-            [_track_to_public(t) for t in result.tracks],
+            [_track_to_public(t, result.clips_by_track.get(t.id, [])) for t in result.tracks],
             request,
             extra_meta={"timeline_version": result.timeline.version},
         )
@@ -284,6 +323,173 @@ async def delete_track(
     await use_case.execute(
         project_id=project_id,
         track_id=track_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        expected_version=version,
+        ip=client_ip(request),
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---- clips (α6.3b) ----------------------------------------------------
+
+
+@router.post("/tracks/{track_id}/clips", status_code=status.HTTP_201_CREATED)
+async def create_clip(
+    project_id: UUID,
+    track_id: UUID,
+    body: ClipCreateRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: CreateClipDep,
+) -> JSONResponse:
+    """Append a clip to one track of the caller's project timeline.
+
+    ``version`` is optional (a child create cannot be harmfully stale). Returns
+    201 with the ``ClipPublic`` and the new aggregate token in
+    ``meta.timeline_version``. 404 (project/timeline/track not visible), 412
+    (stale version, if sent), 422 (bad time range / bad media_asset_id).
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        track_id=track_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        media_asset_id=body.media_asset_id,
+        start_seconds=body.start_seconds,
+        end_seconds=body.end_seconds,
+        source_start_seconds=body.source_start_seconds,
+        source_end_seconds=body.source_end_seconds,
+        volume=body.volume,
+        locked=body.locked,
+        expected_version=body.version,
+        ip=client_ip(request),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content=envelope(
+            _clip_to_public(result.clip),
+            request,
+            extra_meta={"timeline_version": result.timeline_version},
+        ),
+    )
+
+
+@router.get("/tracks/{track_id}/clips")
+async def list_clips(
+    project_id: UUID,
+    track_id: UUID,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: ListClipsDep,
+) -> JSONResponse:
+    """List one track's clips, ordered by ``start_seconds``.
+
+    404 if the project, its timeline, or the track is missing/not the caller's.
+    The aggregate token is surfaced in ``meta.timeline_version``.
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        track_id=track_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+    return JSONResponse(
+        content=envelope(
+            [_clip_to_public(c) for c in result.clips],
+            request,
+            extra_meta={"timeline_version": result.timeline_version},
+        )
+    )
+
+
+@router.get("/tracks/{track_id}/clips/{clip_id}")
+async def get_clip(
+    project_id: UUID,
+    track_id: UUID,
+    clip_id: UUID,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: GetClipDep,
+) -> JSONResponse:
+    """Fetch one clip of the caller's project timeline.
+
+    404 if the project/timeline/track/clip is missing/not the caller's.
+    """
+    result = await use_case.execute(
+        project_id=project_id,
+        track_id=track_id,
+        clip_id=clip_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+    return JSONResponse(
+        content=envelope(
+            _clip_to_public(result.clip),
+            request,
+            extra_meta={"timeline_version": result.timeline_version},
+        )
+    )
+
+
+@router.patch("/tracks/{track_id}/clips/{clip_id}")
+async def update_clip(
+    project_id: UUID,
+    track_id: UUID,
+    clip_id: UUID,
+    body: ClipUpdateRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: UpdateClipDep,
+) -> JSONResponse:
+    """Partially update one clip (fenced on the timeline version).
+
+    The body carries the timeline's ``version`` plus any subset of the mutable
+    clip fields. ``track_id`` is immutable (no cross-track move). 404
+    (project/timeline/track/clip not visible), 412 (stale version), 422 (empty
+    patch / bad time range / bad media_asset_id). The new token is returned in
+    ``meta.timeline_version``.
+    """
+    changes = body.model_dump(exclude_unset=True, exclude={"version"})
+    result = await use_case.execute(
+        project_id=project_id,
+        track_id=track_id,
+        clip_id=clip_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        expected_version=body.version,
+        changes=changes,
+        ip=client_ip(request),
+    )
+    return JSONResponse(
+        content=envelope(
+            _clip_to_public(result.clip),
+            request,
+            extra_meta={"timeline_version": result.timeline_version},
+        )
+    )
+
+
+@router.delete("/tracks/{track_id}/clips/{clip_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_clip(
+    project_id: UUID,
+    track_id: UUID,
+    clip_id: UUID,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: DeleteClipDep,
+    version: int = Query(ge=1),
+) -> Response:
+    """Soft-delete one clip (fenced on the timeline version).
+
+    The expected timeline ``version`` is a **required** query parameter. Returns
+    204. Idempotent-by-404 (404-before-412): a missing/already-deleted clip is
+    404 regardless of the token; only a live clip with a stale token is 412.
+    """
+    await use_case.execute(
+        project_id=project_id,
+        track_id=track_id,
+        clip_id=clip_id,
         owner_user_id=current_user.id,
         tenant_id=current_user.tenant_id,
         expected_version=version,
