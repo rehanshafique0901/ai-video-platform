@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import sys
+import threading
+import time
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -32,6 +35,42 @@ from app.infrastructure.db.session import make_engine, make_session_factory
 # Windows. This block is a no-op on Linux/macOS.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+# macOS: guard against concurrent-``getaddrinfo`` flakiness. asyncio resolves
+# hostnames by running the blocking ``socket.getaddrinfo`` on a thread pool;
+# on macOS, concurrent lookups intermittently raise ``gaierror`` EAI_NONAME
+# (errno 8 — "nodename nor servname provided") even when the host resolves
+# fine serially. Because each test builds a fresh engine (a new connection =
+# a new resolution) and psycopg resolves the pooler's multiple A-records, the
+# suite fires overlapping lookups and later tests flake. We serialize +
+# memoize + retry resolution in the test process to make the suite
+# deterministic. Scoped to darwin so Linux CI resolution is byte-for-byte
+# unchanged. No-op on the app itself — this only patches the test process.
+if sys.platform == "darwin":
+    _dns_lock = threading.Lock()
+    _dns_cache: dict[tuple[Any, ...], Any] = {}
+    _real_getaddrinfo = socket.getaddrinfo
+
+    def _serialized_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        key = (host, port, args, tuple(sorted(kwargs.items())))
+        with _dns_lock:
+            cached = _dns_cache.get(key)
+            if cached is not None:
+                return cached
+            last_exc: Exception | None = None
+            for _ in range(5):
+                try:
+                    result = _real_getaddrinfo(host, port, *args, **kwargs)
+                    _dns_cache[key] = result
+                    return result
+                except socket.gaierror as exc:
+                    last_exc = exc
+                    time.sleep(0.05)
+            assert last_exc is not None
+            raise last_exc
+
+    socket.getaddrinfo = _serialized_getaddrinfo
 
 
 def _ensure_test_env_defaults() -> None:
