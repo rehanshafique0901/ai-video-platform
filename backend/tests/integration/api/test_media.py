@@ -329,8 +329,20 @@ async def test_a9_list_empty_then_newest_first_and_filters(client: AsyncClient) 
     second = await _register_media(client, access, kind="video", source="stock")
 
     r = await client.get("/api/v1/media", headers=_auth(access))
-    ids = [m["id"] for m in r.json()["data"]]
-    assert ids == [second["id"], first["id"]]
+    rows = r.json()["data"]
+    # Both assets come back.
+    assert {m["id"] for m in rows} == {first["id"], second["id"]}
+    # ``created_at`` defaults to ``now()``, which Postgres holds CONSTANT for the
+    # whole (single) test transaction, so the two rows tie on time and the
+    # endpoint's ``created_at DESC, id DESC`` order reduces to the deterministic
+    # ``id DESC`` tiebreak. Assert the endpoint applied that total order (i.e. it
+    # sorts rather than returning insertion/arbitrary order) instead of relying on
+    # a nondeterministic ``uuid4`` comparison against insertion order.
+    returned_ids = [m["id"] for m in rows]
+    expected_ids = [
+        m["id"] for m in sorted(rows, key=lambda m: (m["created_at"], m["id"]), reverse=True)
+    ]
+    assert returned_ids == expected_ids
 
     r = await client.get("/api/v1/media?kind=video", headers=_auth(access))
     assert [m["id"] for m in r.json()["data"]] == [second["id"]]

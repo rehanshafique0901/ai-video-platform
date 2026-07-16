@@ -22,10 +22,12 @@ from types import TracebackType
 from typing import Self
 
 from app.application.interfaces.repositories import (
+    IEventOutboxRepository,
     IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -62,6 +64,8 @@ class IUnitOfWork(ABC):
     prompts: IPromptRepository  # α6.1
     media: IMediaRepository  # α6.2
     timeline: ITimelineRepository  # α6.3a
+    render_jobs: IRenderJobRepository  # α7.1
+    outbox: IEventOutboxRepository  # α7.1
 
     async def __aenter__(self) -> Self:
         return self

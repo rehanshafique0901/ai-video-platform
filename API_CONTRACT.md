@@ -62,7 +62,7 @@ Error:
 | AI — Voice | `/ai/voice` |
 | AI — Subtitles | `/ai/subtitles` |
 | Timeline (α6.3a/b) | `/projects/{id}/timeline`, `/projects/{id}/timeline/tracks`, `/projects/{id}/timeline/tracks/{track_id}`, `…/tracks/{track_id}/clips`, `…/tracks/{track_id}/clips/{clip_id}` |
-| Render | `/projects/{id}/render` |
+| Render Jobs (α7.1) | `/projects/{id}/render-jobs`, `/projects/{id}/render-jobs/{render_job_id}`, `…/render-jobs/{render_job_id}/cancel` |
 | Export | `/projects/{id}/export` |
 | Asset Library (CR-8) | `/library/assets`, `/library/assets/{id}` |
 | Workflows (CR-7) | `/workflows`, `/workflows/{id}`, `/workflows/{id}/pause|resume|cancel` |
@@ -471,6 +471,70 @@ DELETE /projects/{project_id}/timeline/tracks/{track_id}/clips/{clip_id}?version
 > α6.4+), effects (read-only, α6.4+), created_at, updated_at }` — **no `version`**.
 > See `docs/domain/TIMELINE_AGGREGATE.md` and
 > `docs/decisions/ADR-0038-timeline-self-contained-occ-aggregate.md`.
+
+#### 3.2.5 Render jobs (Phase 3 α7.1)
+
+```
+POST   /projects/{project_id}/render-jobs                            enqueue a render (idempotent)
+GET    /projects/{project_id}/render-jobs                            list jobs (newest first; ?status= filter)
+GET    /projects/{project_id}/render-jobs/{render_job_id}            one job
+POST   /projects/{project_id}/render-jobs/{render_job_id}/cancel     version-fenced cancel
+```
+
+> **Shipped in Phase 3 α7.1 (`RenderJob` aggregate — CRUD + cancel; NO worker).**
+> A **RenderJob** is the request to render a project's timeline and the record of
+> that request's lifecycle — the first **orchestration** aggregate (contrast the
+> α5–α6 domain-model aggregates). It owns **only orchestration metadata**; it does
+> **not** own rendered/exported files, workflow state, or timeline edits (it
+> references them by FK and coordinates via events — ADR-0039, pre-flight D3.10).
+> It is **project-nested**; ownership is derived through the project, so every
+> access runs a **two-level gate** (project ownership → render-job resolution, both
+> `404` — anti-enumeration).
+>
+> **Self-versioned OCC (ADR-0039, adopts ADR-0037).** `render_jobs.version` is a
+> **real column** and the job's **own** OCC token (unlike the timeline's borrowed
+> token) — a cancel fences on / bumps it and never touches `projects.version` or
+> `timelines.version`. The job has **no `deleted_at`**: it is an audit record, so
+> there is **no `DELETE` verb** — "removal" is the `cancel` status transition, and a
+> canceled job stays `GET`-able.
+>
+> **Status machine (α7.1 subset — no worker).** `queued` on create; `cancel` moves
+> `queued`/`running` → `canceled`. The `running`/`succeeded`/`failed` transitions
+> (and `output_media_asset_id`, `started_at`, `finished_at`, `error`, and `progress`
+> beyond `'0.00'`) are **worker-owned (α8.x)**.
+>
+> * **`POST …/render-jobs`** — enqueue. Body `{ pipeline?, pipeline_version?,
+>   queue?, priority?, idempotency_key? }`; defaults `pipeline='ffmpeg'`,
+>   `pipeline_version='0.0.0'`, `queue='normal'`, `priority=0` (clamped `0–1000`).
+>   The **timeline is resolved server-side** (1:1 with the project) — a project with
+>   **no timeline → `422`** (visible but not fulfillable, so not `404`). `version`
+>   `1`, `status='queued'`, `progress='0.00'`. Returns `201` + `RenderJobPublic` and
+>   emits `RenderJobCreated` to the `event_outbox`. **Idempotency (Q4):** a repeat
+>   with the **same `idempotency_key`** for the project returns the **existing** job
+>   with **`200`** (no duplicate, no second event). Missing/foreign project → `404`.
+> * **`GET …/render-jobs`** — the project's jobs, **newest first** (`created_at`
+>   DESC, `id` DESC tiebreak). Optional **`?status=`** filters by one
+>   `render_status` value (bad enum → `422`). Missing/foreign project → `404`.
+> * **`GET …/render-jobs/{render_job_id}`** — one job. Two-level gate; unknown job,
+>   or a job under another owner's project → `404`.
+> * **`POST …/render-jobs/{render_job_id}/cancel`** — body `{ version }` (the job's
+>   own token, **required**). A **version-fenced CAS** with a race-safe terminal
+>   guard, decided **404 → classify → 412**:
+>   * missing/foreign project or job → `404`;
+>   * already `canceled` → **`200`** idempotent no-op (no event, no bump);
+>   * `succeeded`/`failed` → **`409`** (completed work is not cancelable);
+>   * cancelable but stale `version` → **`412`**;
+>   * success → **`200`** + `RenderJobPublic` (`status='canceled'`, `version` +1) and
+>     emits `RenderJobCanceled`.
+>
+> `RenderJobPublic` = `{ id, project_id, timeline_id, workflow_run_id (null in α7.1),
+> pipeline, pipeline_version, queue, priority, status, progress, started_at (null),
+> finished_at (null), error (null), output_media_asset_id (null), idempotency_key,
+> version, created_at, updated_at }`. The events carry orchestration fields only
+> (`render_job_id, project_id, timeline_id, pipeline, pipeline_version, queue,
+> priority, status, version`; `event_version="1.0"`) — α7.1 only **produces** outbox
+> rows (no dispatcher; the relay is α7.3). See `docs/domain/RENDER_JOB_AGGREGATE.md`
+> and `docs/decisions/ADR-0039-render-job-orchestration-aggregate.md`.
 
 ### 3.3 Project Versions (CR-6)
 

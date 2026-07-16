@@ -52,6 +52,10 @@ from app.application.use_cases.prompts.delete_prompt import DeletePrompt
 from app.application.use_cases.prompts.get_prompt import GetPrompt
 from app.application.use_cases.prompts.list_prompts import ListPrompts
 from app.application.use_cases.prompts.update_prompt import UpdatePrompt
+from app.application.use_cases.render.cancel_render_job import CancelRenderJob
+from app.application.use_cases.render.create_render_job import CreateRenderJob
+from app.application.use_cases.render.get_render_job import GetRenderJob
+from app.application.use_cases.render.list_render_jobs import ListRenderJobs
 from app.application.use_cases.scenes.create_scene import CreateScene
 from app.application.use_cases.scenes.delete_scene import DeleteScene
 from app.application.use_cases.scenes.get_scene import GetScene
@@ -484,3 +488,24 @@ def get_update_clip_use_case() -> UpdateClip:
 
 def get_delete_clip_use_case() -> DeleteClip:
     return DeleteClip(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α7.1 — Render jobs)
+# ---------------------------------------------------------------------
+
+
+def get_create_render_job_use_case() -> CreateRenderJob:
+    return CreateRenderJob(uow=get_unit_of_work())
+
+
+def get_list_render_jobs_use_case() -> ListRenderJobs:
+    return ListRenderJobs(uow=get_unit_of_work())
+
+
+def get_get_render_job_use_case() -> GetRenderJob:
+    return GetRenderJob(uow=get_unit_of_work())
+
+
+def get_cancel_render_job_use_case() -> CancelRenderJob:
+    return CancelRenderJob(uow=get_unit_of_work())

@@ -26,6 +26,7 @@ Coverage map (α6.2 pre-flight §5.2):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -257,6 +258,21 @@ async def test_r3_list_filters(session: AsyncSession) -> None:
         project_id=project_id,
         scene_id=scene_id,
     )
+
+    # ``created_at`` defaults to ``now()``, which Postgres holds CONSTANT for the
+    # whole transaction — so ``vid`` and ``scoped`` tie and the ``created_at DESC,
+    # id DESC`` order would fall back to a nondeterministic ``uuid4`` tiebreak.
+    # Stamp ``scoped`` strictly newer so the ordered "stock" filter below is
+    # deterministic (media assets carry no ``version`` column, so no bump trigger).
+    await session.execute(
+        update(MediaRow).where(MediaRow.id == vid.id).values(created_at=datetime.now(UTC))
+    )
+    await session.execute(
+        update(MediaRow)
+        .where(MediaRow.id == scoped.id)
+        .values(created_at=datetime.now(UTC) + timedelta(seconds=1))
+    )
+    await session.flush()
 
     assert {m.id for m in await repo.list_owned(tenant_id, owner_id, kind="video")} == {
         vid.id,

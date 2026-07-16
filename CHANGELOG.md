@@ -6,6 +6,83 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.1 — RenderJob Aggregate (the first orchestration slice) (2026-07-16)
+
+Introduces the **RenderJob aggregate** — the request to render a project's
+timeline and the record of that request's lifecycle. It is the project's first
+**orchestration** aggregate (contrast the α5–α6 domain-model aggregates: Project,
+Scene, Prompt, Media, Timeline). Backed by the existing baseline `render_jobs`
+table (**no migration** — the table, its `version`/OCC trigger, `render_status`
+ENUM, `queue`/`priority`/`progress` columns, and the per-project
+`idempotency_key` unique all already exist). RenderJob is **self-versioned**
+(`render_jobs.version` is its **own** OCC token — like `projects` / `media_assets`,
+**not** the timeline's borrowed token; ADR-0039, adopts ADR-0037) and owns **only
+orchestration metadata** — it does **not** own rendered/exported files, workflow
+state, or timeline edits (pre-flight D3.10). It coordinates **only** through
+domain events on the `event_outbox` (D9). **No render worker in this slice** —
+`queued → running → {succeeded, failed}`, the distributed lock (`render_job:{id}`,
+ADR-0032), and the worker-owned fields (`output_media_asset_id`, `started_at`,
+`finished_at`, `error`, `progress` beyond `'0.00'`) are α8.x. Release/Draft
+binding is the **worker's** decision (α7.1 persists no `mode`/`project_version_id`
+— pre-flight Q1). See `docs/engineering/PHASE3_ALPHA7_1_PREFLIGHT.md`,
+`docs/domain/RENDER_JOB_AGGREGATE.md`, and **ADR-0039**.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/render-jobs`** — enqueue a render. Body
+  `{ pipeline?, pipeline_version?, queue?, priority?, idempotency_key? }`; defaults
+  `pipeline='ffmpeg'`, `pipeline_version='0.0.0'` (Q2), `queue='normal'`,
+  `priority=0` (clamped `0–1000`). The **timeline is resolved server-side** (1:1
+  with the project) — a project with **no timeline → `422`** (visible but not
+  fulfillable). Returns `201` + `RenderJobPublic` (`version=1`, `status='queued'`,
+  `progress='0.00'`) and emits **`RenderJobCreated`** to the `event_outbox`.
+  **Idempotent (Q4):** a repeat with the same `idempotency_key` for the project
+  returns the **existing** job with **`200`** (no duplicate, no second event).
+  Missing/foreign project → `404`; unauthenticated → `401`.
+- **`GET  …/render-jobs`** — the project's jobs **newest-first** (`created_at`
+  DESC, `id` DESC tiebreak); optional **`?status=`** filters by one `render_status`
+  (bad enum → `422`). Missing/foreign project → `404`.
+- **`GET  …/render-jobs/{render_job_id}`** — one job. Two-level gate (project →
+  render-job); unknown, or under another owner's project → `404` (anti-enumeration).
+- **`POST …/render-jobs/{render_job_id}/cancel`** — required `{ version }` (the
+  job's own token). Version-fenced CAS with a **race-safe terminal guard**
+  (`status IN ('queued','running')` in the WHERE), decided **404 → classify →
+  412**: already `canceled` → **`200`** no-op (no event); `succeeded`/`failed` →
+  **`409`**; cancelable but stale → **`412`**; success → **`200`** +
+  `RenderJobPublic` (`status='canceled'`, `version` +1) and emits
+  **`RenderJobCanceled`**. **No `DELETE` verb** (jobs are audit records — no
+  `deleted_at`).
+- **Domain** `app/domain/render/` — frozen `RenderJob` and the `RenderStatus`
+  `StrEnum` (`queued, running, succeeded, failed, canceled`; `is_terminal` /
+  `is_cancelable`).
+- **`IRenderJobRepository`** + `RenderJobRepository` — `add` (idempotency
+  pre-check + unique-violation backstop), `get_by_project_and_key`,
+  `list_by_project` (status filter), `get_owned`, `cancel` (version-fenced CAS).
+  **`IEventOutboxRepository`** + `EventOutboxRepository` — `add` (append to the
+  outbox in the same UoW txn). Both wired into `IUnitOfWork` /
+  `SqlAlchemyUnitOfWork` and mirrored on the test UoW + fakes
+  (`FakeRenderJobRepository`, `FakeEventOutboxRepository`).
+- **Use cases** `app/application/use_cases/render/` — `CreateRenderJob`,
+  `ListRenderJobs`, `GetRenderJob`, `CancelRenderJob`; `_events.py` emits
+  `RenderJobCreated` / `RenderJobCanceled` (orchestration-only payloads,
+  `event_version="1.0"`). None call `IProjectRepository.touch_version`.
+- **DTOs** `app/api/v1/schemas/render.py` — `RenderJobCreateRequest`,
+  `RenderJobCancelRequest` (`extra="forbid"`, `priority` clamp), `RenderJobPublic`.
+- **Router** `app/api/v1/routers/render_jobs.py` (registered in `main.py`); DI
+  factories in `core/container.py` and `deps.py` aliases.
+- **Docs** — `docs/domain/RENDER_JOB_AGGREGATE.md`, **ADR-0039**, this CHANGELOG,
+  the α7.1 pre-flight, `API_CONTRACT.md` §2 (Resource Map) + §3.2.5, and ROADMAP.
+- **Tests** — unit (`create`/`list`/`get`/`cancel`: happy paths, field
+  persistence, idempotent replay + distinct keys, status filter + isolation,
+  cancel OCC/terminal/re-cancel/stale, event shapes) and integration
+  (API happy/`401`/`404`/`422`/`409`/`412` + cross-owner isolation; repository
+  `add`/dupe/`get_by_project_and_key`/`list_by_project`/`get_owned`/`cancel` +
+  outbox persistence).
+
+#### Version
+- App version bumped to **`0.4.15-phase3-alpha7.1-dev`** (staying on `0.4.x`;
+  `0.5.0` reserved for a product-level milestone — end-to-end render/export — per
+  pre-flight Q7).
+
 ### Phase 3 Slice α6.3b — Timeline Aggregate (clips) (2026-07-14)
 
 Completes the **Timeline aggregate** (Timeline → Tracks → **Clips**) by placing

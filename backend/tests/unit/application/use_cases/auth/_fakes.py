@@ -22,10 +22,12 @@ from uuid import UUID, uuid4
 
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.repositories import (
+    IEventOutboxRepository,
     IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -47,6 +49,8 @@ from app.domain.identity.user import User
 from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
+from app.domain.render.render_job import RenderJob
+from app.domain.render.render_status import RenderStatus
 from app.domain.scenes.scene import Scene
 from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
@@ -1515,6 +1519,162 @@ class FakeTimelineRepository(ITimelineRepository):
         return True
 
 
+# ---- Render-job repository --------------------------------------------
+
+
+@dataclass
+class FakeRenderJobRepository(IRenderJobRepository):
+    """In-memory ``IRenderJobRepository`` for α7.1 use-case unit tests.
+
+    Models the real ``RenderJobRepository`` observable contract: **project-scoped**
+    visibility (no owner columns), the ``(project_id, idempotency_key)`` uniqueness
+    (``add`` raises ``ConflictError`` on a duplicate), newest-first listing with a
+    ``status`` filter, and the **self-versioned** cancel CAS (``cancel`` fences on
+    the job's own ``version`` AND the ``queued``/``running`` terminal guard,
+    bumping ``version`` by exactly 1). ``_order`` is an insertion ordinal so
+    newest-first is deterministic without real timestamps. No ``deleted_at``
+    concept (render jobs are not soft-deleted).
+    """
+
+    _jobs: dict[UUID, RenderJob] = field(default_factory=dict)
+    _order: dict[UUID, int] = field(default_factory=dict)
+    _seq: int = 0
+
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        timeline_id: UUID,
+        pipeline: str,
+        pipeline_version: str,
+        queue: str,
+        priority: int,
+        status: str,
+        idempotency_key: str | None,
+    ) -> RenderJob:
+        if idempotency_key is not None:
+            for existing in self._jobs.values():
+                if (
+                    existing.project_id == project_id
+                    and existing.idempotency_key == idempotency_key
+                ):
+                    raise ConflictError(
+                        "render job already exists for this idempotency key",
+                        details={"constraint": "uq_render_jobs_project_id_idempotency_key"},
+                    )
+        now = datetime.now(UTC)
+        job = RenderJob(
+            id=uuid4(),
+            project_id=project_id,
+            timeline_id=timeline_id,
+            workflow_run_id=None,
+            pipeline=pipeline,
+            pipeline_version=pipeline_version,
+            queue=queue,
+            priority=priority,
+            status=status,
+            started_at=None,
+            finished_at=None,
+            progress="0.00",
+            error=None,
+            output_media_asset_id=None,
+            idempotency_key=idempotency_key,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        self._jobs[job.id] = job
+        self._seq += 1
+        self._order[job.id] = self._seq
+        return job
+
+    async def get_by_project_and_key(
+        self, project_id: UUID, idempotency_key: str
+    ) -> RenderJob | None:
+        for job in self._jobs.values():
+            if job.project_id == project_id and job.idempotency_key == idempotency_key:
+                return job
+        return None
+
+    async def list_by_project(
+        self,
+        project_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[RenderJob]:
+        rows = [j for j in self._jobs.values() if j.project_id == project_id]
+        if status is not None:
+            rows = [j for j in rows if j.status == status]
+        rows.sort(key=lambda j: self._order.get(j.id, 0), reverse=True)
+        return rows
+
+    async def get_owned(self, project_id: UUID, render_job_id: UUID) -> RenderJob | None:
+        job = self._jobs.get(render_job_id)
+        if job is None or job.project_id != project_id:
+            return None
+        return job
+
+    async def cancel(
+        self,
+        project_id: UUID,
+        render_job_id: UUID,
+        expected_version: int,
+    ) -> RenderJob | None:
+        job = self._jobs.get(render_job_id)
+        if job is None or job.project_id != project_id:
+            return None
+        # Version fence + terminal-state guard (queued/running only), mirroring
+        # the real CAS predicate.
+        if job.version != expected_version or not RenderStatus(job.status).is_cancelable:
+            return None
+        updated = replace(
+            job,
+            status=RenderStatus.CANCELED.value,
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[render_job_id] = updated
+        return updated
+
+
+# ---- Event outbox repository ------------------------------------------
+
+
+@dataclass
+class FakeEventOutboxRepository(IEventOutboxRepository):
+    """In-memory ``IEventOutboxRepository`` — records appended events for assertions.
+
+    Each ``add`` appends a dict of the arguments to :attr:`events`, so a test can
+    assert the aggregate type / event type / payload shape produced by a use case
+    (the transactional-outbox contract, blueprint §6 / D9). No publication concept.
+    """
+
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+    async def add(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+        event_version: str = "1.0",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.events.append(
+            {
+                "aggregate_type": aggregate_type,
+                "aggregate_id": aggregate_id,
+                "event_type": event_type,
+                "payload": payload,
+                "occurred_at": occurred_at,
+                "event_version": event_version,
+                "metadata": metadata if metadata is not None else {},
+            }
+        )
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1533,6 +1693,8 @@ class FakeUnitOfWork(IUnitOfWork):
         prompts: FakePromptRepository | None = None,
         media: FakeMediaRepository | None = None,
         timeline: FakeTimelineRepository | None = None,
+        render_jobs: FakeRenderJobRepository | None = None,
+        outbox: FakeEventOutboxRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1549,6 +1711,8 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_prompts = prompts or FakePromptRepository()
         self._fake_media = media or FakeMediaRepository()
         self._fake_timeline = timeline or FakeTimelineRepository()
+        self._fake_render_jobs = render_jobs or FakeRenderJobRepository()
+        self._fake_outbox = outbox or FakeEventOutboxRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -1563,6 +1727,8 @@ class FakeUnitOfWork(IUnitOfWork):
         self.prompts = self._fake_prompts
         self.media = self._fake_media
         self.timeline = self._fake_timeline
+        self.render_jobs = self._fake_render_jobs
+        self.outbox = self._fake_outbox
         return self
 
     async def __aexit__(

@@ -37,6 +37,7 @@ from app.domain.identity.user import User
 from app.domain.media.media_asset import MediaAsset
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
+from app.domain.render.render_job import RenderJob
 from app.domain.scenes.scene import Scene
 from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
@@ -1329,5 +1330,168 @@ class IRoleRepository(ABC):
 
         Raises ``NotFoundError`` if the role code does not exist in the
         ``roles`` lookup table (seeded by migration ``0002``).
+        """
+        ...
+
+
+class IRenderJobRepository(ABC):
+    """Persistence surface for ``render_jobs``. Introduced by Slice α7.1.
+
+    A **render job** is the request to render a project's timeline and the record
+    of that request's lifecycle (RENDER_JOB_AGGREGATE.md / ADR-0039). Unlike the
+    α5–α6 domain aggregates it is an *orchestration* aggregate: it owns its own
+    status machine and is coordinated purely through its own status + domain
+    events (blueprint §7.1 / D9).
+
+    **Ownership is derived through the project** (the ``render_jobs`` row carries
+    no ``tenant_id`` / ``owner_user_id``); every method is therefore
+    **project-scoped**, and the use case has ALREADY established project ownership
+    via :meth:`IProjectRepository.get_owned` before reaching this port — a job
+    under another user's project simply returns ``None`` / is omitted
+    (anti-enumeration, inherited from α5a/α6.3).
+
+    **Self-versioned aggregate (α7.1 D3.1).** ``render_jobs`` carries its **own**
+    ``version`` (``VersionMixin`` + the guarded ``tg_render_jobs_biu_version_bump``
+    trigger); the job fences on its own OCC token (the α6.2 ``MediaAsset`` /
+    α5a ``Project`` self-versioned pattern), NOT a borrowed timeline token.
+    :meth:`cancel` is the version-fenced CAS.
+
+    **No soft-delete.** ``render_jobs`` has no ``deleted_at``; a job is an
+    operationally terminal audit record. "Removal" is the ``canceled`` status.
+    ``updated_at`` / ``version`` are trigger-owned; the repository hand-sets
+    ``version = version + 1`` on the CAS (net +1, mirroring
+    :meth:`IProjectRepository.update_owned`).
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        timeline_id: UUID,
+        pipeline: str,
+        pipeline_version: str,
+        queue: str,
+        priority: int,
+        status: str,
+        idempotency_key: str | None,
+    ) -> RenderJob:
+        """Insert a queued render job for ``project_id`` and return it.
+
+        The caller (``CreateRenderJob``) has ALREADY established project ownership
+        and that ``timeline_id`` is the project's live timeline. ``id`` /
+        timestamps / ``version`` (=1) / ``progress`` (='0.00') are DB-populated;
+        worker-owned fields (``started_at`` / ``finished_at`` / ``error`` /
+        ``output_media_asset_id`` / ``workflow_run_id``) are left ``NULL``.
+
+        Raises ``ConflictError`` if the ``uq_render_jobs_project_id_idempotency_key``
+        uniqueness constraint is violated — i.e. a job with the same
+        ``(project_id, idempotency_key)`` already exists. The caller resolves this
+        by returning the existing job (α7.1 Q4/D3.7); the constraint is the
+        race-safe backstop behind the pre-check.
+        """
+        ...
+
+    @abstractmethod
+    async def get_by_project_and_key(
+        self, project_id: UUID, idempotency_key: str
+    ) -> RenderJob | None:
+        """Return the project's render job with ``idempotency_key``, or ``None``.
+
+        The idempotency pre-check for ``CreateRenderJob`` (α7.1 Q4): a repeat
+        create with a key already used for this project returns the existing job
+        (``200``) instead of minting a new one. ``None`` when no job with that key
+        exists for the project.
+        """
+        ...
+
+    @abstractmethod
+    async def list_by_project(
+        self,
+        project_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[RenderJob]:
+        """Return the project's render jobs, newest first, optionally filtered.
+
+        Ordered by ``created_at DESC, id DESC`` (a total order — no duplicate /
+        skip under timestamp ties). ``status`` (a ``render_status`` value) narrows
+        the result when provided. Project-scoped (the caller established
+        ownership). Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(self, project_id: UUID, render_job_id: UUID) -> RenderJob | None:
+        """Return the project's render job with ``render_job_id``, or ``None``.
+
+        ``None`` when the job is missing OR belongs to a different project —
+        deliberately indistinguishable so ``GET`` maps both to a uniform ``404``
+        (α7.1 D3.3, mirroring α5a D5). Addressed by UUID ``id``.
+        """
+        ...
+
+    @abstractmethod
+    async def cancel(
+        self,
+        project_id: UUID,
+        render_job_id: UUID,
+        expected_version: int,
+    ) -> RenderJob | None:
+        """Version-fenced cancel: move ``queued``/``running`` → ``canceled`` (α7.1).
+
+        Atomic CAS: ``UPDATE render_jobs SET status='canceled', version=version+1
+        WHERE id=:id AND project_id=:pid AND version=:expected AND status IN
+        ('queued','running')``. Returns the canceled :class:`RenderJob`, or
+        ``None`` when no row matched — which the use case disambiguates against a
+        prior ``get_owned``:
+
+        * job absent / wrong project → already mapped to ``404`` upstream;
+        * ``version`` mismatch on a still-cancelable job → ``412`` (D3.5);
+        * ``status`` no longer cancelable (``succeeded`` / ``failed``) → the use
+          case maps to ``409``; a re-cancel of an already-``canceled`` job is a
+          ``200`` no-op resolved upstream (D3.6).
+
+        The ``status`` predicate makes the terminal-state guard race-safe at the
+        DB (a worker finishing the job between the use case's read and this CAS
+        cannot be silently overwritten). ``version`` is hand-set ``+1`` (net +1
+        over the guarded trigger); ``updated_at`` is co-set to ``now()``.
+        """
+        ...
+
+
+class IEventOutboxRepository(ABC):
+    """Persistence surface for the transactional outbox (``event_outbox``, CR-4).
+
+    Introduced by Slice α7.1 to exercise the outbox pattern (blueprint §6 / D9):
+    a domain event is written to ``event_outbox`` **in the same transaction** as
+    the state change that produced it, so state + intent-to-publish commit
+    atomically. α7.1 only *produces* rows (``RenderJobCreated`` /
+    ``RenderJobCanceled``); the relay/dispatcher that publishes and marks them
+    ``published_at`` is a later slice (α7.3+). Append-only from this port's view —
+    no reads, no updates.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+        event_version: str = "1.0",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one unpublished event row (``published_at`` left ``NULL``).
+
+        Written within the caller's UnitOfWork transaction so it commits with the
+        aggregate mutation (atomic state + event). ``aggregate_type`` /
+        ``aggregate_id`` identify the source aggregate (e.g. ``"render_job"`` +
+        the job id); ``event_type`` is the event name (e.g. ``RenderJobCreated``);
+        ``payload`` is the JSON event body; ``occurred_at`` is the domain event
+        instant. ``id`` / ``attempts`` (=0) are DB-populated; ``metadata`` defaults
+        to ``{}``.
         """
         ...

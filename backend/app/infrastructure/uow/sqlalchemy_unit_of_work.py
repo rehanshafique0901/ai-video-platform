@@ -19,10 +19,12 @@ from typing import Self, cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.interfaces.repositories import (
+    IEventOutboxRepository,
     IMediaRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
@@ -31,12 +33,14 @@ from app.application.interfaces.repositories import (
     IUserRepository,
 )
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.infrastructure.repositories.event_outbox_repository import EventOutboxRepository
 from app.infrastructure.repositories.media_repository import MediaRepository
 from app.infrastructure.repositories.project_repository import ProjectRepository
 from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
 )
 from app.infrastructure.repositories.prompt_repository import PromptRepository
+from app.infrastructure.repositories.render_job_repository import RenderJobRepository
 from app.infrastructure.repositories.role_repository import RoleRepository
 from app.infrastructure.repositories.scene_repository import SceneRepository
 from app.infrastructure.repositories.session_repository import SessionRepository
@@ -76,6 +80,8 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.prompts = cast(IPromptRepository, PromptRepository(self._session))
         self.media = cast(IMediaRepository, MediaRepository(self._session))
         self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
+        self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
+        self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
         return self
 
     async def __aexit__(
