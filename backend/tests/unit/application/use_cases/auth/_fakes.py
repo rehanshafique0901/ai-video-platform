@@ -34,6 +34,7 @@ from app.application.interfaces.repositories import (
     ITenantRepository,
     ITimelineRepository,
     IUserRepository,
+    IWorkflowRunRepository,
 )
 from app.application.interfaces.security import (
     IPasswordHasher,
@@ -56,6 +57,9 @@ from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
 from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
+from app.domain.workflow.workflow_run import WorkflowCheckpoint, WorkflowRun, WorkflowStep
+from app.domain.workflow.workflow_run_status import WorkflowRunStatus
+from app.domain.workflow.workflow_step_status import WorkflowStepStatus
 
 # ---- Password hasher --------------------------------------------------
 
@@ -1675,6 +1679,281 @@ class FakeEventOutboxRepository(IEventOutboxRepository):
         )
 
 
+# ---- Workflow-run repository ------------------------------------------
+
+
+@dataclass
+class FakeWorkflowRunRepository(IWorkflowRunRepository):
+    """In-memory ``IWorkflowRunRepository`` for α7.2 use-case unit tests.
+
+    Models the real ``WorkflowRunRepository`` observable contract: **project-scoped**
+    visibility (no owner columns), the ``(project_id, idempotency_key)`` uniqueness
+    (``add`` raises ``ConflictError`` on a duplicate), newest-first listing with a
+    ``status`` filter, and the **status-guarded CAS** transitions (no ``version``
+    token — a transition returns the row only when the current status is in the
+    allowed set, else ``None``). Steps are seeded ``pending``; checkpoints are
+    append-only (a plain list, never mutated). ``_order`` is an insertion ordinal so
+    newest-first is deterministic without real timestamps.
+    """
+
+    _runs: dict[UUID, WorkflowRun] = field(default_factory=dict)
+    _steps: dict[UUID, WorkflowStep] = field(default_factory=dict)
+    _checkpoints: list[WorkflowCheckpoint] = field(default_factory=list)
+    _order: dict[UUID, int] = field(default_factory=dict)
+    _seq: int = 0
+    _ckpt_seq: int = 0
+
+    # ---- create + seed ----
+
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        workflow_key: str,
+        workflow_version: str,
+        status: str,
+        input_snapshot: dict[str, Any],
+        triggered_by_user_id: UUID | None,
+        idempotency_key: str | None,
+    ) -> WorkflowRun:
+        if idempotency_key is not None:
+            for existing in self._runs.values():
+                if (
+                    existing.project_id == project_id
+                    and existing.idempotency_key == idempotency_key
+                ):
+                    raise ConflictError(
+                        "workflow run already exists for this idempotency key",
+                        details={"constraint": "uq_workflow_runs_project_id_idempotency_key"},
+                    )
+        now = datetime.now(UTC)
+        run = WorkflowRun(
+            id=uuid4(),
+            project_id=project_id,
+            workflow_key=workflow_key,
+            workflow_version=workflow_version,
+            status=status,
+            started_at=None,
+            finished_at=None,
+            triggered_by_user_id=triggered_by_user_id,
+            idempotency_key=idempotency_key,
+            input_snapshot=dict(input_snapshot),
+            output_summary=None,
+            error=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._runs[run.id] = run
+        self._seq += 1
+        self._order[run.id] = self._seq
+        return run
+
+    async def seed_steps(
+        self, workflow_run_id: UUID, steps: list[tuple[int, str]]
+    ) -> list[WorkflowStep]:
+        now = datetime.now(UTC)
+        created: list[WorkflowStep] = []
+        for index, name in steps:
+            step = WorkflowStep(
+                id=uuid4(),
+                workflow_run_id=workflow_run_id,
+                step_index=index,
+                step_name=name,
+                status=WorkflowStepStatus.PENDING.value,
+                started_at=None,
+                finished_at=None,
+                retries=0,
+                input=None,
+                output=None,
+                error=None,
+                created_at=now,
+                updated_at=now,
+            )
+            self._steps[step.id] = step
+            created.append(step)
+        return sorted(created, key=lambda s: s.step_index)
+
+    # ---- reads ----
+
+    async def get_by_project_and_key(
+        self, project_id: UUID, idempotency_key: str
+    ) -> WorkflowRun | None:
+        for run in self._runs.values():
+            if run.project_id == project_id and run.idempotency_key == idempotency_key:
+                return run
+        return None
+
+    async def list_by_project(
+        self, project_id: UUID, *, status: str | None = None
+    ) -> list[WorkflowRun]:
+        rows = [r for r in self._runs.values() if r.project_id == project_id]
+        if status is not None:
+            rows = [r for r in rows if r.status == status]
+        rows.sort(key=lambda r: self._order.get(r.id, 0), reverse=True)
+        return rows
+
+    async def get_owned(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
+        run = self._runs.get(workflow_run_id)
+        if run is None or run.project_id != project_id:
+            return None
+        return run
+
+    def _find_step(self, workflow_run_id: UUID, step_index: int) -> WorkflowStep | None:
+        for step in self._steps.values():
+            if step.workflow_run_id == workflow_run_id and step.step_index == step_index:
+                return step
+        return None
+
+    async def list_steps(self, workflow_run_id: UUID) -> list[WorkflowStep]:
+        rows = [s for s in self._steps.values() if s.workflow_run_id == workflow_run_id]
+        rows.sort(key=lambda s: s.step_index)
+        return rows
+
+    async def latest_checkpoint(
+        self, workflow_run_id: UUID, step_index: int | None = None
+    ) -> WorkflowCheckpoint | None:
+        matches = [c for c in self._checkpoints if c.workflow_run_id == workflow_run_id]
+        if step_index is not None:
+            matches = [c for c in matches if c.step_index == step_index]
+        return matches[-1] if matches else None
+
+    # ---- run transitions (status-guarded CAS) ----
+
+    def _cas_run(
+        self, workflow_run_id: UUID, allowed: set[str], **changes: Any
+    ) -> WorkflowRun | None:
+        run = self._runs.get(workflow_run_id)
+        if run is None or run.status not in allowed:
+            return None
+        updated = replace(run, updated_at=datetime.now(UTC), **changes)
+        self._runs[workflow_run_id] = updated
+        return updated
+
+    async def mark_run_running(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        return self._cas_run(
+            workflow_run_id,
+            {WorkflowRunStatus.QUEUED.value},
+            status=WorkflowRunStatus.RUNNING.value,
+            started_at=datetime.now(UTC),
+        )
+
+    async def mark_run_succeeded(
+        self, workflow_run_id: UUID, output_summary: dict[str, Any]
+    ) -> WorkflowRun | None:
+        return self._cas_run(
+            workflow_run_id,
+            {WorkflowRunStatus.RUNNING.value},
+            status=WorkflowRunStatus.SUCCEEDED.value,
+            output_summary=dict(output_summary),
+            finished_at=datetime.now(UTC),
+        )
+
+    async def mark_run_failed(
+        self, workflow_run_id: UUID, error: dict[str, Any]
+    ) -> WorkflowRun | None:
+        return self._cas_run(
+            workflow_run_id,
+            {WorkflowRunStatus.RUNNING.value},
+            status=WorkflowRunStatus.FAILED.value,
+            error=dict(error),
+            finished_at=datetime.now(UTC),
+        )
+
+    async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
+        run = self._runs.get(workflow_run_id)
+        if run is None or run.project_id != project_id:
+            return None
+        if not WorkflowRunStatus(run.status).is_cancelable:
+            return None
+        updated = replace(
+            run,
+            status=WorkflowRunStatus.CANCELED.value,
+            finished_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self._runs[workflow_run_id] = updated
+        return updated
+
+    # ---- step transitions (status-guarded CAS) ----
+
+    def _cas_step(
+        self, workflow_run_id: UUID, step_index: int, allowed: set[str], **changes: Any
+    ) -> WorkflowStep | None:
+        step = self._find_step(workflow_run_id, step_index)
+        if step is None or step.status not in allowed:
+            return None
+        updated = replace(step, updated_at=datetime.now(UTC), **changes)
+        self._steps[step.id] = updated
+        return updated
+
+    async def mark_step_running(
+        self, workflow_run_id: UUID, step_index: int
+    ) -> WorkflowStep | None:
+        return self._cas_step(
+            workflow_run_id,
+            step_index,
+            {WorkflowStepStatus.PENDING.value, WorkflowStepStatus.RETRYING.value},
+            status=WorkflowStepStatus.RUNNING.value,
+            started_at=datetime.now(UTC),
+        )
+
+    async def mark_step_succeeded(
+        self, workflow_run_id: UUID, step_index: int, output: dict[str, Any]
+    ) -> WorkflowStep | None:
+        return self._cas_step(
+            workflow_run_id,
+            step_index,
+            {WorkflowStepStatus.RUNNING.value},
+            status=WorkflowStepStatus.SUCCEEDED.value,
+            output=dict(output),
+            finished_at=datetime.now(UTC),
+        )
+
+    async def mark_step_retrying(
+        self, workflow_run_id: UUID, step_index: int, error: dict[str, Any]
+    ) -> WorkflowStep | None:
+        step = self._find_step(workflow_run_id, step_index)
+        if step is None or step.status != WorkflowStepStatus.RUNNING.value:
+            return None
+        updated = replace(
+            step,
+            status=WorkflowStepStatus.RETRYING.value,
+            retries=step.retries + 1,
+            error=dict(error),
+            updated_at=datetime.now(UTC),
+        )
+        self._steps[step.id] = updated
+        return updated
+
+    async def mark_step_failed(
+        self, workflow_run_id: UUID, step_index: int, error: dict[str, Any]
+    ) -> WorkflowStep | None:
+        return self._cas_step(
+            workflow_run_id,
+            step_index,
+            {WorkflowStepStatus.RUNNING.value},
+            status=WorkflowStepStatus.FAILED.value,
+            error=dict(error),
+            finished_at=datetime.now(UTC),
+        )
+
+    # ---- checkpoints (append-only) ----
+
+    async def append_checkpoint(
+        self, workflow_run_id: UUID, step_index: int, state: dict[str, Any]
+    ) -> WorkflowCheckpoint:
+        self._ckpt_seq += 1
+        checkpoint = WorkflowCheckpoint(
+            id=uuid4(),
+            workflow_run_id=workflow_run_id,
+            step_index=step_index,
+            state=dict(state),
+            created_at=datetime.now(UTC),
+        )
+        self._checkpoints.append(checkpoint)
+        return checkpoint
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1695,6 +1974,7 @@ class FakeUnitOfWork(IUnitOfWork):
         timeline: FakeTimelineRepository | None = None,
         render_jobs: FakeRenderJobRepository | None = None,
         outbox: FakeEventOutboxRepository | None = None,
+        workflow_runs: FakeWorkflowRunRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1713,6 +1993,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_timeline = timeline or FakeTimelineRepository()
         self._fake_render_jobs = render_jobs or FakeRenderJobRepository()
         self._fake_outbox = outbox or FakeEventOutboxRepository()
+        self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -1729,6 +2010,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.timeline = self._fake_timeline
         self.render_jobs = self._fake_render_jobs
         self.outbox = self._fake_outbox
+        self.workflow_runs = self._fake_workflow_runs
         return self
 
     async def __aexit__(

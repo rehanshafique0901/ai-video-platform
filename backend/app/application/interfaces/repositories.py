@@ -43,6 +43,7 @@ from app.domain.timeline.clip import Clip
 from app.domain.timeline.timeline import Timeline
 from app.domain.timeline.track import Track
 from app.domain.versions.project_version import ProjectVersion, ProjectVersionSummary
+from app.domain.workflow.workflow_run import WorkflowCheckpoint, WorkflowRun, WorkflowStep
 
 
 class IUserRepository(ABC):
@@ -1494,4 +1495,181 @@ class IEventOutboxRepository(ABC):
         instant. ``id`` / ``attempts`` (=0) are DB-populated; ``metadata`` defaults
         to ``{}``.
         """
+        ...
+
+
+class IWorkflowRunRepository(ABC):
+    """Persistence surface for ``workflow_runs`` (+ steps + checkpoints). Slice α7.2.
+
+    A **workflow run** is the record of one workflow execution and the orchestration
+    graph beneath it — ordered ``workflow_steps`` and append-only
+    ``workflow_checkpoints`` (WORKFLOW_RUN_AGGREGATE.md / ADR-0040). Like
+    ``RenderJob`` it is an *orchestration* aggregate that owns its own status
+    machine and coordinates through its status + outbox events (D9), and its
+    **ownership is derived through the project** (no ``tenant_id`` / ``owner_user_id``
+    column) — every method is **project-scoped** and the use case has ALREADY
+    established project ownership before reaching this port.
+
+    **Status-guarded CAS, no version token (α7.2 D3.2).** Neither ``workflow_runs``
+    nor ``workflow_steps`` carries a ``version`` column (they are not in
+    ``_VERSION_BUMP_TABLES``). Every lifecycle transition is therefore a
+    **status-predicated** ``UPDATE … WHERE status IN (<allowed_from>)`` compare-and-
+    swap (returns the row on success, ``None`` when the guard did not match — the
+    use case re-classifies to ``404`` / ``409`` / idempotent ``200``). Non-transition
+    metadata is last-writer-wins. This is the workflow-specific concurrency model —
+    a documented divergence from ``RenderJob``'s version-fenced cancel.
+
+    **Checkpoints are append-only (ADR-0014)** — :meth:`append_checkpoint` inserts;
+    the DB ``reject_mutation`` trigger blocks UPDATE/DELETE. **No soft-delete** — a
+    run is a terminal audit record; "removal" is the ``canceled`` status.
+    """
+
+    # ---- create + seed -------------------------------------------------
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        project_id: UUID,
+        workflow_key: str,
+        workflow_version: str,
+        status: str,
+        input_snapshot: dict[str, Any],
+        triggered_by_user_id: UUID | None,
+        idempotency_key: str | None,
+    ) -> WorkflowRun:
+        """Insert a ``queued`` workflow run for ``project_id`` and return it.
+
+        The caller (``CreateWorkflowRun``) has ALREADY established project ownership
+        and resolved ``workflow_key@workflow_version`` against the registry. ``id`` /
+        timestamps are DB-populated; ``started_at`` / ``finished_at`` /
+        ``output_summary`` / ``error`` are left ``NULL``. Steps are seeded separately
+        via :meth:`seed_steps`.
+
+        Raises ``ConflictError`` on the ``uq_workflow_runs_project_id_idempotency_key``
+        violation — the caller resolves it by returning the existing run (Q7, α7.1
+        parity); the constraint is the race-safe backstop behind the pre-check.
+        """
+        ...
+
+    @abstractmethod
+    async def seed_steps(
+        self, workflow_run_id: UUID, steps: list[tuple[int, str]]
+    ) -> list[WorkflowStep]:
+        """Bulk-insert the run's ``pending`` steps from ``(step_index, step_name)`` pairs.
+
+        Called once, immediately after :meth:`add`, from the same transaction. The
+        ``uq_workflow_steps_workflow_run_id_step_index`` uniqueness makes seeding
+        resume-safe (never duplicates a step). Returns the seeded steps in
+        ``step_index`` order.
+        """
+        ...
+
+    # ---- reads ---------------------------------------------------------
+
+    @abstractmethod
+    async def get_by_project_and_key(
+        self, project_id: UUID, idempotency_key: str
+    ) -> WorkflowRun | None:
+        """Return the project's run with ``idempotency_key``, or ``None`` (Q7 pre-check)."""
+        ...
+
+    @abstractmethod
+    async def list_by_project(
+        self, project_id: UUID, *, status: str | None = None
+    ) -> list[WorkflowRun]:
+        """Return the project's runs, newest first (``created_at DESC, id DESC``), optionally by status."""
+        ...
+
+    @abstractmethod
+    async def get_owned(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
+        """Return the project's run with ``workflow_run_id``, or ``None`` (uniform ``404`` upstream)."""
+        ...
+
+    @abstractmethod
+    async def list_steps(self, workflow_run_id: UUID) -> list[WorkflowStep]:
+        """Return the run's steps in ``step_index`` order."""
+        ...
+
+    @abstractmethod
+    async def latest_checkpoint(
+        self, workflow_run_id: UUID, step_index: int | None = None
+    ) -> WorkflowCheckpoint | None:
+        """Return the most recent checkpoint for the run (or a given ``step_index``), or ``None``.
+
+        Ordered by ``created_at DESC, id DESC``. Used by the runner to obtain a
+        step's resume state (the preceding step's latest checkpoint).
+        """
+        ...
+
+    # ---- run transitions (status-guarded CAS) --------------------------
+
+    @abstractmethod
+    async def mark_run_running(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        """CAS ``queued → running`` (sets ``started_at``). ``None`` if not ``queued``."""
+        ...
+
+    @abstractmethod
+    async def mark_run_succeeded(
+        self, workflow_run_id: UUID, output_summary: dict[str, Any]
+    ) -> WorkflowRun | None:
+        """CAS ``running → succeeded`` (sets ``output_summary`` + ``finished_at``). ``None`` if not ``running``."""
+        ...
+
+    @abstractmethod
+    async def mark_run_failed(
+        self, workflow_run_id: UUID, error: dict[str, Any]
+    ) -> WorkflowRun | None:
+        """CAS ``running → failed`` (sets ``error`` + ``finished_at``). ``None`` if not ``running``."""
+        ...
+
+    @abstractmethod
+    async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
+        """Status-guarded cancel: ``{queued,running,paused} → canceled`` (sets ``finished_at``).
+
+        ``UPDATE … WHERE id=? AND project_id=? AND status IN
+        ('queued','running','paused')``. Returns the canceled run, or ``None`` when
+        no row matched — the use case re-classifies against a prior ``get_owned``
+        (already ``canceled`` → ``200`` no-op; ``succeeded``/``failed`` → ``409``).
+        There is **no** version fence (no token exists — D3.2/D3.7).
+        """
+        ...
+
+    # ---- step transitions (status-guarded CAS) -------------------------
+
+    @abstractmethod
+    async def mark_step_running(
+        self, workflow_run_id: UUID, step_index: int
+    ) -> WorkflowStep | None:
+        """CAS ``{pending,retrying} → running`` (sets ``started_at``). ``None`` if not runnable."""
+        ...
+
+    @abstractmethod
+    async def mark_step_succeeded(
+        self, workflow_run_id: UUID, step_index: int, output: dict[str, Any]
+    ) -> WorkflowStep | None:
+        """CAS ``running → succeeded`` (sets ``output`` + ``finished_at``). ``None`` if not ``running``."""
+        ...
+
+    @abstractmethod
+    async def mark_step_retrying(
+        self, workflow_run_id: UUID, step_index: int, error: dict[str, Any]
+    ) -> WorkflowStep | None:
+        """CAS ``running → retrying`` (``retries = retries + 1``, sets ``error``). ``None`` if not ``running``."""
+        ...
+
+    @abstractmethod
+    async def mark_step_failed(
+        self, workflow_run_id: UUID, step_index: int, error: dict[str, Any]
+    ) -> WorkflowStep | None:
+        """CAS ``running → failed`` (sets ``error`` + ``finished_at``). ``None`` if not ``running``."""
+        ...
+
+    # ---- checkpoints (append-only) -------------------------------------
+
+    @abstractmethod
+    async def append_checkpoint(
+        self, workflow_run_id: UUID, step_index: int, state: dict[str, Any]
+    ) -> WorkflowCheckpoint:
+        """Append one immutable resume point (ADR-0014). Never updates an existing row."""
         ...

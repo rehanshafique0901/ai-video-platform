@@ -81,6 +81,11 @@ from app.application.use_cases.versions.diff_versions import DiffProjectVersions
 from app.application.use_cases.versions.get_version import GetProjectVersion
 from app.application.use_cases.versions.list_versions import ListProjectVersions
 from app.application.use_cases.versions.restore_version import RestoreProjectVersion
+from app.application.use_cases.workflow.advance_workflow_run import AdvanceWorkflowRun
+from app.application.use_cases.workflow.cancel_workflow_run import CancelWorkflowRun
+from app.application.use_cases.workflow.create_workflow_run import CreateWorkflowRun
+from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
+from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
@@ -509,3 +514,30 @@ def get_get_render_job_use_case() -> GetRenderJob:
 
 def get_cancel_render_job_use_case() -> CancelRenderJob:
     return CancelRenderJob(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α7.2 — Workflow runs)
+# ---------------------------------------------------------------------
+# The runner-bearing use cases (create/advance) default to the module-level
+# ``WORKFLOW_REGISTRY``; tests inject their own registry directly.
+
+
+def get_create_workflow_run_use_case() -> CreateWorkflowRun:
+    return CreateWorkflowRun(uow=get_unit_of_work())
+
+
+def get_list_workflow_runs_use_case() -> ListWorkflowRuns:
+    return ListWorkflowRuns(uow=get_unit_of_work())
+
+
+def get_get_workflow_run_use_case() -> GetWorkflowRun:
+    return GetWorkflowRun(uow=get_unit_of_work())
+
+
+def get_advance_workflow_run_use_case() -> AdvanceWorkflowRun:
+    return AdvanceWorkflowRun(uow=get_unit_of_work())
+
+
+def get_cancel_workflow_run_use_case() -> CancelWorkflowRun:
+    return CancelWorkflowRun(uow=get_unit_of_work())

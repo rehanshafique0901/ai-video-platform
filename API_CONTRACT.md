@@ -63,6 +63,7 @@ Error:
 | AI — Subtitles | `/ai/subtitles` |
 | Timeline (α6.3a/b) | `/projects/{id}/timeline`, `/projects/{id}/timeline/tracks`, `/projects/{id}/timeline/tracks/{track_id}`, `…/tracks/{track_id}/clips`, `…/tracks/{track_id}/clips/{clip_id}` |
 | Render Jobs (α7.1) | `/projects/{id}/render-jobs`, `/projects/{id}/render-jobs/{render_job_id}`, `…/render-jobs/{render_job_id}/cancel` |
+| Workflow Runs (α7.2) | `/projects/{id}/workflow-runs`, `/projects/{id}/workflow-runs/{workflow_run_id}`, `…/workflow-runs/{workflow_run_id}/advance`, `…/workflow-runs/{workflow_run_id}/cancel` |
 | Export | `/projects/{id}/export` |
 | Asset Library (CR-8) | `/library/assets`, `/library/assets/{id}` |
 | Workflows (CR-7) | `/workflows`, `/workflows/{id}`, `/workflows/{id}/pause|resume|cancel` |
@@ -535,6 +536,89 @@ POST   /projects/{project_id}/render-jobs/{render_job_id}/cancel     version-fen
 > priority, status, version`; `event_version="1.0"`) — α7.1 only **produces** outbox
 > rows (no dispatcher; the relay is α7.3). See `docs/domain/RENDER_JOB_AGGREGATE.md`
 > and `docs/decisions/ADR-0039-render-job-orchestration-aggregate.md`.
+
+#### 3.2.6 Workflow runs (Phase 3 α7.2)
+
+```
+POST   /projects/{project_id}/workflow-runs                              queue a run (idempotent)
+GET    /projects/{project_id}/workflow-runs                              list runs (newest first; ?status= filter)
+GET    /projects/{project_id}/workflow-runs/{workflow_run_id}            one run (+ steps + latest checkpoint)
+POST   /projects/{project_id}/workflow-runs/{workflow_run_id}/advance    run the deterministic runner
+POST   /projects/{project_id}/workflow-runs/{workflow_run_id}/cancel     status-guarded cancel
+```
+
+> **Shipped in Phase 3 α7.2 (`WorkflowRun` aggregate + the synchronous deterministic
+> runner — NO worker, NO providers).** A **WorkflowRun** is the record of one workflow
+> execution and the orchestration graph beneath it — the **second** orchestration
+> aggregate (after `RenderJob`) and the first that **sequences** work: it owns an
+> ordered graph of `WorkflowStep` children and **append-only** `WorkflowCheckpoint`
+> children (ADR-0040, pre-flight D3.10). It is **project-nested**; ownership is derived
+> through the project, so every access runs a **two-level gate** (project ownership →
+> run resolution, both `404` — anti-enumeration). It never mutates `projects.version`
+> / `RenderJob` / `MediaAsset` / `Timeline` — it coordinates via events.
+>
+> **Status-guarded CAS, not versioned OCC (ADR-0040 D2 — divergence from ADR-0039).**
+> `workflow_runs` / `workflow_steps` carry **no `version` column** (not in
+> `_VERSION_BUMP_TABLES`), so every lifecycle transition is a **status-predicated
+> compare-and-swap** (`UPDATE … WHERE status IN (<allowed_from>)`); metadata is
+> last-writer-wins. There is **no `?version=` on any endpoint, no `412`, and no
+> `DELETE`** — the wire carries no OCC token, and "removal" is the `cancel` status
+> transition (a canceled run stays `GET`-able).
+>
+> **Steps are pure, deterministic, side-effect-free (D3.11).** A step handler is a
+> **pure function** `(StepContext) -> StepResult` that *returns a command/result
+> describing* what should happen — it never calls providers. The **runner** (the
+> imperative shell) interprets it: persists the step output, appends the checkpoint,
+> emits events, and handles retries. α7.2 ships four provider-free registry workflows
+> at `key@1.0.0`: `noop-chain`, `retry-succeed`, `terminal-fail`, `retry-exhaust`.
+>
+> **Status machine (α7.2 — synchronous runner).** `queued` on create (steps seeded
+> `pending`); `advance` moves `queued → running`, runs every step, and settles the run
+> `→ succeeded` / `→ failed` within one call; `cancel` moves `queued`/`running`/`paused`
+> `→ canceled`. `paused` is **not** produced by the synchronous runner (pause/resume is
+> α8.x).
+>
+> * **`POST …/workflow-runs`** — queue. Body `{ workflow_key, workflow_version,
+>   input_snapshot?, idempotency_key? }` (`extra="forbid"`; `input_snapshot` defaults
+>   `{}`). `workflow_key@workflow_version` is resolved against the **in-code registry
+>   before any DB work** — an unknown pair → **`422`** (the project IS visible, so not
+>   `404`). Seeds ordered `pending` steps from the definition. Returns `201` +
+>   `WorkflowRunPublic` (`status='queued'`) and emits `WorkflowRunCreated`.
+>   **Idempotency (Q7):** a repeat with the **same `idempotency_key`** for the project
+>   returns the **existing** run with **`200`** (no duplicate, no second event).
+>   Missing/foreign project → `404`.
+> * **`GET …/workflow-runs`** — the project's runs, **newest first** (`created_at`
+>   DESC, `id` DESC tiebreak), as summaries. Optional **`?status=`** filters by one
+>   `workflow_status` value (bad enum → `422`). Missing/foreign project → `404`.
+> * **`GET …/workflow-runs/{workflow_run_id}`** — one run with its ordered `steps` and
+>   `latest_checkpoint`. Two-level gate; unknown run, or a run under another owner's
+>   project → `404`.
+> * **`POST …/workflow-runs/{workflow_run_id}/advance`** — **no body**. Runs the
+>   deterministic runner to a terminal state (resume-safe: already-`succeeded`/`skipped`
+>   steps are skipped, threading their checkpoint forward). `404` (project/run not
+>   visible); **`409`** if already terminal; otherwise **`200`** + `WorkflowRunPublic`
+>   (`succeeded` or `failed` — the outcome is in the body). Emits `WorkflowRunStarted`
+>   (first `queued → running`), one `WorkflowStepCompleted` per step, and a terminal
+>   `WorkflowRunSucceeded` / `WorkflowRunFailed`.
+> * **`POST …/workflow-runs/{workflow_run_id}/cancel`** — **no body**. A status-guarded
+>   CAS decided **404 → classify**:
+>   * missing/foreign project or run → `404`;
+>   * already `canceled` → **`200`** idempotent no-op (no event);
+>   * `succeeded`/`failed` → **`409`** (completed work is not cancelable);
+>   * `queued`/`running`/`paused` → **`200`** + `WorkflowRunPublic` (`status='canceled'`)
+>     and emits `WorkflowRunCanceled`.
+>
+> `WorkflowRunSummary` (list) = `{ id, project_id, workflow_key, workflow_version,
+> status, started_at, finished_at, triggered_by_user_id, idempotency_key,
+> output_summary, error, created_at, updated_at }`. `WorkflowRunPublic` (detail) adds
+> `{ input_snapshot, steps[], latest_checkpoint }`, where each step is `{ id,
+> step_index, step_name, status, started_at, finished_at, retries, output, error }`
+> and a checkpoint is `{ id, step_index, state, created_at }`. There is **no `version`
+> field**. The six events carry orchestration fields only (`workflow_run_id,
+> project_id, workflow_key, workflow_version, status`, plus step coordinates on the
+> step event; `event_version="1.0"`) — α7.2 only **produces** outbox rows (no
+> dispatcher; the relay is α7.3). See `docs/domain/WORKFLOW_RUN_AGGREGATE.md` and
+> `docs/decisions/ADR-0040-workflow-run-orchestration-aggregate.md`.
 
 ### 3.3 Project Versions (CR-6)
 

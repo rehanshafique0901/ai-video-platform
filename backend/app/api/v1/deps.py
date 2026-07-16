@@ -83,6 +83,11 @@ from app.application.use_cases.versions.diff_versions import DiffProjectVersions
 from app.application.use_cases.versions.get_version import GetProjectVersion
 from app.application.use_cases.versions.list_versions import ListProjectVersions
 from app.application.use_cases.versions.restore_version import RestoreProjectVersion
+from app.application.use_cases.workflow.advance_workflow_run import AdvanceWorkflowRun
+from app.application.use_cases.workflow.cancel_workflow_run import CancelWorkflowRun
+from app.application.use_cases.workflow.create_workflow_run import CreateWorkflowRun
+from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
+from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
 from app.core import container
 from app.core.errors import UnauthorizedError
 from app.domain.identity.user import User
@@ -211,6 +216,22 @@ CreateRenderJobDep = Annotated[CreateRenderJob, Depends(container.get_create_ren
 ListRenderJobsDep = Annotated[ListRenderJobs, Depends(container.get_list_render_jobs_use_case)]
 GetRenderJobDep = Annotated[GetRenderJob, Depends(container.get_get_render_job_use_case)]
 CancelRenderJobDep = Annotated[CancelRenderJob, Depends(container.get_cancel_render_job_use_case)]
+
+# ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
+
+CreateWorkflowRunDep = Annotated[
+    CreateWorkflowRun, Depends(container.get_create_workflow_run_use_case)
+]
+ListWorkflowRunsDep = Annotated[
+    ListWorkflowRuns, Depends(container.get_list_workflow_runs_use_case)
+]
+GetWorkflowRunDep = Annotated[GetWorkflowRun, Depends(container.get_get_workflow_run_use_case)]
+AdvanceWorkflowRunDep = Annotated[
+    AdvanceWorkflowRun, Depends(container.get_advance_workflow_run_use_case)
+]
+CancelWorkflowRunDep = Annotated[
+    CancelWorkflowRun, Depends(container.get_cancel_workflow_run_use_case)
+]
 
 
 def _bearer_access_token(authorization: str | None = Header(default=None)) -> str:

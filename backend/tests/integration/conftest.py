@@ -169,6 +169,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         ITenantRepository,
         ITimelineRepository,
         IUserRepository,
+        IWorkflowRunRepository,
     )
     from app.application.interfaces.unit_of_work import IUnitOfWork
     from app.infrastructure.repositories.event_outbox_repository import (
@@ -187,6 +188,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.tenant_repository import TenantRepository
     from app.infrastructure.repositories.timeline_repository import TimelineRepository
     from app.infrastructure.repositories.user_repository import UserRepository
+    from app.infrastructure.repositories.workflow_run_repository import (
+        WorkflowRunRepository,
+    )
 
     container.reset()
     container.init(settings)
@@ -236,6 +240,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
                 self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
                 self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
+                self.workflow_runs = cast(
+                    IWorkflowRunRepository, WorkflowRunRepository(self._session)
+                )
                 return self
 
             async def __aexit__(

@@ -34,6 +34,7 @@ from app.application.interfaces.repositories import (
     ITenantRepository,
     ITimelineRepository,
     IUserRepository,
+    IWorkflowRunRepository,
 )
 
 
@@ -66,6 +67,7 @@ class IUnitOfWork(ABC):
     timeline: ITimelineRepository  # α6.3a
     render_jobs: IRenderJobRepository  # α7.1
     outbox: IEventOutboxRepository  # α7.1
+    workflow_runs: IWorkflowRunRepository  # α7.2
 
     async def __aenter__(self) -> Self:
         return self

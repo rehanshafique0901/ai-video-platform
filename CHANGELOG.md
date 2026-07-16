@@ -6,6 +6,105 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.2 — WorkflowRun Aggregate + Deterministic Runner (the first sequencing orchestration slice) (2026-07-16)
+
+Introduces the **WorkflowRun aggregate** and a **synchronous, deterministic
+runner** — the record of one workflow execution and the orchestration graph
+beneath it. It is the project's **second** orchestration aggregate (after α7.1's
+`RenderJob`) and the first that **sequences** work: it owns an ordered graph of
+`WorkflowStep` children and **append-only** `WorkflowCheckpoint` children. Backed
+by the existing baseline `workflow_runs` / `workflow_steps` / `workflow_checkpoints`
+tables (**no migration** — the tables, the `workflow_status` / `step_status` ENUMs,
+the per-project `idempotency_key` unique, the per-run `step_index` unique, and the
+append-only checkpoint trigger all already exist). WorkflowRun uses **status-guarded
+CAS** — `workflow_runs` / `workflow_steps` carry **no `version` column** (not in
+`_VERSION_BUMP_TABLES`), a **deliberate divergence** from `RenderJob`'s self-versioned
+OCC forced by the baseline schema (ADR-0040 D2). It owns **only orchestration/graph
+state** and never mutates `projects.version` / `RenderJob` / `MediaAsset` / `Timeline`
+(pre-flight D3.10); it coordinates **only** through domain events on the `event_outbox`
+(D9). Step handlers are **pure, deterministic, side-effect-free** — a step returns a
+command/result *describing* what should happen, and the runner (the imperative shell)
+interprets it (D3.11), keeping the eventual move to an async worker an execution
+concern, not a domain rewrite. **No worker, no providers, no scheduler in this
+slice** — pause/resume (`paused`), `StepCommand` dispatch, render-producing steps
+(`render_jobs.workflow_run_id`), backoff, and the `workflow_run:{id}` lock are α8.x.
+See `docs/engineering/PHASE3_ALPHA7_2_PREFLIGHT.md`,
+`docs/domain/WORKFLOW_RUN_AGGREGATE.md`, and **ADR-0040**.
+
+#### Added
+- **`POST /api/v1/projects/{project_id}/workflow-runs`** — queue a run. Body
+  `{ workflow_key, workflow_version, input_snapshot?, idempotency_key? }`
+  (`extra="forbid"`; `input_snapshot` defaults `{}`). `workflow_key@workflow_version`
+  is resolved against the **in-code registry before any DB work** — an unknown pair →
+  **`422`** (the project IS visible, so not `404`). Seeds ordered `pending` steps from
+  the definition. Returns `201` + `WorkflowRunPublic` (`status='queued'`) and emits
+  **`WorkflowRunCreated`** to the `event_outbox`. **Idempotent (Q7):** a repeat with
+  the same `idempotency_key` for the project returns the **existing** run with **`200`**
+  (no duplicate, no second event). Missing/foreign project → `404`; unauthenticated →
+  `401`.
+- **`GET  …/workflow-runs`** — the project's runs **newest-first** (`created_at` DESC,
+  `id` DESC tiebreak) as summaries; optional **`?status=`** filters by one
+  `workflow_status` (bad enum → `422`). Missing/foreign project → `404`.
+- **`GET  …/workflow-runs/{workflow_run_id}`** — one run with its ordered `steps` and
+  `latest_checkpoint`. Two-level gate (project → run); unknown, or under another
+  owner's project → `404` (anti-enumeration).
+- **`POST …/workflow-runs/{workflow_run_id}/advance`** — **no body**. Runs the
+  deterministic runner to a terminal state (resume-safe: already-`succeeded`/`skipped`
+  steps skipped, threading their checkpoint forward). `404` (project/run not visible);
+  **`409`** if already terminal; otherwise **`200`** + `WorkflowRunPublic` (`succeeded`
+  or `failed`). Emits **`WorkflowRunStarted`** (first `queued → running`), one
+  **`WorkflowStepCompleted`** per step, and a terminal **`WorkflowRunSucceeded`** /
+  **`WorkflowRunFailed`**.
+- **`POST …/workflow-runs/{workflow_run_id}/cancel`** — **no body**. Status-guarded CAS
+  (`status IN ('queued','running','paused')` in the WHERE), decided **404 → classify**:
+  already `canceled` → **`200`** no-op (no event); `succeeded`/`failed` → **`409`**;
+  cancelable → **`200`** + `WorkflowRunPublic` (`status='canceled'`) and emits
+  **`WorkflowRunCanceled`**. **No `?version=`, no `412`, no `DELETE`** (no OCC token;
+  runs are audit records — no `deleted_at`).
+- **Domain** `app/domain/workflow/` — frozen `WorkflowRun` / `WorkflowStep` /
+  `WorkflowCheckpoint`; the `WorkflowRunStatus` (`queued, running, paused, succeeded,
+  failed, canceled`; `is_terminal` / `is_cancelable` / `is_advanceable`) and
+  `WorkflowStepStatus` (`pending, running, succeeded, failed, skipped, retrying`;
+  `is_terminal` / `is_done` / `is_runnable`) `StrEnum`s; and the **in-code registry**
+  (`registry.py`) — the pure `StepHandler` protocol, `StepContext` / `StepResult` /
+  `StepCommand` / `StepOutcome` contracts (D3.11), and four provider-free workflows
+  (`noop-chain`, `retry-succeed`, `terminal-fail`, `retry-exhaust`).
+- **`IWorkflowRunRepository`** + `WorkflowRunRepository` — `add` (idempotency
+  pre-check + unique-violation backstop), `seed_steps`, `get_by_project_and_key`,
+  `list_by_project` (status filter), `get_owned`, `list_steps`, `latest_checkpoint`,
+  the status-guarded run transitions (`mark_run_running` / `mark_run_succeeded` /
+  `mark_run_failed` / `cancel`), the step transitions (`mark_step_running` /
+  `mark_step_succeeded` / `mark_step_retrying` / `mark_step_failed`, with a DB-side
+  `retries` increment), and append-only `append_checkpoint`. Wired into `IUnitOfWork` /
+  `SqlAlchemyUnitOfWork` and mirrored on the test UoW + fakes
+  (`FakeWorkflowRunRepository`).
+- **Use cases** `app/application/use_cases/workflow/` — `CreateWorkflowRun`,
+  `ListWorkflowRuns`, `GetWorkflowRun`, `CancelWorkflowRun`, and the runner
+  `AdvanceWorkflowRun`; `_view.py` (the shared `WorkflowRunView` read-model) and
+  `_events.py` (emits the six `WorkflowRun*` events — orchestration-only payloads,
+  `event_version="1.0"`). None call `IProjectRepository.touch_version`.
+- **DTOs** `app/api/v1/schemas/workflow.py` — `WorkflowRunCreateRequest`
+  (`extra="forbid"`), `WorkflowStepPublic`, `WorkflowCheckpointPublic`,
+  `WorkflowRunSummary` (list), `WorkflowRunPublic` (detail; **no `version` field**).
+- **Router** `app/api/v1/routers/workflow_runs.py` (registered in `main.py`); DI
+  factories in `core/container.py` (wired with the `WORKFLOW_REGISTRY`) and `deps.py`
+  aliases.
+- **Docs** — `docs/domain/WORKFLOW_RUN_AGGREGATE.md`, **ADR-0040**, this CHANGELOG, the
+  α7.2 pre-flight, `API_CONTRACT.md` §2 (Resource Map) + §3.2.6, and ROADMAP.
+- **Tests** — unit (`create`/`list`/`get`/`cancel`/`advance`: happy paths, field +
+  input-snapshot persistence, idempotent replay + distinct keys, status filter +
+  cross-project isolation, cancel terminal/re-cancel, the runner's `noop-chain`
+  success / `retry-succeed` retry accounting / `terminal-fail` / `retry-exhaust` /
+  already-terminal `409` / resume of a partial run, event shapes) and integration
+  (API happy/`401`/`404`/`422`/`409` + cross-owner isolation across all five verbs;
+  repository `add`/dupe/`get_by_project_and_key`/`seed_steps`/`list_by_project`/
+  `get_owned`/run + step CAS chains/retry accounting/append + latest checkpoint).
+
+#### Version
+- App version bumped to **`0.4.16-phase3-alpha7.2-dev`** (staying on `0.4.x`; still
+  Phase-3 orchestration infrastructure — `0.5.0` reserved for a product-level
+  milestone, per pre-flight Q9).
+
 ### Phase 3 Slice α7.1 — RenderJob Aggregate (the first orchestration slice) (2026-07-16)
 
 Introduces the **RenderJob aggregate** — the request to render a project's
