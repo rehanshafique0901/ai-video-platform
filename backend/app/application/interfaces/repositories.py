@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from app.application.interfaces.publisher import OutboxEvent
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
@@ -1468,9 +1469,10 @@ class IEventOutboxRepository(ABC):
     a domain event is written to ``event_outbox`` **in the same transaction** as
     the state change that produced it, so state + intent-to-publish commit
     atomically. α7.1 only *produces* rows (``RenderJobCreated`` /
-    ``RenderJobCanceled``); the relay/dispatcher that publishes and marks them
-    ``published_at`` is a later slice (α7.3+). Append-only from this port's view —
-    no reads, no updates.
+    ``RenderJobCanceled``); Slice α7.3 adds the **relay read/mark surface**
+    (:meth:`fetch_unpublished` / :meth:`mark_published` / :meth:`mark_failed`) so
+    the relay can publish rows and record delivery outcomes. Producers still only
+    :meth:`add`; the relay is the sole reader.
     """
 
     @abstractmethod
@@ -1494,6 +1496,40 @@ class IEventOutboxRepository(ABC):
         ``payload`` is the JSON event body; ``occurred_at`` is the domain event
         instant. ``id`` / ``attempts`` (=0) are DB-populated; ``metadata`` defaults
         to ``{}``.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_unpublished(self, *, limit: int, max_attempts: int) -> list[OutboxEvent]:
+        """Claim a batch of unpublished, not-yet-parked events for the relay (α7.3).
+
+        Selects ``published_at IS NULL AND attempts < :max_attempts`` ordered by
+        ``occurred_at`` (best-effort chronological, ADR-0041 D9 — never a *total*
+        order) with ``FOR UPDATE SKIP LOCKED`` so concurrent relay passes claim
+        disjoint batches without blocking. Excluding ``attempts >= max_attempts``
+        parks poison rows in place so one bad event cannot head-of-line-block the
+        queue (α7.3 sign-off Q3). Must run inside the relay's transaction; the row
+        locks are held until that transaction commits.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_published(self, *, event_id: UUID, published_at: datetime) -> None:
+        """Stamp ``published_at`` on a successfully-delivered event.
+
+        Called by the relay after :class:`PublisherPort` returns OK, on a row the
+        same transaction locked via :meth:`fetch_unpublished`.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_failed(self, *, event_id: UUID, error: str) -> None:
+        """Record a failed delivery: ``attempts += 1``, set ``last_error``.
+
+        Leaves ``published_at`` NULL so the event is retried on a later pass
+        (at-least-once). Once ``attempts`` reaches the relay's ``max_attempts`` the
+        row is parked (excluded by :meth:`fetch_unpublished`) — no DLQ table, no
+        scheduler (α7.3 sign-off Q3).
         """
         ...
 

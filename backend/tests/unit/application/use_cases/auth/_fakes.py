@@ -21,6 +21,8 @@ from typing import Any, Self
 from uuid import UUID, uuid4
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.locks import IDistributedLockManager, Lease
+from app.application.interfaces.publisher import OutboxEvent
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
     IMediaRepository,
@@ -1644,16 +1646,63 @@ class FakeRenderJobRepository(IRenderJobRepository):
 # ---- Event outbox repository ------------------------------------------
 
 
+class _FakeOutboxRow:
+    """Mutable in-memory ``event_outbox`` row backing the α7.3 relay fake surface."""
+
+    def __init__(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+        event_version: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        self.id = uuid4()
+        self.aggregate_type = aggregate_type
+        self.aggregate_id = aggregate_id
+        self.event_type = event_type
+        self.payload = payload
+        self.occurred_at = occurred_at
+        self.event_version = event_version
+        self.metadata = metadata
+        self.published_at: datetime | None = None
+        self.attempts = 0
+        self.last_error: str | None = None
+
+    def to_event(self) -> OutboxEvent:
+        return OutboxEvent(
+            id=self.id,
+            aggregate_type=self.aggregate_type,
+            aggregate_id=self.aggregate_id,
+            event_type=self.event_type,
+            event_version=self.event_version,
+            payload=dict(self.payload),
+            metadata=dict(self.metadata),
+            occurred_at=self.occurred_at,
+            attempts=self.attempts,
+        )
+
+
 @dataclass
 class FakeEventOutboxRepository(IEventOutboxRepository):
-    """In-memory ``IEventOutboxRepository`` — records appended events for assertions.
+    """In-memory ``IEventOutboxRepository`` — records events + models the relay surface.
 
-    Each ``add`` appends a dict of the arguments to :attr:`events`, so a test can
-    assert the aggregate type / event type / payload shape produced by a use case
-    (the transactional-outbox contract, blueprint §6 / D9). No publication concept.
+    Each ``add`` appends a dict of the arguments to :attr:`events` (so producers'
+    unit tests assert the aggregate type / event type / payload shape, blueprint §6
+    / D9) AND stores a mutable :class:`_FakeOutboxRow` in :attr:`rows`. The α7.3
+    relay surface (:meth:`fetch_unpublished` / :meth:`mark_published` /
+    :meth:`mark_failed`) operates on ``rows`` so ``RelayService`` can be unit-tested
+    without a database: ``fetch_unpublished`` honours the ``published_at IS NULL``
+    + ``attempts < max_attempts`` filter and ``occurred_at``/``id`` ordering that
+    the real query enforces (there is no cross-transaction row-locking to model
+    in-process).
     """
 
     events: list[dict[str, Any]] = field(default_factory=list)
+    rows: list[_FakeOutboxRow] = field(default_factory=list)
 
     async def add(
         self,
@@ -1666,6 +1715,7 @@ class FakeEventOutboxRepository(IEventOutboxRepository):
         event_version: str = "1.0",
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        meta = metadata if metadata is not None else {}
         self.events.append(
             {
                 "aggregate_type": aggregate_type,
@@ -1674,9 +1724,38 @@ class FakeEventOutboxRepository(IEventOutboxRepository):
                 "payload": payload,
                 "occurred_at": occurred_at,
                 "event_version": event_version,
-                "metadata": metadata if metadata is not None else {},
+                "metadata": meta,
             }
         )
+        self.rows.append(
+            _FakeOutboxRow(
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                event_type=event_type,
+                payload=payload,
+                occurred_at=occurred_at,
+                event_version=event_version,
+                metadata=meta,
+            )
+        )
+
+    async def fetch_unpublished(self, *, limit: int, max_attempts: int) -> list[OutboxEvent]:
+        pending = [r for r in self.rows if r.published_at is None and r.attempts < max_attempts]
+        pending.sort(key=lambda r: (r.occurred_at, str(r.id)))
+        return [r.to_event() for r in pending[:limit]]
+
+    async def mark_published(self, *, event_id: UUID, published_at: datetime) -> None:
+        for r in self.rows:
+            if r.id == event_id:
+                r.published_at = published_at
+                return
+
+    async def mark_failed(self, *, event_id: UUID, error: str) -> None:
+        for r in self.rows:
+            if r.id == event_id:
+                r.attempts += 1
+                r.last_error = error
+                return
 
 
 # ---- Workflow-run repository ------------------------------------------
@@ -1954,6 +2033,68 @@ class FakeWorkflowRunRepository(IWorkflowRunRepository):
         return checkpoint
 
 
+# ---- Distributed lock manager (α7.3) ----------------------------------
+
+
+class FakeDistributedLockManager(IDistributedLockManager):
+    """In-memory ``IDistributedLockManager`` modelling the ADR-0041 D8 lease logic.
+
+    Mirrors the observable contract of the SQL manager without a database:
+    steal-after-expiry on :meth:`acquire`, owner+live fencing on :meth:`renew`,
+    owner fencing on :meth:`release`, and expiry cleanup on :meth:`reclaim_expired`.
+    Uses wall-clock ``datetime.now(UTC)`` as its "``now()``". Useful for logic-level
+    unit tests; the race/CHECK guarantees are covered by the integration suite.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, Lease] = {}
+
+    def _now(self) -> datetime:
+        return datetime.now(UTC)
+
+    async def acquire(self, *, key: str, owner: str, lease: timedelta) -> Lease | None:
+        if lease.total_seconds() <= 0:
+            raise ValueError("lease must be strictly positive")
+        now = self._now()
+        current = self._locks.get(key)
+        if current is not None and current.lease_until > now:
+            return None  # held by a live lease — never steal
+        acquired = Lease(
+            lock_key=key,
+            owner=owner,
+            lease_until=now + lease,
+            heartbeat_at=now,
+            acquired_at=now,
+        )
+        self._locks[key] = acquired
+        return acquired
+
+    async def renew(self, lease: Lease, *, lease_for: timedelta) -> Lease | None:
+        if lease_for.total_seconds() <= 0:
+            raise ValueError("lease must be strictly positive")
+        now = self._now()
+        current = self._locks.get(lease.lock_key)
+        if current is None or current.owner != lease.owner or current.lease_until <= now:
+            return None  # lost: released, stolen, or expired past the window
+        renewed = replace(current, lease_until=now + lease_for, heartbeat_at=now)
+        self._locks[lease.lock_key] = renewed
+        return renewed
+
+    async def release(self, lease: Lease) -> bool:
+        current = self._locks.get(lease.lock_key)
+        if current is not None and current.owner == lease.owner:
+            del self._locks[lease.lock_key]
+            return True
+        return False
+
+    async def reclaim_expired(self, *, now: datetime | None = None) -> int:
+        cutoff = now if now is not None else self._now()
+        expired = [k for k, v in self._locks.items() if v.lease_until < cutoff]
+        for k in expired:
+            del self._locks[k]
+        return len(expired)
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -1975,6 +2116,7 @@ class FakeUnitOfWork(IUnitOfWork):
         render_jobs: FakeRenderJobRepository | None = None,
         outbox: FakeEventOutboxRepository | None = None,
         workflow_runs: FakeWorkflowRunRepository | None = None,
+        locks: FakeDistributedLockManager | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -1994,6 +2136,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_render_jobs = render_jobs or FakeRenderJobRepository()
         self._fake_outbox = outbox or FakeEventOutboxRepository()
         self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
+        self._fake_locks = locks or FakeDistributedLockManager()
         self.commits = 0
         self.rollbacks = 0
 
@@ -2011,6 +2154,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.render_jobs = self._fake_render_jobs
         self.outbox = self._fake_outbox
         self.workflow_runs = self._fake_workflow_runs
+        self.locks = self._fake_locks
         return self
 
     async def __aexit__(

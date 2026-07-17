@@ -6,6 +6,77 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.3 — Outbox Relay + Distributed Lock Manager (pure infrastructure) (2026-07-17)
+
+Adds the two pieces of **execution-substrate plumbing** every later slice depends
+on, and nothing else: a **library-only outbox relay** that drains the
+`event_outbox` (written transactionally by α7.1/α7.2) through a **`PublisherPort`**,
+and a **distributed lock manager** over the baseline `distributed_locks` table
+(**no migration** — the table, its `lock_key` PK, and the `lease_until > acquired_at`
+CHECK all already exist). **No worker, no daemon, no CLI, no HTTP, no broker, no
+Celery, no Redis** — the relay and the janitor are plain `async` methods a caller
+invokes; the worker loop that calls them on a timer is α8.1. **No `event_log`
+projection** (the default publisher is a synchronous in-process sink that fans out
+to registered handlers; the immutable/partitioned `event_log` becomes an explicit
+projection only when a consumer needs it). Poison events are **parked in-place**
+(`attempts += 1`, `last_error`, `published_at` stays `NULL`) and the fetch query
+ignores rows at/over `max_attempts` — **no DLQ table, no retry scheduler**.
+Distributed locks are **owner-fenced** (`renew`/`release` require the owning
+lease), `acquire` **steals expired leases and never active ones**, and correctness
+comes from **steal-after-expiry**, not the explicit `reclaim_expired()`
+maintenance sweep (ADR-0032). See `docs/engineering/PHASE3_ALPHA7_3_PREFLIGHT.md`
+and **ADR-0032** (locks) / **ADR-0041** (the provider-runtime blueprint that will
+consume both).
+
+#### Added
+- **`PublisherPort`** (`app/application/interfaces/publisher.py`) — the publish
+  abstraction plus the immutable **`OutboxEvent`** DTO (id, aggregate, event type,
+  version, payload, metadata, `occurred_at`, `attempts`) and the async
+  **`EventHandler`** protocol. Default impl **`InProcessPublisher`**
+  (`app/infrastructure/publisher/in_process_publisher.py`) — a synchronous
+  in-process sink that awaits each registered handler in order; any handler raising
+  fails the publish (the relay then parks the row).
+- **`RelayService`** (`app/application/use_cases/relay/relay_service.py`) —
+  `relay_once(batch_size=None) -> RelayResult` and `reclaim_expired(now=None) -> int`.
+  One transaction per pass: `fetch_unpublished` → publish each → `mark_published`
+  on success / `mark_failed` (park) on error → commit. Returns a **`RelayResult`**
+  (`fetched`, `published`, `failed`, `parked`) for trivial testing/logging/metrics.
+  Defaults `batch_size=100`, `max_attempts=10`. Every parked event emits an
+  **`ERROR`** structured log (`outbox.publish_failed`) carrying event id, aggregate
+  id/type, event type, `attempts`, `max_attempts`, `parked`, exception type +
+  message; each pass emits an `INFO` `outbox.relay_pass` summary.
+- **`IEventOutboxRepository`** extended with the relay read/mark surface —
+  `fetch_unpublished(limit, max_attempts)` (`published_at IS NULL AND attempts <
+  max_attempts`, ordered `occurred_at, id`, `FOR UPDATE SKIP LOCKED`),
+  `mark_published(event_id, published_at)`, `mark_failed(event_id, error)`
+  (`attempts += 1`, `last_error`). Implemented in `EventOutboxRepository` (the α7.1
+  `add` producer path is unchanged).
+- **`IDistributedLockManager`** + **`Lease`** VO
+  (`app/application/interfaces/locks.py`) and **`SqlAlchemyDistributedLockManager`**
+  (`app/infrastructure/repositories/distributed_lock_manager.py`) — `acquire`
+  (atomic `INSERT … ON CONFLICT DO UPDATE … WHERE lease_until < now()` — free or
+  expired only), owner-fenced `renew`/`release`, and `reclaim_expired(now=None)`
+  (`DELETE … WHERE lease_until < now()`, returns the count). All clock arithmetic
+  uses the DB `now()` so leases are wall-clock-agnostic.
+- **DI wiring** — `IUnitOfWork` gains **`locks`** (and the extended `outbox`
+  surface); `SqlAlchemyUnitOfWork` exposes `SqlAlchemyDistributedLockManager`; the
+  container adds an `InProcessPublisher` singleton + a `RelayService` factory. The
+  test UoW and fakes mirror both (`FakeDistributedLockManager`, the relay methods
+  on `FakeEventOutboxRepository`).
+- **Docs** — this CHANGELOG, the α7.3 pre-flight, ROADMAP, and architecture notes.
+- **Tests** — unit (`InProcessPublisher` order/propagation; `RelayService` happy
+  path, empty batch, transient failure, park-at-cap + log assertion, parked-row
+  exclusion, `batch_size` override, chronological order) and integration
+  (lock acquire/steal-expired/never-steal-active, owner-fenced renew/release,
+  `reclaim_expired`, the `lease_until > acquired_at` CHECK; relay
+  `fetch_unpublished`/`mark_published`/`mark_failed`, ordering, `max_attempts`
+  exclusion, and `FOR UPDATE SKIP LOCKED` disjoint claims across two connections).
+
+#### Version
+- App version bumped to **`0.4.17-phase3-alpha7.3-dev`** (staying on `0.4.x`; still
+  Phase-3 orchestration infrastructure — `0.5.0` reserved for a product-level
+  milestone).
+
 ### Phase 3 Slice α7.2 — WorkflowRun Aggregate + Deterministic Runner (the first sequencing orchestration slice) (2026-07-16)
 
 Introduces the **WorkflowRun aggregate** and a **synchronous, deterministic

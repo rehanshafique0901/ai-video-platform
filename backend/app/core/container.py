@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
@@ -52,6 +53,7 @@ from app.application.use_cases.prompts.delete_prompt import DeletePrompt
 from app.application.use_cases.prompts.get_prompt import GetPrompt
 from app.application.use_cases.prompts.list_prompts import ListPrompts
 from app.application.use_cases.prompts.update_prompt import UpdatePrompt
+from app.application.use_cases.relay.relay_service import RelayService
 from app.application.use_cases.render.cancel_render_job import CancelRenderJob
 from app.application.use_cases.render.create_render_job import CreateRenderJob
 from app.application.use_cases.render.get_render_job import GetRenderJob
@@ -89,6 +91,7 @@ from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRu
 from app.core.config import Settings
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
+from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -102,6 +105,7 @@ _jwt_service: JWTService | None = None
 _token_issuer: AuthTokenIssuer | None = None
 _dummy_password_hash: str | None = None
 _clock: SystemClock | None = None
+_publisher: PublisherPort | None = None
 
 
 def init(settings: Settings) -> None:
@@ -112,7 +116,7 @@ def init(settings: Settings) -> None:
     call ``reset()`` first.
     """
     global _engine, _session_factory, _password_hasher, _jwt_service
-    global _token_issuer, _dummy_password_hash, _clock
+    global _token_issuer, _dummy_password_hash, _clock, _publisher
     if _engine is not None:
         return
     _engine = make_engine(settings.database_url)
@@ -135,6 +139,11 @@ def init(settings: Settings) -> None:
     # never a real user's password.
     _dummy_password_hash = _password_hasher.hash(secrets.token_urlsafe(32))
     _clock = SystemClock()
+    # α7.3: the outbox relay's publish target. In-process, zero handlers by
+    # default — the relay marks events published after a successful (empty)
+    # fan-out. Real consumers / a broker-backed publisher are wired in later
+    # slices behind the same ``PublisherPort`` without touching the relay.
+    _publisher = InProcessPublisher()
 
 
 async def shutdown() -> None:
@@ -149,7 +158,7 @@ async def shutdown() -> None:
 def reset() -> None:
     """Test-only: clear all singletons so the next ``init`` rebuilds them."""
     global _engine, _session_factory, _password_hasher, _jwt_service
-    global _token_issuer, _dummy_password_hash, _clock
+    global _token_issuer, _dummy_password_hash, _clock, _publisher
     _engine = None
     _session_factory = None
     _password_hasher = None
@@ -157,6 +166,7 @@ def reset() -> None:
     _token_issuer = None
     _dummy_password_hash = None
     _clock = None
+    _publisher = None
 
 
 def _require_init() -> None:
@@ -207,6 +217,22 @@ def get_clock() -> IClock:
     _require_init()
     assert _clock is not None
     return _clock
+
+
+def get_publisher() -> PublisherPort:
+    """The process-wide outbox publisher (α7.3). In-process, no broker."""
+    _require_init()
+    assert _publisher is not None
+    return _publisher
+
+
+def get_relay_service() -> RelayService:
+    """Factory: a fresh outbox ``RelayService`` bound to a new UoW + the publisher.
+
+    Library-only (α7.3): no daemon, no endpoint. The α8.1 worker calls
+    ``relay_once`` on a cadence; α7.3 exposes the primitive for tests + wiring.
+    """
+    return RelayService(uow=get_unit_of_work(), publisher=get_publisher())
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

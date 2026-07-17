@@ -534,7 +534,8 @@ POST   /projects/{project_id}/render-jobs/{render_job_id}/cancel     version-fen
 > version, created_at, updated_at }`. The events carry orchestration fields only
 > (`render_job_id, project_id, timeline_id, pipeline, pipeline_version, queue,
 > priority, status, version`; `event_version="1.0"`) — α7.1 only **produces** outbox
-> rows (no dispatcher; the relay is α7.3). See `docs/domain/RENDER_JOB_AGGREGATE.md`
+> rows (no dispatcher; the relay shipped in α7.3 as a **library-only** `RelayService`
+> with **no HTTP surface**). See `docs/domain/RENDER_JOB_AGGREGATE.md`
 > and `docs/decisions/ADR-0039-render-job-orchestration-aggregate.md`.
 
 #### 3.2.6 Workflow runs (Phase 3 α7.2)
@@ -617,7 +618,8 @@ POST   /projects/{project_id}/workflow-runs/{workflow_run_id}/cancel     status-
 > field**. The six events carry orchestration fields only (`workflow_run_id,
 > project_id, workflow_key, workflow_version, status`, plus step coordinates on the
 > step event; `event_version="1.0"`) — α7.2 only **produces** outbox rows (no
-> dispatcher; the relay is α7.3). See `docs/domain/WORKFLOW_RUN_AGGREGATE.md` and
+> dispatcher; the relay shipped in α7.3 as a **library-only** `RelayService` with
+> **no HTTP surface**). See `docs/domain/WORKFLOW_RUN_AGGREGATE.md` and
 > `docs/decisions/ADR-0040-workflow-run-orchestration-aggregate.md`.
 
 ### 3.3 Project Versions (CR-6)

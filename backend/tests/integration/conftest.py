@@ -156,6 +156,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from app.application.interfaces.locks import IDistributedLockManager
     from app.application.interfaces.repositories import (
         IEventOutboxRepository,
         IMediaRepository,
@@ -172,6 +173,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IWorkflowRunRepository,
     )
     from app.application.interfaces.unit_of_work import IUnitOfWork
+    from app.infrastructure.repositories.distributed_lock_manager import (
+        SqlAlchemyDistributedLockManager,
+    )
     from app.infrastructure.repositories.event_outbox_repository import (
         EventOutboxRepository,
     )
@@ -242,6 +246,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
                 self.workflow_runs = cast(
                     IWorkflowRunRepository, WorkflowRunRepository(self._session)
+                )
+                self.locks = cast(
+                    IDistributedLockManager, SqlAlchemyDistributedLockManager(self._session)
                 )
                 return self
 
