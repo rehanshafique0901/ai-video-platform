@@ -1709,3 +1709,28 @@ class IWorkflowRunRepository(ABC):
     ) -> WorkflowCheckpoint:
         """Append one immutable resume point (ADR-0014). Never updates an existing row."""
         ...
+
+
+class IProviderSettingsRepository(ABC):
+    """Read-only surface for ``provider_settings`` (Slice α7.4, minimal read path).
+
+    Per the α7.4 sign-off (Q4) this ships **read-only** and resolves a single
+    ``(provider, key)`` value with **tenant-shadows-global** precedence — the seam
+    a later slice builds "load enabled providers → select configured provider →
+    construct adapter" on. There is **no** fallback / weighting / priority /
+    health-ordering here (those arrive once multiple real providers exist), and no
+    write surface (config authoring is a separate concern).
+    """
+
+    @abstractmethod
+    async def get_value(
+        self, provider: str, key: str, tenant_id: UUID | None = None
+    ) -> Mapping[str, Any] | None:
+        """Return the JSON value for ``(provider, key)``, or ``None`` if unset.
+
+        When ``tenant_id`` is given, a tenant-scoped row shadows the global
+        (``tenant_id IS NULL``) row for the same ``(provider, key)``; the global row
+        is the fallback. Secret values are returned verbatim — masking, if any, is
+        the caller's concern (α7.4 has no secret consumers).
+        """
+        ...

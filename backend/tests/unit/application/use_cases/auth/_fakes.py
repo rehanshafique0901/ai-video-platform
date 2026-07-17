@@ -29,6 +29,7 @@ from app.application.interfaces.repositories import (
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IProviderSettingsRepository,
     IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
@@ -2098,6 +2099,34 @@ class FakeDistributedLockManager(IDistributedLockManager):
 # ---- UoW --------------------------------------------------------------
 
 
+class FakeProviderSettingsRepository(IProviderSettingsRepository):
+    """In-memory ``IProviderSettingsRepository`` with tenant-shadows-global reads.
+
+    Seed with :meth:`set_value`; ``get_value`` prefers the tenant-scoped row and
+    falls back to the global (``tenant_id is None``) row, mirroring the SQL impl.
+    """
+
+    def __init__(self) -> None:
+        # keyed by (provider, key, tenant_id)
+        self._rows: dict[tuple[str, str, UUID | None], Mapping[str, Any]] = {}
+
+    def set_value(
+        self,
+        provider: str,
+        key: str,
+        value: Mapping[str, Any],
+        tenant_id: UUID | None = None,
+    ) -> None:
+        self._rows[(provider, key, tenant_id)] = value
+
+    async def get_value(
+        self, provider: str, key: str, tenant_id: UUID | None = None
+    ) -> Mapping[str, Any] | None:
+        if tenant_id is not None and (provider, key, tenant_id) in self._rows:
+            return self._rows[(provider, key, tenant_id)]
+        return self._rows.get((provider, key, None))
+
+
 class FakeUnitOfWork(IUnitOfWork):
     """Wraps in-memory fakes into an IUnitOfWork surface. commit() is a bookkeeping flag."""
 
@@ -2117,6 +2146,7 @@ class FakeUnitOfWork(IUnitOfWork):
         outbox: FakeEventOutboxRepository | None = None,
         workflow_runs: FakeWorkflowRunRepository | None = None,
         locks: FakeDistributedLockManager | None = None,
+        provider_settings: FakeProviderSettingsRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -2137,6 +2167,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_outbox = outbox or FakeEventOutboxRepository()
         self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
         self._fake_locks = locks or FakeDistributedLockManager()
+        self._fake_provider_settings = provider_settings or FakeProviderSettingsRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -2155,6 +2186,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.outbox = self._fake_outbox
         self.workflow_runs = self._fake_workflow_runs
         self.locks = self._fake_locks
+        self.provider_settings = self._fake_provider_settings
         return self
 
     async def __aexit__(

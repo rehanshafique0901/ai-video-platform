@@ -275,3 +275,23 @@ name = "Application use_cases never import infrastructure or api"
 type = "forbidden"
 source_modules = ["app.application.use_cases"]
 forbidden_modules = ["app.infrastructure", "app.api"]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α7.4 — the provider capability leaf. Provider adapters,
+# the registry, and the mocks (``app.infrastructure.ai.providers``) are a
+# strict leaf: they implement the neutral contract in
+# ``app.application.interfaces.providers`` (DTOs / errors / metadata) — the
+# same allowed direction every repository uses — but must never reach up
+# into orchestration/business logic (``app.application.use_cases``), the HTTP
+# layer (``app.api``), or the workflow domain (``StepCommand`` &c). The
+# ``StepCommandDispatcher`` that bridges ``StepCommand`` → capability calls
+# deliberately lives one level up (``app.infrastructure.ai.dispatcher``),
+# outside this leaf, so this contract can stay strict.
+name = "Provider capability leaf never imports orchestration, api, or the workflow domain"
+type = "forbidden"
+source_modules = ["app.infrastructure.ai.providers"]
+forbidden_modules = [
+    "app.application.use_cases",
+    "app.api",
+    "app.domain.workflow",
+]

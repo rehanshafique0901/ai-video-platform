@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
@@ -89,6 +90,8 @@ from app.application.use_cases.workflow.create_workflow_run import CreateWorkflo
 from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
 from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
 from app.core.config import Settings
+from app.infrastructure.ai.dispatcher import StepCommandDispatcher
+from app.infrastructure.ai.providers.registry import PROVIDER_REGISTRY, ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
@@ -233,6 +236,26 @@ def get_relay_service() -> RelayService:
     ``relay_once`` on a cadence; α7.3 exposes the primitive for tests + wiring.
     """
     return RelayService(uow=get_unit_of_work(), publisher=get_publisher())
+
+
+def get_provider_registry() -> ProviderRegistry:
+    """The process-wide provider registry (α7.4).
+
+    A framework-free singleton wired with the four deterministic mocks. Real
+    providers register here in α8.x without changing callers. Stateless w.r.t.
+    settings, so it needs no ``init``/``reset`` lifecycle.
+    """
+    return PROVIDER_REGISTRY
+
+
+def get_step_command_dispatcher() -> ProviderDispatcherPort:
+    """Factory: a ``StepCommandDispatcher`` over the process-wide registry (α7.4).
+
+    Library-only: the α7.2 runner is **not** wired to it in this slice (D3.3); the
+    α7.6 pipeline depends on this ``ProviderDispatcherPort`` to turn ``StepCommand``s
+    into provider calls.
+    """
+    return StepCommandDispatcher(get_provider_registry())
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

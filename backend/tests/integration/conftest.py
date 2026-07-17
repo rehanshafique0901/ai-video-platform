@@ -163,6 +163,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IProjectRepository,
         IProjectVersionRepository,
         IPromptRepository,
+        IProviderSettingsRepository,
         IRenderJobRepository,
         IRoleRepository,
         ISceneRepository,
@@ -185,6 +186,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         ProjectVersionRepository,
     )
     from app.infrastructure.repositories.prompt_repository import PromptRepository
+    from app.infrastructure.repositories.provider_settings_repository import (
+        ProviderSettingsRepository,
+    )
     from app.infrastructure.repositories.render_job_repository import RenderJobRepository
     from app.infrastructure.repositories.role_repository import RoleRepository
     from app.infrastructure.repositories.scene_repository import SceneRepository
@@ -249,6 +253,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 )
                 self.locks = cast(
                     IDistributedLockManager, SqlAlchemyDistributedLockManager(self._session)
+                )
+                self.provider_settings = cast(
+                    IProviderSettingsRepository, ProviderSettingsRepository(self._session)
                 )
                 return self
 

@@ -25,6 +25,7 @@ from app.application.interfaces.repositories import (
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IProviderSettingsRepository,
     IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
@@ -45,6 +46,9 @@ from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
 )
 from app.infrastructure.repositories.prompt_repository import PromptRepository
+from app.infrastructure.repositories.provider_settings_repository import (
+    ProviderSettingsRepository,
+)
 from app.infrastructure.repositories.render_job_repository import RenderJobRepository
 from app.infrastructure.repositories.role_repository import RoleRepository
 from app.infrastructure.repositories.scene_repository import SceneRepository
@@ -90,6 +94,9 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
         self.workflow_runs = cast(IWorkflowRunRepository, WorkflowRunRepository(self._session))
         self.locks = cast(IDistributedLockManager, SqlAlchemyDistributedLockManager(self._session))
+        self.provider_settings = cast(
+            IProviderSettingsRepository, ProviderSettingsRepository(self._session)
+        )
         return self
 
     async def __aexit__(

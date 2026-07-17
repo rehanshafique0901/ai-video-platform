@@ -28,6 +28,7 @@ from app.application.interfaces.repositories import (
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
+    IProviderSettingsRepository,
     IRenderJobRepository,
     IRoleRepository,
     ISceneRepository,
@@ -70,6 +71,7 @@ class IUnitOfWork(ABC):
     outbox: IEventOutboxRepository  # α7.1 (+ α7.3 relay read/mark surface)
     workflow_runs: IWorkflowRunRepository  # α7.2
     locks: IDistributedLockManager  # α7.3
+    provider_settings: IProviderSettingsRepository  # α7.4
 
     async def __aenter__(self) -> Self:
         return self

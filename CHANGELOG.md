@@ -6,6 +6,82 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.4 — Provider Skeleton (capability ports · registry · dispatcher · mock providers) (2026-07-17)
+
+Establishes the **provider abstraction layer** every real provider (α8.x) plugs
+into — and **nothing else**: four async capability ports (LLM / Image / Video /
+Voice), a framework-free **registry** with explicit registration + capability
+discovery, a **`StepCommandDispatcher`** that turns α7.2's inert `StepCommand`s
+into capability calls through a closed mapping table (ADR-0041 D4), a typed
+provider-error hierarchy, immutable per-provider metadata, and **one deterministic
+mock per capability**. It is **pure ports + an imperative shell over mocks** — the
+slice is *almost entirely architecture*. **Explicitly forbidden and absent:** HTTP
+clients (aiohttp/requests), API keys, external calls, Redis, Celery, retries,
+provider fallback/weighting/priority/health-ordering, usage accounting, event
+publishing, polling loops, webhook handlers. **Zero migration.** The α7.2 runner is
+**untouched** (it still ignores `StepResult.commands`); wiring the dispatcher into
+the runner is α7.6. See `docs/engineering/PHASE3_ALPHA7_4_PREFLIGHT.md` and
+**ADR-0041**.
+
+#### Added
+- **Neutral provider contract** (`app/application/interfaces/providers.py`) — the
+  `Capability` / `ProviderStatus` enums, the `ProviderUsage` (α7.5 seam) /
+  `ProviderHealth` / **`ProviderMetadata`** DTOs, the shared `ProviderResponse`
+  envelope + per-capability immutable request/response pairs
+  (`GenerateText*` / `GenerateImage*` / `GenerateVideo*` / `GenerateSpeech*`), and
+  the typed error hierarchy — `ProviderError` (base, `transient` classification) →
+  `ProviderUnavailable` / `ProviderRateLimited` / `ProviderTimeout` (transient),
+  `ProviderAuthenticationError` / `ProviderValidationError` (terminal), and
+  `NoProviderAvailable` (registry exhaustion — plays ADR-0041's `NoHealthyProvider`
+  role; fallback/health-ordering deferred). **No HTTP mapping.**
+- **`ProviderDispatcherPort`** (`app/application/interfaces/provider_dispatcher.py`)
+  — the runner-facing port (`dispatch(StepCommand) -> ProviderResponse` plus
+  `supports` / `list_capabilities` discovery). Split from the DTO module so it can
+  reference `StepCommand` without the provider leaf transitively importing the
+  workflow domain.
+- **Capability ports** (`app/infrastructure/ai/providers/ports.py`) — the
+  `Provider` base + `LLMProvider` / `ImageProvider` / `VideoProvider` /
+  `VoiceProvider` `Protocol`s (each `metadata` + async generate + `health`).
+- **Deterministic mocks** (`app/infrastructure/ai/providers/mocks/`) — one per
+  capability, byte-reproducible, no I/O. LLM/image/voice return `SUCCEEDED` inline;
+  **video models the async path** (`IN_PROGRESS` + a deterministic `provider_job_id`)
+  so the completion shape (α8.3) is exercised before any real async provider.
+- **`ProviderRegistry`** (`app/infrastructure/ai/providers/registry.py`) — explicit
+  `register(provider=…, capabilities=[…])` (no decorators), `resolve` →
+  `NoProviderAvailable`, and capability discovery (`supports` / `has_provider` /
+  `list_capabilities` / `list_providers`). `default_registry()` wires the four
+  mocks; `PROVIDER_REGISTRY` is the process singleton.
+- **`StepCommandDispatcher`** (`app/infrastructure/ai/dispatcher.py`) — the closed
+  `kind` → capability table for the **four** provider capabilities only
+  (`generate_text` / `generate_image` / `generate_video` / `synthesize_voice`);
+  `start_render` and render/export/storage are excluded (`ProviderValidationError`).
+  A missing `request_id` is a terminal `ProviderValidationError`. Discovery delegates
+  to the registry. Lives **above** the leaf so the leaf stays orchestration-free.
+- **`IProviderSettingsRepository`** (read-only) +
+  **`ProviderSettingsRepository`** — minimal `get_value(provider, key, tenant_id)`
+  with **tenant-shadows-global** precedence over `provider_settings` (the config
+  read seam; no fallback/priority/weighting — Q4). Wired onto the UoW.
+- **`import-linter` contract** — `app.infrastructure.ai.providers` is a **strict
+  leaf**: forbidden from importing `app.application.use_cases`, `app.api`, or the
+  workflow domain (it depends only on the neutral contract in
+  `app.application.interfaces`, the same direction every repository uses).
+- **DI wiring** — `get_provider_registry()` (the singleton) and
+  `get_step_command_dispatcher()` factories; `IUnitOfWork` gains
+  **`provider_settings`**; the test UoW + fakes mirror it
+  (`FakeProviderSettingsRepository`).
+- **Docs** — this CHANGELOG, the α7.4 pre-flight, ROADMAP, architecture notes, and
+  an ADR-0041 change-log line recording the port-placement refinement.
+- **Tests** — unit (neutral contract immutability + error taxonomy; each mock incl.
+  the video async path + reproducibility; registry resolution/discovery/idempotence;
+  dispatcher routing of all four kinds, excluded-kind + missing-`request_id` errors,
+  `NoProviderAvailable` propagation, discovery delegation) and integration
+  (`provider_settings` global read, tenant shadow, tenant→global fallback, per-key
+  isolation).
+
+#### Version
+- App version bumped to **`0.4.18-phase3-alpha7.4-dev`** (staying on `0.4.x`; still
+  Phase-3 orchestration infrastructure).
+
 ### Phase 3 Slice α7.3 — Outbox Relay + Distributed Lock Manager (pure infrastructure) (2026-07-17)
 
 Adds the two pieces of **execution-substrate plumbing** every later slice depends
