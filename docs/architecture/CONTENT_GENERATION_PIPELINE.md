@@ -373,13 +373,26 @@ own ADR where it makes a load-bearing choice — the α5/α6 rhythm. Sequencing 
 
 | Slice | Theme | Core deliverable | New tables? |
 |---|---|---|---|
-| **α7.1** | `RenderJob` aggregate + API | create/list/get/cancel render jobs; OCC via `version`; lock key wiring; **no worker yet** (synchronous stub renderer or `queued`-only) | none |
-| **α7.2** | `WorkflowRun` aggregate + API | start/get/cancel/resume; `workflow_steps`/`checkpoints`; state machine §4.1–4.2 | none |
-| **α7.3** | Outbox relay + Event Bus | `event_outbox` producer in existing use cases + relay worker; domain events catalogue wired | none |
-| **α7.4** | Provider plugin skeleton | `BasePlugin` + capability ABCs + registry/loader; **one** mock provider per kind; `provider_settings` read path | none |
-| **α7.5** | Usage Recorder | middleware writing `usage_records` priced against `ai_model_pricing`; idempotent on `(provider, request_id)` | none |
-| **α7.6** | First real pipeline (A or B) | one LangGraph pipeline end-to-end with mock providers → real providers behind flags | none |
-| **α8.x** | Rendering engine | FFmpeg render worker; transitions/effects (α6.4 write paths first); export jobs + storage providers | none |
+| **α7.1** ✅ | `RenderJob` aggregate + API | create/list/get/cancel render jobs; OCC via `version`; lock key wiring; **no worker yet** (synchronous stub renderer or `queued`-only) — shipped `v0.4.15` | none |
+| **α7.2** ✅ | `WorkflowRun` aggregate + API | start/get/cancel/**synchronous deterministic runner**; `workflow_steps`/`checkpoints`; state machine §4.1–4.2 — shipped `v0.4.16` | none |
+| **α8.0** ✅ | **Provider Runtime Blueprint** (docs-only) | locks the runtime *contract* every α7.3→α8.x slice implements against — **ADR-0041** (ProviderPort, registry, dispatcher, completion service, lock manager, relay, retries, workers, media/usage seams). No code/branch/migration/version bump | none |
+| **α7.3** | Outbox relay + **Lock manager** | relay worker publishes the events α7.1/α7.2 already produce (`FOR UPDATE SKIP LOCKED` → `published_at`); first `distributed_locks` consumer (acquire/heartbeat/release/janitor, ADR-0032) — ADR-0041 D8/D9 | none |
+| **α7.4** | Provider plugin skeleton | `ProviderPort` capability protocols + registry/loader + `StepCommand` dispatcher; **one** mock provider per kind; `provider_settings` read path — ADR-0041 D1–D4 | none |
+| **α7.5** | Usage Recorder | middleware writing `usage_records` priced against `ai_model_pricing` (idempotent on `request_id`, ADR-0033) + `credit_ledger` debit — ADR-0041 D13 | none |
+| **α7.6** | First pipeline (mock provider) | runner drives the dispatcher end-to-end **in-process** with mock providers → real behind flags; still no broker — ADR-0041 D4/D11 | none |
+| **α8.1** | Image provider | first real `ImageProvider`; **introduces Celery + Redis + broker config** (runner-before-worker ends here) — ADR-0041 D11 | none |
+| **α8.2** | Video provider | first **async** provider → exercises the completion service — ADR-0041 D5 | none |
+| **α8.3** | Webhook / polling completion | polling worker + inbound `/webhooks/providers/{name}`, both idempotent into one `complete()` — ADR-0041 D5–D7 | none |
+| **α8.4** | FFmpeg render engine | RenderJob worker transitions (`running/succeeded/failed`, progress, `output_media_asset_id`) + compose; transitions/effects (α6.4 write paths first) — ADR-0041 D12 | none |
+| **α8.5** | Export engine | `export_jobs` + storage providers (CR-5) — ADR-0041 D12 | none |
+
+> **Runtime contract locked (α8.0, 2026-07-17).** The provider-runtime interfaces
+> — `ProviderPort`, provider registry, adapter lifecycle, `StepCommand`
+> dispatcher, the single poll-first completion service, polling/webhook ingresses,
+> the `IDistributedLockManager` lease contract, the outbox relay, layered retry
+> semantics, and the five worker roles — are fixed in **ADR-0041** so each slice
+> above implements a stable seam. Decided: honour §13 as-is (no renumbering),
+> runner-before-worker (Celery/Redis wait for α8.1), docs-only blueprint first.
 
 Every slice above is **zero-migration**: it consumes tables provisioned in
 Phase 2. A migration is introduced only if a §14 decision explicitly reverses a
@@ -467,3 +480,5 @@ the existing outbox design.
 |---|---|
 | 2026-07-16 | Initial blueprint drafted (bridges ARCHITECTURE.md target to implemented reality; pins lifecycle, state machines, substrate map, slice sequencing; §14 open decisions raised for sign-off). |
 | 2026-07-16 | **Signed off.** D1–D8 accepted (D1: Release/Draft render modes; D2: Celery+Redis; D3: in-house runner → LangGraph adapter; D4: poll-first, single completion service; D5: progress stays `text`; D6: no `provider_settings.kind`; D7: zero migrations; D8: `RenderJob` first). **D9 added** — aggregate-owns-one-state-machine + no-cross-mutation, coordinated via `event_outbox` (§7.1). Status → contract for Phase 3 orchestration. Next slice: α7.1 `RenderJob`. |
+| 2026-07-16 | α7.1 (`RenderJob`, `v0.4.15`, ADR-0039) and α7.2 (`WorkflowRun` + synchronous deterministic runner, `v0.4.16`, ADR-0040) shipped. |
+| 2026-07-17 | **α8.0 Provider Runtime Blueprint** — the runtime contract locked in **ADR-0041** (docs-only). §13 refined: shipped slices marked, α8.x expanded into α8.1 image / α8.2 video / α8.3 webhook+polling / α8.4 FFmpeg render / α8.5 export **without renumbering** α7.3–α7.6. Decisions: honour §13 as-is; runner-before-worker (Celery/Redis deferred to α8.1); docs-only blueprint before any provider code. Next slice: α7.3 (outbox relay + lock manager — the two missing prerequisites). |
