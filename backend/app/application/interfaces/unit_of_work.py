@@ -25,6 +25,7 @@ from app.application.interfaces.locks import IDistributedLockManager
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
     IMediaRepository,
+    IModelPricingRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -35,6 +36,7 @@ from app.application.interfaces.repositories import (
     ISessionRepository,
     ITenantRepository,
     ITimelineRepository,
+    IUsageRecordRepository,
     IUserRepository,
     IWorkflowRunRepository,
 )
@@ -72,6 +74,8 @@ class IUnitOfWork(ABC):
     workflow_runs: IWorkflowRunRepository  # α7.2
     locks: IDistributedLockManager  # α7.3
     provider_settings: IProviderSettingsRepository  # α7.4
+    usage: IUsageRecordRepository  # α7.5
+    model_pricing: IModelPricingRepository  # α7.5
 
     async def __aenter__(self) -> Self:
         return self

@@ -16,6 +16,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID, uuid4
@@ -26,6 +27,7 @@ from app.application.interfaces.publisher import OutboxEvent
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
     IMediaRepository,
+    IModelPricingRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -36,6 +38,7 @@ from app.application.interfaces.repositories import (
     ISessionRepository,
     ITenantRepository,
     ITimelineRepository,
+    IUsageRecordRepository,
     IUserRepository,
     IWorkflowRunRepository,
 )
@@ -46,6 +49,12 @@ from app.application.interfaces.security import (
     TokenClaims,
 )
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.application.interfaces.usage_recorder import (
+    DuplicateRequestIdError,
+    EffectivePrice,
+    NewUsageRecord,
+    UsageRecordRow,
+)
 from app.core.errors import ConflictError, NotFoundError
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
@@ -2096,6 +2105,86 @@ class FakeDistributedLockManager(IDistributedLockManager):
         return len(expired)
 
 
+# ---- Usage + pricing repositories (α7.5) ------------------------------
+
+
+@dataclass
+class FakeUsageRecordRepository(IUsageRecordRepository):
+    """In-memory ``IUsageRecordRepository`` for α7.5 use-case unit tests.
+
+    Models the observable contract of the real repo: append-only insert that
+    raises :class:`DuplicateRequestIdError` on a non-NULL ``request_id`` collision
+    (ADR-0033), while NULL ``request_id`` rows always insert and coexist. Stores
+    the inserted :class:`NewUsageRecord`s (as :attr:`inserted`) so tests can assert
+    the recorder only writes here (W7.5.1) and with the expected priced values.
+    """
+
+    inserted: list[NewUsageRecord] = field(default_factory=list)
+    _rows: dict[UUID, UsageRecordRow] = field(default_factory=dict)
+    _by_request_id: dict[str, UUID] = field(default_factory=dict)
+
+    async def insert(self, new: NewUsageRecord) -> UsageRecordRow:
+        if new.request_id is not None and new.request_id in self._by_request_id:
+            raise DuplicateRequestIdError(new.request_id)
+        row = UsageRecordRow(
+            id=uuid4(),
+            occurred_at=new.occurred_at,
+            tenant_id=new.tenant_id,
+            model_id=new.model_id,
+            request_id=new.request_id,
+            unit=new.unit,
+            unit_count=new.unit_count,
+            estimated_cost=new.estimated_cost,
+            currency=new.currency,
+            status=new.status,
+            pricing_id=new.pricing_id,
+            credits_consumed=new.credits_consumed,
+            tokens_prompt=new.tokens_prompt,
+            tokens_completion=new.tokens_completion,
+            images_count=new.images_count,
+            seconds_generated=new.seconds_generated,
+        )
+        self.inserted.append(new)
+        self._rows[row.id] = row
+        if new.request_id is not None:
+            self._by_request_id[new.request_id] = row.id
+        return row
+
+    async def get_by_request_id(self, request_id: str) -> UsageRecordRow | None:
+        row_id = self._by_request_id.get(request_id)
+        return self._rows.get(row_id) if row_id is not None else None
+
+
+@dataclass
+class FakeModelPricingRepository(IModelPricingRepository):
+    """In-memory ``IModelPricingRepository`` for α7.5 use-case unit tests.
+
+    Seed with :meth:`set_price`; :meth:`get_effective` returns the priced unit or
+    ``None`` (unconfigured → the recorder prices at 0 and warns, Q5). The
+    time-window is not modelled — unit tests exercise the pricing math + the
+    missing-pricing path, not the effective-at-time SQL (that is integration).
+    """
+
+    _prices: dict[tuple[UUID, str], EffectivePrice] = field(default_factory=dict)
+
+    def set_price(
+        self, *, model_id: UUID, unit: str, price_per_unit: str, currency: str = "USD"
+    ) -> EffectivePrice:
+        ep = EffectivePrice(
+            pricing_id=uuid4(),
+            unit=unit,
+            price_per_unit=Decimal(price_per_unit),
+            currency=currency,
+        )
+        self._prices[(model_id, unit)] = ep
+        return ep
+
+    async def get_effective(
+        self, *, model_id: UUID, unit: str, at: datetime
+    ) -> EffectivePrice | None:
+        return self._prices.get((model_id, unit))
+
+
 # ---- UoW --------------------------------------------------------------
 
 
@@ -2147,6 +2236,8 @@ class FakeUnitOfWork(IUnitOfWork):
         workflow_runs: FakeWorkflowRunRepository | None = None,
         locks: FakeDistributedLockManager | None = None,
         provider_settings: FakeProviderSettingsRepository | None = None,
+        usage: FakeUsageRecordRepository | None = None,
+        model_pricing: FakeModelPricingRepository | None = None,
     ) -> None:
         self._fake_users = users or FakeUserRepository()
         self._fake_tenants = tenants or FakeTenantRepository()
@@ -2168,6 +2259,8 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
         self._fake_locks = locks or FakeDistributedLockManager()
         self._fake_provider_settings = provider_settings or FakeProviderSettingsRepository()
+        self._fake_usage = usage or FakeUsageRecordRepository()
+        self._fake_model_pricing = model_pricing or FakeModelPricingRepository()
         self.commits = 0
         self.rollbacks = 0
 
@@ -2187,6 +2280,8 @@ class FakeUnitOfWork(IUnitOfWork):
         self.workflow_runs = self._fake_workflow_runs
         self.locks = self._fake_locks
         self.provider_settings = self._fake_provider_settings
+        self.usage = self._fake_usage
+        self.model_pricing = self._fake_model_pricing
         return self
 
     async def __aexit__(

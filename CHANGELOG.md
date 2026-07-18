@@ -6,6 +6,85 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.5 — Usage Recorder (priced, idempotent `usage_records` seam) (2026-07-18)
+
+Activates the persistence that already exists (`usage_records`, `ai_model_pricing`)
+by adding the **producer** ADR-0033 assumed but Phase 2 never built: a
+`UsageRecorderService` that turns **one terminal provider call** into **exactly one**
+immutable, priced `usage_records` row (ADR-0019, partitioned monthly by
+`occurred_at`), **idempotent on `request_id`** (ADR-0033), priced against
+`ai_model_pricing` (CR-11). This is **ADR-0041 D13**'s usage half. **Zero
+migration** — every table, enum, and the per-partition `uq_<child>_request_id`
+index (migration `0007`) already exist. Shipped as an explicit **seam** (Q2):
+nothing is wired into the runner/dispatcher — the α7.6 pipeline calls
+`record(...)` around the dispatch. **Explicitly forbidden and absent:** HTTP,
+provider SDKs, Redis, Celery, polling, webhooks, event publishing (Q8 — no
+`UsageRecorded` event, no consumer exists), and the `credit_ledger` debit (Q1 —
+`credits_consumed` stays `0`; the append-only financial ledger is its own later
+slice). **W7.5.1 — the recorder is purely observational:** its only write is
+`usage_records`; it never mutates `WorkflowRun` / `WorkflowStep` / `RenderJob` /
+`Media` / `Timeline` / `Project` / `ProviderSetting` (it holds only the `usage` +
+`model_pricing` repos). See `docs/engineering/PHASE3_ALPHA7_5_PREFLIGHT.md`,
+**ADR-0033**, and **ADR-0041**.
+
+#### Added
+- **Usage Recorder port + DTOs** (`app/application/interfaces/usage_recorder.py`) —
+  the `UsageRecorderPort` (`record(RecordUsageCommand) -> UsageRecordView`), the
+  `PricingUnit` / `UsageStatus` vocabularies (mirroring the DB enums without
+  importing them), the **`RecordUsageCommand`** application contract (Q3 — richer
+  than α7.4's `ProviderResponse`: `tenant_id` / `model_id` / `capability` / usage +
+  workflow/render/project linkage, incl. `render_job_id` which has **no** column
+  and rides in `extra`), the neutral `NewUsageRecord` (insert payload) /
+  `UsageRecordRow` (read-model) / `EffectivePrice` (resolved price) DTOs, and the
+  `DuplicateRequestIdError` replay signal. **No SQLAlchemy import** — neutral, like
+  `OutboxEvent`.
+- **Pure accounting/pricing policy** (`app/application/use_cases/usage/accounting.py`)
+  — side-effect-free `account(command)` (maps `ProviderUsage` onto the typed
+  `usage_records` axes **by capability** — D3.4 — and derives the **primary billing
+  axis**: LLM→`completion_token`, image→`image`, video→`video_second`,
+  voice→`audio_second`) + `price(accounting, prices)` (Q4 — `estimated_cost =
+  Σ(unit_price × quantity)` over line items; a unit with no price contributes 0 and
+  is reported). Tolerant of both the minimal α7.4 mock usage and a richer `detail`
+  breakdown, so real α8.x providers need no recorder change.
+- **`UsageRecorderService`** (`app/application/use_cases/usage/usage_recorder_service.py`)
+  — account → price → assemble → **idempotent insert** in one transaction over one
+  row. Terminal-only (Q6 — `IN_PROGRESS` is rejected with a `ValueError`; the α8.3
+  completion service records the terminal outcome later under the same
+  `request_id`). Missing pricing **never blocks** (Q5 — prices affected units at 0,
+  leaves `pricing_id` NULL, emits a `WARN`). A colliding `request_id` (Q7) is
+  recovered by returning the pre-existing row (`idempotent_replay=True`, `INFO`
+  log). `credits_consumed` stays `0` (Q1).
+- **Repository ports** (`IUsageRecordRepository` — `insert` (raises
+  `DuplicateRequestIdError`) + `get_by_request_id`; `IModelPricingRepository` —
+  read-only `get_effective(model_id, unit, at)`) and their SQLAlchemy impls
+  (`app/infrastructure/repositories/usage_record_repository.py`,
+  `model_pricing_repository.py`). The insert runs inside a **SAVEPOINT**
+  (`begin_nested`) so an ADR-0033 unique-violation rolls back only the failed insert
+  — the caller's transaction survives for the recovery SELECT. A `NULL` `request_id`
+  never collides (the ADR-0033 index is partial: `WHERE request_id IS NOT NULL`).
+  Pricing resolution is effective-at-time (`effective_from <= at < effective_to`,
+  newest window wins).
+- **DI wiring** — `IUnitOfWork` gains **`usage`** + **`model_pricing`**; the
+  SQLAlchemy UoW instantiates both in `__aenter__`; `get_usage_recorder_service()`
+  factory added to the container. The test UoW + fakes mirror it
+  (`FakeUsageRecordRepository` — in-memory idempotent insert/replay;
+  `FakeModelPricingRepository`).
+- **Docs** — this CHANGELOG, the α7.5 pre-flight, the content-generation pipeline
+  note, and an ADR-0041 change-log line recording that D13's usage half now has a
+  concrete producer.
+- **Tests** — unit (accounting per capability: LLM explicit-split / single-quantity
+  fallback / image / video / voice / no-usage; pricing Σ + missing-price 0; service
+  terminal success, `IN_PROGRESS` reject, failed-no-usage, missing-pricing WARN,
+  idempotent replay, observational — no aggregate repo touched) and integration
+  (partitioned insert + read-back, effective-at-time pricing resolution incl.
+  unpriced→None, duplicate `request_id` → `DuplicateRequestIdError` with the original
+  surviving, `NULL` `request_id` coexistence, and the full service pricing +
+  idempotent-replay path on real rows).
+
+#### Version
+- App version bumped to **`0.4.19-phase3-alpha7.5-dev`** (staying on `0.4.x`; still
+  Phase-3 orchestration infrastructure).
+
 ### Phase 3 Slice α7.4 — Provider Skeleton (capability ports · registry · dispatcher · mock providers) (2026-07-17)
 
 Establishes the **provider abstraction layer** every real provider (α8.x) plugs

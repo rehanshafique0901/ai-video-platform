@@ -32,6 +32,11 @@ from typing import Any
 from uuid import UUID
 
 from app.application.interfaces.publisher import OutboxEvent
+from app.application.interfaces.usage_recorder import (
+    EffectivePrice,
+    NewUsageRecord,
+    UsageRecordRow,
+)
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
@@ -1732,5 +1737,52 @@ class IProviderSettingsRepository(ABC):
         (``tenant_id IS NULL``) row for the same ``(provider, key)``; the global row
         is the fallback. Secret values are returned verbatim — masking, if any, is
         the caller's concern (α7.4 has no secret consumers).
+        """
+        ...
+
+
+class IUsageRecordRepository(ABC):
+    """Write/read surface for ``usage_records`` (Slice α7.5, ADR-0019 / ADR-0033).
+
+    The Usage Recorder's only aggregate-free persistence target (W7.5.1). Writes
+    are **append-only** (one immutable row per call) and **idempotent** on
+    ``request_id`` via the per-partition ``uq_<child>_request_id`` partial-unique
+    (ADR-0033): a colliding insert raises :class:`DuplicateRequestIdError`, which
+    the recorder recovers from by returning the pre-existing row.
+    """
+
+    @abstractmethod
+    async def insert(self, new: NewUsageRecord) -> UsageRecordRow:
+        """Insert one usage row (SAVEPOINT-guarded) and return it.
+
+        Raises :class:`app.application.interfaces.usage_recorder.DuplicateRequestIdError`
+        when ``new.request_id`` is non-NULL and a row already exists for it (the
+        ADR-0033 unique fired). A NULL ``request_id`` always inserts (system-initiated
+        calls coexist — ADR-0033 partial predicate ``WHERE request_id IS NOT NULL``).
+        """
+        ...
+
+    @abstractmethod
+    async def get_by_request_id(self, request_id: str) -> UsageRecordRow | None:
+        """Return the existing row for ``request_id`` (most recent), or ``None``."""
+        ...
+
+
+class IModelPricingRepository(ABC):
+    """Read-only ``ai_model_pricing`` resolver (Slice α7.5, CR-11).
+
+    Resolves the price row effective at a point in time for one ``(model_id,
+    unit)``. Read-only — the recorder observes pricing, it never authors it.
+    """
+
+    @abstractmethod
+    async def get_effective(
+        self, *, model_id: UUID, unit: str, at: datetime
+    ) -> EffectivePrice | None:
+        """Return the pricing row effective at ``at`` for ``(model_id, unit)``.
+
+        Prefers the row whose ``[effective_from, effective_to)`` window contains
+        ``at`` (open-ended when ``effective_to IS NULL``). ``None`` when no pricing
+        is configured — the recorder then prices that unit at 0 and warns (Q5).
         """
         ...

@@ -77,6 +77,7 @@ from app.application.use_cases.timeline.provision_timeline import ProvisionTimel
 from app.application.use_cases.timeline.update_clip import UpdateClip
 from app.application.use_cases.timeline.update_timeline import UpdateTimeline
 from app.application.use_cases.timeline.update_track import UpdateTrack
+from app.application.use_cases.usage.usage_recorder_service import UsageRecorderService
 from app.application.use_cases.users.update_profile import UpdateUserProfile
 from app.application.use_cases.versions.branch_version import BranchProjectVersion
 from app.application.use_cases.versions.create_version import CreateProjectVersion
@@ -256,6 +257,17 @@ def get_step_command_dispatcher() -> ProviderDispatcherPort:
     into provider calls.
     """
     return StepCommandDispatcher(get_provider_registry())
+
+
+def get_usage_recorder_service() -> UsageRecorderService:
+    """Factory: a ``UsageRecorderService`` bound to a fresh UoW (α7.5).
+
+    Seam-only (α7.5 sign-off Q2): the recorder is **not** wired into the
+    runner/dispatcher this slice; the α7.6 pipeline calls
+    :meth:`UsageRecorderPort.record` around each terminal dispatch. Purely
+    observational (W7.5.1) — its only write is ``usage_records``.
+    """
+    return UsageRecorderService(uow=get_unit_of_work())
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

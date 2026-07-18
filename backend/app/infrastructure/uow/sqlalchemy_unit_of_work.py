@@ -22,6 +22,7 @@ from app.application.interfaces.locks import IDistributedLockManager
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
     IMediaRepository,
+    IModelPricingRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -32,6 +33,7 @@ from app.application.interfaces.repositories import (
     ISessionRepository,
     ITenantRepository,
     ITimelineRepository,
+    IUsageRecordRepository,
     IUserRepository,
     IWorkflowRunRepository,
 )
@@ -41,6 +43,7 @@ from app.infrastructure.repositories.distributed_lock_manager import (
 )
 from app.infrastructure.repositories.event_outbox_repository import EventOutboxRepository
 from app.infrastructure.repositories.media_repository import MediaRepository
+from app.infrastructure.repositories.model_pricing_repository import ModelPricingRepository
 from app.infrastructure.repositories.project_repository import ProjectRepository
 from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
@@ -55,6 +58,7 @@ from app.infrastructure.repositories.scene_repository import SceneRepository
 from app.infrastructure.repositories.session_repository import SessionRepository
 from app.infrastructure.repositories.tenant_repository import TenantRepository
 from app.infrastructure.repositories.timeline_repository import TimelineRepository
+from app.infrastructure.repositories.usage_record_repository import UsageRecordRepository
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.repositories.workflow_run_repository import WorkflowRunRepository
 
@@ -97,6 +101,8 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.provider_settings = cast(
             IProviderSettingsRepository, ProviderSettingsRepository(self._session)
         )
+        self.usage = cast(IUsageRecordRepository, UsageRecordRepository(self._session))
+        self.model_pricing = cast(IModelPricingRepository, ModelPricingRepository(self._session))
         return self
 
     async def __aexit__(
