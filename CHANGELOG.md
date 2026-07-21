@@ -84,7 +84,7 @@ one dispatcher invocation per `StepCommand`.** See
   the resume checkpoint, `WorkflowRunPaused`, and **no** usage).
 
 #### Version
-- App version bumped to **`0.4.20-phase3-alpha7.6-dev`** (staying on `0.4.x`; still
+- App version bumped to **`0.4.20-phase3-alpha7.6`** (staying on `0.4.x`; still
   Phase-3 orchestration infrastructure).
 
 ### Phase 3 Slice α7.5 — Usage Recorder (priced, idempotent `usage_records` seam) (2026-07-18)
