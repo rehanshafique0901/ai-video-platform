@@ -77,6 +77,30 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Providers · Fal.ai Video (Slice α8.2) --------------------------
+    # Optional. Present → the process wires the real **async** ``FalVideoProvider``
+    # for ``Capability.VIDEO`` (submit → ``IN_PROGRESS`` + job id → the runner
+    # pauses; α8.3 owns completion); absent → the VIDEO capability stays on
+    # ``MockVideoProvider``. Independent of the OpenAI key (IMAGE and VIDEO are
+    # composed separately). The container injects this key into the provider's
+    # shared httpx client (``Authorization: Key …``); the provider never reads it
+    # (W8.1.1 — adapters are configuration-blind; W8.2.3 — the adapter never
+    # mutates orchestration state).
+    fal_api_key: SecretStr | None = Field(
+        default=None,
+        description="Fal.ai API key. When unset, VIDEO stays on the mock provider.",
+    )
+    fal_base_url: str = Field(
+        default="https://queue.fal.run",
+        description="Base URL for the Fal.ai queue (submit) API.",
+        min_length=1,
+    )
+    fal_timeout_seconds: float = Field(
+        default=60.0,
+        description="Per-request timeout for the Fal.ai submit call (one attempt).",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

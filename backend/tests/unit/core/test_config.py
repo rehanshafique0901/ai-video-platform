@@ -24,6 +24,9 @@ def _clean_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_TIMEOUT_SECONDS",
+        "FAL_API_KEY",
+        "FAL_BASE_URL",
+        "FAL_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -87,6 +90,46 @@ def test_openai_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
     monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
     monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+def test_fal_settings_default_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # α8.2: with no FAL_API_KEY the VIDEO capability stays mock; base URL + timeout
+    # have sane defaults so the capability never fails to configure.
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.fal_api_key is None
+    assert s.fal_base_url == "https://queue.fal.run"
+    assert s.fal_timeout_seconds == 60.0
+
+
+@pytest.mark.unit
+def test_fal_api_key_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The key is a SecretStr — it does not leak in repr and must be unwrapped
+    # explicitly (the container does this once when building the shared client).
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    monkeypatch.setenv("FAL_API_KEY", "fal-super-secret")
+    monkeypatch.setenv("FAL_TIMEOUT_SECONDS", "12.5")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.fal_api_key is not None
+    assert s.fal_api_key.get_secret_value() == "fal-super-secret"
+    assert "fal-super-secret" not in repr(s.fal_api_key)
+    assert s.fal_timeout_seconds == 12.5
+
+
+@pytest.mark.unit
+def test_fal_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    monkeypatch.setenv("FAL_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
 

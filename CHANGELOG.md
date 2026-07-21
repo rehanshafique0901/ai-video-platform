@@ -6,6 +6,87 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.2 — First Real Async Provider (Fal.ai Video, submit-only) — the pause-proving slice (2026-07-21)
+
+The **first real *async* provider** slice: it replaces the *one* remaining async-shaped
+mock — the video provider — with a **real** Fal.ai adapter that **submits** a queue-based
+video job and returns `IN_PROGRESS` + a `provider_job_id`, driving the **pause seam built
+in α7.6** with a real external system. It is the first slice to exercise *new orchestration
+behaviour* (the async/pause branch) rather than swap a synchronous mock — yet, as with
+α8.1, the orchestration itself does **not** move: the runner, `StepCommandDispatcher`,
+`UsageRecorderService`, relay, lock manager, `ProviderRegistry` class, neutral DTOs, the
+`ports.py` protocols, and the `generate-video` pipeline are all **byte-for-byte unchanged**;
+the entire behavioural diff lives inside the new provider leaf
+(`app/infrastructure/ai/providers/fal/`) plus minimal DI wiring in the container.
+`FalVideoProvider` implements the existing `VideoProvider` protocol, makes **exactly one**
+HTTP request per call (**W7.6.2** — it *submits* the job and immediately returns
+`IN_PROGRESS`; it never polls, waits, or resolves the result — completion is α8.3), and maps
+HTTP status → the existing typed `ProviderError` buckets (401/403 → auth·terminal; other
+4xx → validation·terminal; 429 → rate-limited·transient; 5xx/connection →
+unavailable·transient; timeout → timeout·transient) so **nothing HTTP leaks upward** (Q8).
+`provider_job_id` is set to the Fal `request_id` (the runner's resume coordinate — already
+checkpointed + emitted in `WorkflowRunPaused`); the completion URLs (`status_url`,
+`response_url`) ride a **versioned opaque `output` envelope** (`schema_version: 1`, Q4) the
+runner checkpoints verbatim without inspecting (W7.6.1), giving α8.3 a stable payload
+contract. **No usage is recorded on submit** (Q5 — the runner already discards usage on
+pause; α8.3 records the priced terminal row under the same `request_id`). The container
+composes VIDEO by config, **independently of IMAGE**: with `FAL_API_KEY` set, VIDEO resolves
+to the real provider; without it, VIDEO stays on `MockVideoProvider` — **exactly one provider
+per capability, no selection engine, no fallback**. LLM/VOICE remain mock. **Zero migration.**
+Four signed-off invariants govern the slice: **W8.1.1 — adapters are completely
+configuration-blind** (the provider receives a pre-authenticated `httpx.AsyncClient` with the
+`Authorization: Key …` header baked in; it performs no env/DB/filesystem/vault lookup and
+never sees the raw key); **W8.2.1 — observational equivalence**: the real adapter returns the
+*same* `GenerateVideoResponse` shape, `IN_PROGRESS` status, set `provider_job_id`, and opaque
+`output` envelope as the mock, so the runner cannot tell which produced it and **pauses
+identically** — only the values differ; **W8.2.2 — the run stops at the pause boundary** (the
+adapter only ever returns `IN_PROGRESS`); and **W8.2.3 — the adapter never mutates
+orchestration state** (no resume/complete/checkpoint/event/usage — a pure request→response
+leaf with no reference to the UoW, event bus, checkpoint store, or usage recorder).
+**Explicitly forbidden and absent:** polling · webhook receiver · completion service ·
+resume/advance-after-pause logic · Celery · Redis · broker · usage recording for the async
+job · storage · media registration · `video_ref` population · export · image-path changes ·
+multi-provider fallback · provider selection · rate limiter · circuit breaker. See
+`docs/engineering/PHASE3_ALPHA8_2_PREFLIGHT.md` and **ADR-0041** (D1/D4/D5/D10).
+
+#### Added
+- **`FalVideoProvider`** (`app/infrastructure/ai/providers/fal/video.py`, new `fal/`
+  subpackage in the strict provider leaf) — an asynchronous submit-only adapter over the
+  Fal.ai queue endpoint implementing `VideoProvider`. Imports only `httpx` + the neutral
+  provider DTOs/errors (no runner/dispatcher/recorder/workflow import — import-linter leaf
+  contract still KEPT). Validates the requested route against a supported set **before** any
+  network call (unsupported → terminal `ProviderValidationError`, zero HTTP), performs one
+  submit request, maps status → typed error, and returns `IN_PROGRESS` with `provider_job_id`
+  + a versioned opaque `output` envelope + `usage=None`. Metadata advertises
+  `supports_polling=True`/`supports_webhooks=True` (Q9 — α8.3's completion service branches
+  on these). Static `health()`.
+- **Fal settings** (`app/core/config.py`) — `fal_api_key: SecretStr | None` (default `None`
+  → VIDEO stays mock), `fal_base_url` (default `https://queue.fal.run`), and
+  `fal_timeout_seconds` (default `60.0`, must be `> 0`). Mirrored in `backend/.env.example`.
+- **Unit tests** — `tests/unit/infrastructure/ai/providers/test_fal_video.py` (submit shape
+  incl. the versioned envelope, one-request-per-call, the full status→error map,
+  timeout/connection faults, `request_id`-less 2xx bodies, metadata, static health, and the
+  **W8.2.1** observational-equivalence check against `MockVideoProvider`, all through an
+  in-memory `httpx.MockTransport` — CI never touches the network); extended
+  `tests/unit/core/test_container_provider_registry.py` (independent IMAGE/VIDEO composition:
+  Fal-key-present → real VIDEO, absent → mock; both-keys → both real; the injected key baked
+  into the shared client's `Authorization: Key …` header); plus new `Settings` cases in
+  `tests/unit/core/test_config.py`.
+
+#### Changed
+- **DI container** (`app/core/container.py`) — the registry composition is extended with a
+  VIDEO branch, symmetric to α8.1's IMAGE branch: a new `_build_fal_client(settings)` (a
+  single shared, pre-authenticated `httpx.AsyncClient`, or `None` when no key is configured)
+  and `_build_provider_registry(openai_client, fal_client)` now register the real-or-mock
+  provider for **both** IMAGE and VIDEO, composed independently. The Fal client joins the
+  `init`/`shutdown`/`reset` lifecycle (`shutdown()` `aclose()`s it). `StepCommandDispatcher`
+  and the runner factory are unchanged — they still receive a `ProviderRegistry` and never
+  learn which concrete provider serves a capability (W8.1.3/W8.2.1).
+
+#### Version
+- App version bumped to **`0.4.22-phase3-alpha8.2`** (staying on `0.4.x`; first real
+  *async* external provider behind the unchanged Phase-3 orchestration + pause seam).
+
 ### Phase 3 Slice α8.1 — First Real Provider (OpenAI Images, synchronous) — the adapter slice (2026-07-21)
 
 The **adapter** slice: it replaces the *one* mocked box at the bottom of the α7.6

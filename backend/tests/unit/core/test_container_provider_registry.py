@@ -1,12 +1,15 @@
-"""Unit tests for α8.1 provider-registry composition in the DI container.
+"""Unit tests for α8.1/α8.2 provider-registry composition in the DI container.
 
-Proves the signed-off Q5 / W8.1.2 wiring at the composition root:
+Proves the signed-off wiring at the composition root:
 
-* no OpenAI key  → IMAGE resolves to ``MockImageProvider``,
-* OpenAI key set → IMAGE resolves to the real ``OpenAIImageProvider``,
-* LLM / VIDEO / VOICE are **always** mock (one real capability only, W8.1.2),
-* the shared client carries the injected key so the provider never sees it
-  (W8.1.1 / Q4 — constructors receive secrets, never retrieve them).
+* no key         → the capability resolves to its deterministic mock,
+* OpenAI key set → IMAGE resolves to the real ``OpenAIImageProvider`` (α8.1),
+* Fal key set    → VIDEO resolves to the real ``FalVideoProvider`` (α8.2),
+* IMAGE and VIDEO compose **independently**; LLM / VOICE are always mock,
+* exactly one provider per capability (no fallback / selection),
+* the shared clients carry the injected key so the providers never see it
+  (W8.1.1 — constructors receive secrets, never retrieve them; Fal uses the
+  ``Key`` auth scheme, OpenAI uses ``Bearer``).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import pytest
 from app.application.interfaces.providers import Capability
 from app.core import container
 from app.core.config import Settings
+from app.infrastructure.ai.providers.fal import FalVideoProvider
 from app.infrastructure.ai.providers.mocks import (
     MockImageProvider,
     MockLLMProvider,
@@ -39,29 +43,70 @@ def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **base)  # type: ignore[call-arg,arg-type]
 
 
-def test_registry_uses_mock_image_when_no_client() -> None:
-    registry = container._build_provider_registry(None)
+def _mock_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+
+
+# --- registry composition ----------------------------------------------------
+
+
+def test_registry_uses_all_mocks_when_no_clients() -> None:
+    registry = container._build_provider_registry(None, None)
     assert isinstance(registry.resolve(Capability.IMAGE), MockImageProvider)
     assert isinstance(registry.resolve(Capability.LLM), MockLLMProvider)
     assert isinstance(registry.resolve(Capability.VIDEO), MockVideoProvider)
     assert isinstance(registry.resolve(Capability.VOICE), MockVoiceProvider)
 
 
-async def test_registry_uses_openai_image_when_client_present() -> None:
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+async def test_registry_uses_openai_image_when_only_openai_client() -> None:
+    client = _mock_client()
     try:
-        registry = container._build_provider_registry(client)
-        # Exactly one real capability: IMAGE is real, the rest stay mock (W8.1.2).
+        registry = container._build_provider_registry(client, None)
+        # IMAGE is real; VIDEO stays mock (independent composition).
         assert isinstance(registry.resolve(Capability.IMAGE), OpenAIImageProvider)
-        assert isinstance(registry.resolve(Capability.LLM), MockLLMProvider)
         assert isinstance(registry.resolve(Capability.VIDEO), MockVideoProvider)
+        assert isinstance(registry.resolve(Capability.LLM), MockLLMProvider)
         assert isinstance(registry.resolve(Capability.VOICE), MockVoiceProvider)
     finally:
         await client.aclose()
 
 
+async def test_registry_uses_fal_video_when_only_fal_client() -> None:
+    client = _mock_client()
+    try:
+        registry = container._build_provider_registry(None, client)
+        # VIDEO is real; IMAGE stays mock (independent composition).
+        assert isinstance(registry.resolve(Capability.VIDEO), FalVideoProvider)
+        assert isinstance(registry.resolve(Capability.IMAGE), MockImageProvider)
+        assert isinstance(registry.resolve(Capability.LLM), MockLLMProvider)
+        assert isinstance(registry.resolve(Capability.VOICE), MockVoiceProvider)
+    finally:
+        await client.aclose()
+
+
+async def test_registry_uses_both_real_when_both_clients_present() -> None:
+    openai_client, fal_client = _mock_client(), _mock_client()
+    try:
+        registry = container._build_provider_registry(openai_client, fal_client)
+        assert isinstance(registry.resolve(Capability.IMAGE), OpenAIImageProvider)
+        assert isinstance(registry.resolve(Capability.VIDEO), FalVideoProvider)
+        # Still exactly one provider per capability; LLM / VOICE remain mock.
+        assert isinstance(registry.resolve(Capability.LLM), MockLLMProvider)
+        assert isinstance(registry.resolve(Capability.VOICE), MockVoiceProvider)
+    finally:
+        await openai_client.aclose()
+        await fal_client.aclose()
+
+
+# --- client construction (secret injection) ----------------------------------
+
+
 def test_build_openai_client_is_none_without_key() -> None:
     assert container._build_openai_client(_settings()) is None
+
+
+def test_build_fal_client_is_none_without_key() -> None:
+    assert container._build_fal_client(_settings()) is None
 
 
 async def test_build_openai_client_bakes_in_the_injected_secret() -> None:
@@ -70,11 +115,22 @@ async def test_build_openai_client_bakes_in_the_injected_secret() -> None:
     )
     assert client is not None
     try:
-        # Q4/W8.1.1: the key is baked into the client's Authorization header at the
-        # composition root — the provider adapter receives the client, not the key.
         assert client.headers["authorization"] == "Bearer sk-super-secret"
-        # httpx normalises base_url with a trailing slash; the effective request
-        # path stays /v1/images/generations (see the adapter's path test).
         assert str(client.base_url) == "https://api.openai.com/v1/"
+    finally:
+        await client.aclose()
+
+
+async def test_build_fal_client_bakes_in_the_injected_secret() -> None:
+    client = container._build_fal_client(
+        _settings(fal_api_key="fal-super-secret", fal_base_url="https://queue.fal.run")
+    )
+    assert client is not None
+    try:
+        # W8.1.1: the key is baked into the client's Authorization header at the
+        # composition root — the provider receives the client, not the key. Fal
+        # uses the ``Key`` scheme (not ``Bearer``).
+        assert client.headers["authorization"] == "Key fal-super-secret"
+        assert str(client.base_url) == "https://queue.fal.run"
     finally:
         await client.aclose()
