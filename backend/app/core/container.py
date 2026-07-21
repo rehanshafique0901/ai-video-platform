@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -89,9 +90,11 @@ from app.application.use_cases.versions.list_versions import ListProjectVersions
 from app.application.use_cases.versions.restore_version import RestoreProjectVersion
 from app.application.use_cases.workflow.advance_workflow_run import AdvanceWorkflowRun
 from app.application.use_cases.workflow.cancel_workflow_run import CancelWorkflowRun
+from app.application.use_cases.workflow.completion_engine import CompletionEngine
 from app.application.use_cases.workflow.create_workflow_run import CreateWorkflowRun
 from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
 from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
+from app.application.use_cases.workflow.resume_workflow_run import ResumeWorkflowRun
 from app.core.config import Settings
 from app.infrastructure.ai.dispatcher import StepCommandDispatcher
 from app.infrastructure.ai.providers.fal import FalVideoProvider
@@ -128,6 +131,8 @@ _publisher: PublisherPort | None = None
 _provider_registry: ProviderRegistry | None = None
 _openai_client: httpx.AsyncClient | None = None
 _fal_client: httpx.AsyncClient | None = None
+# α8.3: settings retained for the completion engine's lease owner + duration.
+_settings: Settings | None = None
 
 
 def init(settings: Settings) -> None:
@@ -139,9 +144,10 @@ def init(settings: Settings) -> None:
     """
     global _engine, _session_factory, _password_hasher, _jwt_service
     global _token_issuer, _dummy_password_hash, _clock, _publisher
-    global _provider_registry, _openai_client, _fal_client
+    global _provider_registry, _openai_client, _fal_client, _settings
     if _engine is not None:
         return
+    _settings = settings
     _engine = make_engine(settings.database_url)
     _session_factory = make_session_factory(_engine)
     _password_hasher = PasswordHasher()
@@ -238,7 +244,7 @@ def _build_provider_registry(
 
 async def shutdown() -> None:
     """Dispose the engine + the shared provider clients. Called by the lifespan handler."""
-    global _engine, _session_factory, _provider_registry, _openai_client, _fal_client
+    global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -250,13 +256,15 @@ async def shutdown() -> None:
     _provider_registry = None
     _openai_client = None
     _fal_client = None
+    _settings = None
 
 
 def reset() -> None:
     """Test-only: clear all singletons so the next ``init`` rebuilds them."""
     global _engine, _session_factory, _password_hasher, _jwt_service
     global _token_issuer, _dummy_password_hash, _clock, _publisher
-    global _provider_registry, _openai_client, _fal_client
+    global _provider_registry, _openai_client, _fal_client, _settings
+    _settings = None
     _engine = None
     _session_factory = None
     _password_hasher = None
@@ -279,6 +287,12 @@ def _require_init() -> None:
             "container not initialised — call init(settings) first "
             "(usually done by app.main.create_app)"
         )
+
+
+def _get_settings() -> Settings:
+    _require_init()
+    assert _settings is not None
+    return _settings
 
 
 def get_engine() -> AsyncEngine:
@@ -713,3 +727,38 @@ def get_advance_workflow_run_use_case() -> AdvanceWorkflowRun:
 
 def get_cancel_workflow_run_use_case() -> CancelWorkflowRun:
     return CancelWorkflowRun(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.3 — Completion engine)
+# ---------------------------------------------------------------------
+
+
+def get_resume_workflow_run_use_case() -> ResumeWorkflowRun:
+    """Factory: the public resume seam, with its runner sharing ONE UoW.
+
+    The runner is constructed over the *same* UoW as the use case so the runner's
+    continuation participates in the resume's single transaction (resume + terminal
+    usage + step-succeeded + continue + settle commit atomically — α8.3 Fork 2).
+    """
+    uow = get_unit_of_work()
+    runner = AdvanceWorkflowRun(uow=uow, dispatcher=get_step_command_dispatcher())
+    return ResumeWorkflowRun(uow=uow, runner=runner)
+
+
+def get_completion_engine() -> CompletionEngine:
+    """Factory: the α8.3 completion engine (polling ingress + provider resolve).
+
+    Library-only (no daemon): a test loop / trigger drives ``poll_once`` /
+    ``complete``. Its read/lease UoW is independent of the resume use case's UoW, so
+    provider I/O never holds a DB transaction open. Lease owner + duration come from
+    settings.
+    """
+    settings = _get_settings()
+    return CompletionEngine(
+        uow=get_unit_of_work(),
+        resume=get_resume_workflow_run_use_case(),
+        dispatcher=get_step_command_dispatcher(),
+        owner=settings.completion_lock_owner,
+        lease=timedelta(seconds=settings.completion_lease_seconds),
+    )

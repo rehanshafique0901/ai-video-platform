@@ -16,7 +16,8 @@ dispatcher.py``), outside the leaf, precisely so this layer stays orchestration-
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, Protocol, runtime_checkable
 
 from app.application.interfaces.providers import (
     GenerateImageRequest,
@@ -54,9 +55,28 @@ class ImageProvider(Provider, Protocol):
 
 
 class VideoProvider(Provider, Protocol):
-    """Video generation (``Capability.VIDEO``) — async: returns ``IN_PROGRESS`` + job id."""
+    """Video generation (``Capability.VIDEO``) — an **async job lifecycle** (α8.3).
 
-    async def generate_video(self, req: GenerateVideoRequest) -> GenerateVideoResponse: ...
+    Every async provider (Fal, Runway, Kling, Pika, Luma, …) shares the same
+    lifecycle — ``submit → job id → poll/webhook → result`` — so the capability is
+    modelled as two verbs rather than a provider-specific ``get_video_result``:
+
+    * :meth:`submit` — start the job; returns ``IN_PROGRESS`` + a ``provider_job_id``
+      (the runner then pauses and checkpoints the resume coordinates). This is the
+      α8.2 submit call, renamed from ``generate_video`` under the lifecycle.
+    * :meth:`resolve` — resolve a previously-submitted job to a **terminal**
+      ``SUCCEEDED`` / ``FAILED`` (or still ``IN_PROGRESS``) result, given the
+      checkpointed ``provider_job_id`` + the opaque ``envelope`` (Fal
+      ``status_url`` / ``response_url``). Called by the α8.3 completion engine —
+      **never** by the dispatcher (the submit path). Provider-agnostic: returns the
+      same neutral :class:`GenerateVideoResponse` DTO.
+    """
+
+    async def submit(self, req: GenerateVideoRequest) -> GenerateVideoResponse: ...
+
+    async def resolve(
+        self, *, provider_job_id: str, envelope: Mapping[str, Any]
+    ) -> GenerateVideoResponse: ...
 
 
 class VoiceProvider(Provider, Protocol):

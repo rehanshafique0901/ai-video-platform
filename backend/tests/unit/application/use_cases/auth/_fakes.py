@@ -1956,6 +1956,20 @@ class FakeWorkflowRunRepository(IWorkflowRunRepository):
             status=WorkflowRunStatus.PAUSED.value,
         )
 
+    async def resume_run(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        # CAS ``paused → running`` (α8.3). Inverse of pause; no ``finished_at``.
+        return self._cas_run(
+            workflow_run_id,
+            {WorkflowRunStatus.PAUSED.value},
+            status=WorkflowRunStatus.RUNNING.value,
+        )
+
+    async def list_paused(self) -> list[WorkflowRun]:
+        # Global paused-run scan (α8.3), oldest first (created_at, id) ASC.
+        rows = [r for r in self._runs.values() if r.status == WorkflowRunStatus.PAUSED.value]
+        rows.sort(key=lambda r: (r.created_at, str(r.id)))
+        return rows
+
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         run = self._runs.get(workflow_run_id)
         if run is None or run.project_id != project_id:

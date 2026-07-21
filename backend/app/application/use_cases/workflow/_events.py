@@ -15,6 +15,8 @@ The signed-off Q8 event set:
 * ``WorkflowRunPaused``    — an async command returned ``IN_PROGRESS``; the run
   settled ``running → paused`` (carries ``step_index``/``provider_job_id`` so the
   α8.3 completion service can resume — α7.6 sign-off Q8).
+* ``WorkflowRunResumed``   — the α8.3 completion engine resolved the async job and
+  took the run ``paused → running`` (carries ``step_index``/``provider_job_id``).
 * ``WorkflowRunSucceeded`` — all steps done; run settled ``running → succeeded``.
 * ``WorkflowRunFailed``    — a step failed terminally; run settled ``→ failed``.
 * ``WorkflowRunCanceled``  — the run was canceled.
@@ -38,6 +40,7 @@ EVENT_WORKFLOW_RUN_CREATED = "WorkflowRunCreated"
 EVENT_WORKFLOW_RUN_STARTED = "WorkflowRunStarted"
 EVENT_WORKFLOW_STEP_COMPLETED = "WorkflowStepCompleted"
 EVENT_WORKFLOW_RUN_PAUSED = "WorkflowRunPaused"
+EVENT_WORKFLOW_RUN_RESUMED = "WorkflowRunResumed"
 EVENT_WORKFLOW_RUN_SUCCEEDED = "WorkflowRunSucceeded"
 EVENT_WORKFLOW_RUN_FAILED = "WorkflowRunFailed"
 EVENT_WORKFLOW_RUN_CANCELED = "WorkflowRunCanceled"
@@ -125,6 +128,32 @@ async def emit_workflow_run_paused(
         uow,
         run,
         EVENT_WORKFLOW_RUN_PAUSED,
+        actor_user_id=actor_user_id,
+        step_index=step_index,
+        provider_job_id=provider_job_id,
+    )
+
+
+async def emit_workflow_run_resumed(
+    uow: IUnitOfWork,
+    run: WorkflowRun,
+    *,
+    step_index: int,
+    provider_job_id: str | None,
+    actor_user_id: UUID | None,
+) -> None:
+    """Append a ``WorkflowRunResumed`` event when a paused run is resumed (α8.3).
+
+    The lifecycle counterpart of :func:`emit_workflow_run_paused`: an async provider
+    job resolved and the completion engine took the run ``paused → running`` to record
+    terminal usage and drive it to completion. Carries the resumed ``step_index`` +
+    ``provider_job_id`` for observability; the terminal outcome emits the usual
+    ``WorkflowRunSucceeded`` / ``WorkflowRunFailed``.
+    """
+    await _emit(
+        uow,
+        run,
+        EVENT_WORKFLOW_RUN_RESUMED,
         actor_user_id=actor_user_id,
         step_index=step_index,
         provider_job_id=provider_job_id,

@@ -97,13 +97,27 @@ _KIND_TO_CAPABILITY: dict[str, Capability] = {
 
 @dataclass(frozen=True, slots=True)
 class _PauseInfo:
-    """The async-pause coordinates the runner persists + emits (α7.6 Q2/Q8)."""
+    """The async-pause coordinates the runner persists + emits (α7.6 Q2/Q8; α8.3 Fork 1A).
+
+    α8.3 enriches the handoff with the ``command_index`` / ``capability`` / ``model_id``
+    the completion engine needs to record the deferred **terminal usage** row under
+    the same ``request_id`` — so completion is deterministic and never re-runs the
+    pure handler to rediscover them.
+    """
 
     step_index: int
     step_name: str
     provider: str
     request_id: str
     provider_job_id: str | None
+    command_index: int
+    capability: str
+    model_id: str
+    tenant_id: str
+    # The opaque submit envelope (verbatim ``resp.output`` — W7.6.1, never inspected)
+    # the completion engine hands back to the provider's ``resolve`` (Fal
+    # ``status_url`` / ``response_url``; mock ``provider_job_id``).
+    envelope: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,59 +307,104 @@ class AdvanceWorkflowRun:
                 await emit_workflow_run_started(self._uow, run, actor_user_id=owner_user_id)
                 advanced = True
 
-            # Execute the step graph in order.
-            steps = await self._uow.workflow_runs.list_steps(run.id)
-            outcome = await self._run_steps(
-                run, definition, steps, tenant_id=tenant_id, actor_user_id=owner_user_id
+            # Execute the step graph in order + settle — on this open UoW (Q5).
+            result = await self._drive_and_settle(
+                run,
+                definition,
+                tenant_id=tenant_id,
+                actor_user_id=owner_user_id,
+                advanced=advanced,
             )
-            advanced = (
-                advanced
-                or bool(outcome.completed)
-                or outcome.failure_error is not None
-                or outcome.pause is not None
-            )
-
-            if outcome.pause is not None:
-                # Async pause seam (Q2): persist ``paused`` + the checkpointed
-                # ``provider_job_id`` (already appended by the step) and stop. The
-                # step stays ``running`` (the provider job is still in flight); the
-                # α8.3 completion service resolves it under the same ``request_id``.
-                settled = await self._uow.workflow_runs.mark_run_paused(run.id)
-                run = settled if settled is not None else run
-                await emit_workflow_run_paused(
-                    self._uow,
-                    run,
-                    step_index=outcome.pause.step_index,
-                    provider_job_id=outcome.pause.provider_job_id,
-                    actor_user_id=owner_user_id,
-                )
-            elif outcome.failure_error is not None:
-                settled = await self._uow.workflow_runs.mark_run_failed(
-                    run.id, outcome.failure_error
-                )
-                run = settled if settled is not None else run
-                await emit_workflow_run_failed(self._uow, run, actor_user_id=owner_user_id)
-            else:
-                summary: dict[str, Any] = {
-                    "step_count": len(steps),
-                    "completed_steps": outcome.completed,
-                }
-                settled = await self._uow.workflow_runs.mark_run_succeeded(run.id, summary)
-                run = settled if settled is not None else run
-                await emit_workflow_run_succeeded(self._uow, run, actor_user_id=owner_user_id)
-
-            final_steps = await self._uow.workflow_runs.list_steps(run.id)
-            latest = await self._uow.workflow_runs.latest_checkpoint(run.id)
             await self._uow.commit()
 
         _LOGGER.info(
             "workflow_run.advanced",
-            workflow_run_id=str(run.id),
+            workflow_run_id=str(result.view.run.id),
             project_id=str(project_id),
-            status=run.status,
+            status=result.view.run.status,
             owner_user_id=str(owner_user_id),
             ip=ip,
         )
+        return result
+
+    async def continue_paused_run_in_uow(
+        self,
+        run: WorkflowRun,
+        definition: WorkflowDefinition,
+        *,
+        tenant_id: UUID,
+        actor_user_id: UUID | None,
+    ) -> AdvanceWorkflowRunResult:
+        """Drive an already-``running`` run's remaining steps to settlement (α8.3).
+
+        The **public** continuation seam: it runs the *same* step loop + settle as
+        :meth:`execute`, but on the **caller's already-open UoW** — it does **not**
+        open a transaction and does **not** commit. This lets :class:`ResumeWorkflowRun`
+        commit *resume + terminal usage + step-succeeded + continuation + settle*
+        atomically in one transaction, without any service reaching into the runner's
+        private step-execution helpers. The caller must have already taken the run
+        ``paused → running`` (and marked/rolled the resumed step). Already-``succeeded``
+        steps are skipped (resume-safety, §3), so re-entry is safe.
+        """
+        return await self._drive_and_settle(
+            run, definition, tenant_id=tenant_id, actor_user_id=actor_user_id, advanced=True
+        )
+
+    async def _drive_and_settle(
+        self,
+        run: WorkflowRun,
+        definition: WorkflowDefinition,
+        *,
+        tenant_id: UUID,
+        actor_user_id: UUID | None,
+        advanced: bool,
+    ) -> AdvanceWorkflowRunResult:
+        """Run the step graph in order, settle the run, and build the view — no commit.
+
+        The shared core of :meth:`execute` and :meth:`continue_paused_run_in_uow`
+        (extracted α8.3). Participates in ``self._uow`` (already open); the caller
+        owns the transaction boundary.
+        """
+        steps = await self._uow.workflow_runs.list_steps(run.id)
+        outcome = await self._run_steps(
+            run, definition, steps, tenant_id=tenant_id, actor_user_id=actor_user_id
+        )
+        advanced = (
+            advanced
+            or bool(outcome.completed)
+            or outcome.failure_error is not None
+            or outcome.pause is not None
+        )
+
+        if outcome.pause is not None:
+            # Async pause seam (Q2): persist ``paused`` + the checkpointed
+            # ``provider_job_id`` (already appended by the step) and stop. The step
+            # stays ``running`` (the provider job is still in flight); the α8.3
+            # completion service resolves it under the same ``request_id``.
+            settled = await self._uow.workflow_runs.mark_run_paused(run.id)
+            run = settled if settled is not None else run
+            await emit_workflow_run_paused(
+                self._uow,
+                run,
+                step_index=outcome.pause.step_index,
+                provider_job_id=outcome.pause.provider_job_id,
+                actor_user_id=actor_user_id,
+            )
+        elif outcome.failure_error is not None:
+            settled = await self._uow.workflow_runs.mark_run_failed(run.id, outcome.failure_error)
+            run = settled if settled is not None else run
+            await emit_workflow_run_failed(self._uow, run, actor_user_id=actor_user_id)
+        else:
+            summary: dict[str, Any] = {
+                "step_count": len(steps),
+                "completed_steps": outcome.completed,
+            }
+            settled = await self._uow.workflow_runs.mark_run_succeeded(run.id, summary)
+            run = settled if settled is not None else run
+            await emit_workflow_run_succeeded(self._uow, run, actor_user_id=actor_user_id)
+
+        final_steps = await self._uow.workflow_runs.list_steps(run.id)
+        latest = await self._uow.workflow_runs.latest_checkpoint(run.id)
         return AdvanceWorkflowRunResult(
             view=WorkflowRunView(run=run, steps=final_steps, latest_checkpoint=latest),
             advanced=advanced,
@@ -358,7 +417,7 @@ class AdvanceWorkflowRun:
         steps: list[Any],
         *,
         tenant_id: UUID,
-        actor_user_id: UUID,
+        actor_user_id: UUID | None,
     ) -> _RunStepsOutcome:
         """Execute pending steps in order; return the aggregate outcome.
 
@@ -416,7 +475,7 @@ class AdvanceWorkflowRun:
         prior_state: dict[str, Any] | None,
         *,
         tenant_id: UUID,
-        actor_user_id: UUID,
+        actor_user_id: UUID | None,
     ) -> _StepExec:
         """Run one step (handler + its commands), with retries. Return its outcome."""
         while True:
@@ -491,6 +550,14 @@ class AdvanceWorkflowRun:
                             "request_id": cmd_result.pause.request_id,
                             "provider_job_id": cmd_result.pause.provider_job_id,
                             "pending_step_index": step.step_index,
+                            # Fork 1A: immutable coordinates the α8.3 completion engine
+                            # reads to record terminal usage without re-running handlers.
+                            "command_index": cmd_result.pause.command_index,
+                            "capability": cmd_result.pause.capability,
+                            "model_id": cmd_result.pause.model_id,
+                            "tenant_id": cmd_result.pause.tenant_id,
+                            # Opaque submit envelope for the completion engine's resolve.
+                            "envelope": cmd_result.pause.envelope,
                         },
                     }
                     await self._uow.workflow_runs.append_checkpoint(
@@ -636,6 +703,16 @@ class AdvanceWorkflowRun:
                         provider=resp.provider,
                         request_id=resp.request_id,
                         provider_job_id=resp.provider_job_id,
+                        # Fork 1A: the completion engine's terminal-usage coordinates.
+                        # ``tenant_id`` is persisted too — the run derives ownership
+                        # through its project (it carries no tenant/owner), so stashing
+                        # it here avoids a completion-time project lookup that would
+                        # itself need the tenant.
+                        command_index=command_index,
+                        capability=capability.value,
+                        model_id=str(model_id),
+                        tenant_id=str(tenant_id),
+                        envelope=dict(resp.output),
                     ),
                 )
 

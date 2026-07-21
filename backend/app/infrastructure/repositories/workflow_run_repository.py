@@ -247,6 +247,33 @@ class WorkflowRunRepository(IWorkflowRunRepository):
         row = (await self._session.execute(upd)).scalar_one_or_none()
         return _run_to_entity(row) if row is not None else None
 
+    async def resume_run(self, workflow_run_id: UUID) -> WorkflowRunEntity | None:
+        # CAS ``paused → running`` (α8.3 completion resume). Inverse of
+        # ``mark_run_paused``; ``finished_at`` stays unset. Status-guarded so a
+        # concurrent resume that already left ``paused`` yields no row (None → replay).
+        upd = (
+            update(WorkflowRunRow)
+            .where(WorkflowRunRow.id == workflow_run_id)
+            .where(WorkflowRunRow.status == WorkflowRunStatus.PAUSED.value)
+            .values(
+                status=WorkflowRunStatus.RUNNING.value,
+                updated_at=func.now(),
+            )
+            .returning(WorkflowRunRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _run_to_entity(row) if row is not None else None
+
+    async def list_paused(self) -> list[WorkflowRunEntity]:
+        # Global paused-run scan for the completion poller (α8.3). Oldest first.
+        stmt = (
+            select(WorkflowRunRow)
+            .where(WorkflowRunRow.status == WorkflowRunStatus.PAUSED.value)
+            .order_by(WorkflowRunRow.created_at.asc(), WorkflowRunRow.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_run_to_entity(r) for r in rows]
+
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRunEntity | None:
         # Status-guarded CAS (no version token — D3.2/D3.7). The ``status IN (...)``
         # predicate makes the terminal-state guard race-safe at the DB: a run the

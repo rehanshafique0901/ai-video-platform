@@ -91,6 +91,29 @@ async def test_d5_no_provider_available_propagates() -> None:
         )
 
 
+async def test_d7_resolve_job_delegates_to_video_provider() -> None:
+    # α8.3 completion path: resolve_job routes VIDEO to the provider's resolve()
+    # and threads its terminal response back through.
+    disp = _dispatcher()
+    resp = await disp.resolve_job(
+        Capability.VIDEO,
+        provider_job_id="mock-video-job:r4",
+        envelope={},
+    )
+    assert resp.status is ProviderStatus.SUCCEEDED
+    assert resp.provider_job_id == "mock-video-job:r4"
+    assert resp.video_ref == "mock-video://mock-video-job:r4"
+
+
+async def test_d8_resolve_job_rejects_synchronous_capability() -> None:
+    # Only the async VIDEO capability has a resolvable job — the sync ones are
+    # a malformed, terminal ProviderValidationError.
+    disp = _dispatcher()
+    for capability in (Capability.LLM, Capability.IMAGE, Capability.VOICE):
+        with pytest.raises(ProviderValidationError):
+            await disp.resolve_job(capability, provider_job_id="x", envelope={})
+
+
 def test_d6_discovery_delegates() -> None:
     disp = _dispatcher()
     assert disp.supports(Capability.IMAGE) is True

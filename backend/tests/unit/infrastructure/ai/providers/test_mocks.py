@@ -71,12 +71,23 @@ async def test_m2_mocks_are_reproducible() -> None:
 
 
 async def test_m3_video_mock_models_async() -> None:
-    resp = await MockVideoProvider().generate_video(
+    resp = await MockVideoProvider().submit(
         GenerateVideoRequest(request_id="r-vid", prompt="a dog", duration_seconds=7)
     )
     assert resp.status is ProviderStatus.IN_PROGRESS
     assert resp.provider_job_id == "mock-video-job:r-vid"
     assert resp.usage is not None and resp.usage.unit == "seconds" and resp.usage.quantity == 7
+
+
+async def test_m3_video_mock_resolves_to_terminal_success() -> None:
+    resp = await MockVideoProvider().resolve(provider_job_id="mock-video-job:r-vid", envelope={})
+    assert resp.status is ProviderStatus.SUCCEEDED
+    assert resp.provider_job_id == "mock-video-job:r-vid"
+    assert resp.video_ref == "mock-video://mock-video-job:r-vid"
+    # Deterministic terminal usage the α8.3 completion path records (fixed seconds).
+    assert resp.usage is not None
+    assert resp.usage.unit == "seconds"
+    assert resp.usage.quantity == 5
 
 
 async def test_m4_health() -> None:

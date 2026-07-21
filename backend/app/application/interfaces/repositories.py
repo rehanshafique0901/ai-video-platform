@@ -1675,6 +1675,30 @@ class IWorkflowRunRepository(ABC):
         ...
 
     @abstractmethod
+    async def resume_run(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        """CAS ``paused → running`` — the α8.3 completion resume seam.
+
+        The inverse of :meth:`mark_run_paused`: an async provider job has resolved, so
+        ``ResumeWorkflowRun`` takes the run back to ``running`` (leaving ``started_at``
+        as-is, ``finished_at`` still unset) before recording terminal usage, completing
+        the paused step, and driving the run to a terminal state. Status-guarded so a
+        concurrent resume (poll racing a future webhook) that already moved the run out
+        of ``paused`` yields ``None`` — the completion is a no-op replay. Returns the
+        running run, or ``None`` if the run was not ``paused``.
+        """
+        ...
+
+    @abstractmethod
+    async def list_paused(self) -> list[WorkflowRun]:
+        """Return all ``paused`` runs (oldest first) — the α8.3 polling-ingress scan.
+
+        Global (not project-scoped): the completion poller enumerates every paused run
+        to resolve its in-flight provider job. Ordered by ``created_at ASC, id ASC`` so
+        the oldest pause is polled first.
+        """
+        ...
+
+    @abstractmethod
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         """Status-guarded cancel: ``{queued,running,paused} → canceled`` (sets ``finished_at``).
 

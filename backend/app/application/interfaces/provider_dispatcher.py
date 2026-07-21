@@ -18,6 +18,8 @@ orchestrator can stay generic (ask ``supports(...)`` instead of hard-coding
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from typing import Any
 
 from app.application.interfaces.providers import Capability, ProviderResponse
 from app.domain.workflow.registry import StepCommand
@@ -35,6 +37,28 @@ class ProviderDispatcherPort(ABC):
         :class:`~app.application.interfaces.providers.ProviderValidationError` if
         ``command.kind`` is not a dispatchable provider capability (render / export
         / storage are excluded — Q6).
+        """
+        ...
+
+    @abstractmethod
+    async def resolve_job(
+        self,
+        capability: Capability,
+        *,
+        provider_job_id: str,
+        envelope: Mapping[str, Any],
+    ) -> ProviderResponse:
+        """Resolve a previously-submitted async job to a terminal (or in-progress) result.
+
+        The completion-path counterpart of :meth:`dispatch` (α8.3): given the
+        capability that owns the job and the checkpointed ``provider_job_id`` +
+        opaque ``envelope`` (the completion coordinates the adapter stashed at
+        submit), route to the resolved provider's ``resolve(...)`` and return its
+        neutral :class:`ProviderResponse`. Only async capabilities (VIDEO) support
+        this; a synchronous capability raises
+        :class:`~app.application.interfaces.providers.ProviderValidationError`.
+        Raises :class:`~app.application.interfaces.providers.NoProviderAvailable`
+        if no provider serves ``capability``.
         """
         ...
 

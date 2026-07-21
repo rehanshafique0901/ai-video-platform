@@ -101,6 +101,23 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Completion engine · async job completion (Slice α8.3) ----------
+    # The α8.3 completion engine resolves in-flight provider jobs for ``paused``
+    # runs and resumes the terminal ones. Library-only: a test loop / trigger
+    # drives ``poll_once``; there is no daemon, Celery, or Redis. The per-run
+    # lease (``workflow_run:<id>``) serialises ingresses; the resume CAS is the
+    # exactly-once backstop.
+    completion_lock_owner: str = Field(
+        default="completion-engine",
+        description="Fencing identity for the completion engine's per-run lock lease.",
+        min_length=1,
+    )
+    completion_lease_seconds: float = Field(
+        default=60.0,
+        description="Per-run completion lock lease (seconds); longer than one resolve.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -30,7 +30,9 @@ must_pass: P1, P2, P3, P4, P5, P6, P7
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -86,6 +88,15 @@ class _ScriptedDispatcher(ProviderDispatcherPort):
             raise item
         assert isinstance(item, ProviderResponse)
         return item
+
+    async def resolve_job(  # pragma: no cover - the runner never resolves (submit path)
+        self,
+        capability: Capability,
+        *,
+        provider_job_id: str,
+        envelope: Mapping[str, Any],
+    ) -> ProviderResponse:
+        raise NotImplementedError("the runner does not resolve jobs (completion engine does)")
 
     def supports(self, capability: Capability) -> bool:  # pragma: no cover - unused
         return True

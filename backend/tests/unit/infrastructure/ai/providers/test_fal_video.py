@@ -95,7 +95,7 @@ def _req(
 async def test_submit_returns_in_progress_with_job_id_and_versioned_envelope() -> None:
     provider, _ = _provider(_accepted("fal-req-abc"))
 
-    resp = await provider.generate_video(_req(duration_seconds=5))
+    resp = await provider.submit(_req(duration_seconds=5))
 
     assert isinstance(resp, GenerateVideoResponse)
     # W8.2.2: submit-only — the adapter never drives a terminal state.
@@ -121,7 +121,7 @@ async def test_submit_returns_in_progress_with_job_id_and_versioned_envelope() -
 async def test_exactly_one_http_request_per_call() -> None:
     # W7.6.2: the adapter dispatches once; retries belong to the runner.
     provider, rec = _provider(_accepted())
-    await provider.generate_video(_req())
+    await provider.submit(_req())
     assert len(rec.requests) == 1
     sent = rec.requests[0]
     assert sent.method == "POST"
@@ -130,7 +130,7 @@ async def test_exactly_one_http_request_per_call() -> None:
 
 async def test_request_payload_carries_prompt_and_duration_and_defaults_route() -> None:
     provider, rec = _provider(_accepted())
-    await provider.generate_video(_req(prompt="a cat", duration_seconds=8))
+    await provider.submit(_req(prompt="a cat", duration_seconds=8))
 
     sent = rec.requests[0]
     assert sent.url.path == f"/{_DEFAULT_MODEL}"  # Q7 default route
@@ -141,13 +141,13 @@ async def test_request_payload_carries_prompt_and_duration_and_defaults_route() 
 
 async def test_explicit_supported_route_is_used() -> None:
     provider, rec = _provider(_accepted())
-    await provider.generate_video(_req(model="fal-ai/minimax-video"))
+    await provider.submit(_req(model="fal-ai/minimax-video"))
     assert rec.requests[0].url.path == "/fal-ai/minimax-video"
 
 
 async def test_duration_omitted_when_not_requested() -> None:
     provider, rec = _provider(_accepted())
-    await provider.generate_video(_req(duration_seconds=None))
+    await provider.submit(_req(duration_seconds=None))
     assert "duration" not in json.loads(rec.requests[0].content)
 
 
@@ -158,7 +158,7 @@ async def test_unsupported_model_is_terminal_and_makes_no_http_call() -> None:
     # A bad route is a malformed request — terminal, and must NOT hit the network.
     provider, rec = _provider(_accepted())
     with pytest.raises(ProviderValidationError):
-        await provider.generate_video(_req(model="fal-ai/not-a-real-route"))
+        await provider.submit(_req(model="fal-ai/not-a-real-route"))
     assert rec.requests == []
 
 
@@ -166,7 +166,7 @@ async def test_unsupported_model_is_terminal_and_makes_no_http_call() -> None:
 async def test_auth_errors_are_terminal(status: int) -> None:
     provider, _ = _provider(lambda _r: httpx.Response(status, json={"detail": "bad key"}))
     with pytest.raises(ProviderAuthenticationError) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is False
 
 
@@ -174,7 +174,7 @@ async def test_auth_errors_are_terminal(status: int) -> None:
 async def test_4xx_is_terminal_validation_error(status: int) -> None:
     provider, _ = _provider(lambda _r: httpx.Response(status, json={"detail": "bad input"}))
     with pytest.raises(ProviderValidationError) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is False
     assert "bad input" in str(ei.value)  # Fal detail surfaced, not raw HTTP
 
@@ -182,7 +182,7 @@ async def test_4xx_is_terminal_validation_error(status: int) -> None:
 async def test_429_is_transient_rate_limited() -> None:
     provider, _ = _provider(lambda _r: httpx.Response(429, json={"detail": "slow down"}))
     with pytest.raises(ProviderRateLimited) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is True
 
 
@@ -190,7 +190,7 @@ async def test_429_is_transient_rate_limited() -> None:
 async def test_5xx_is_transient_unavailable(status: int) -> None:
     provider, _ = _provider(lambda _r: httpx.Response(status, text="upstream error"))
     with pytest.raises(ProviderUnavailable) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is True
 
 
@@ -200,7 +200,7 @@ async def test_timeout_is_transient_provider_timeout() -> None:
 
     provider, _ = _provider(_boom)
     with pytest.raises(ProviderTimeout) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is True
 
 
@@ -210,14 +210,14 @@ async def test_connection_error_is_transient_unavailable() -> None:
 
     provider, _ = _provider(_boom)
     with pytest.raises(ProviderUnavailable) as ei:
-        await provider.generate_video(_req())
+        await provider.submit(_req())
     assert ei.value.transient is True
 
 
 async def test_2xx_without_request_id_is_transient_unavailable() -> None:
     provider, _ = _provider(lambda _r: httpx.Response(200, json={"status": "IN_QUEUE"}))
     with pytest.raises(ProviderUnavailable):
-        await provider.generate_video(_req())
+        await provider.submit(_req())
 
 
 # --- metadata + health -------------------------------------------------------
@@ -247,8 +247,8 @@ async def test_observationally_equivalent_to_mock_video_provider() -> None:
     req = _req(duration_seconds=5)
     real, _ = _provider(_accepted("fal-req-xyz"))
 
-    real_resp = await real.generate_video(req)
-    mock_resp = await MockVideoProvider().generate_video(req)
+    real_resp = await real.submit(req)
+    mock_resp = await MockVideoProvider().submit(req)
 
     # Same DTO type.
     assert type(real_resp) is type(mock_resp) is GenerateVideoResponse
@@ -265,6 +265,85 @@ async def test_observationally_equivalent_to_mock_video_provider() -> None:
     # it is never recorded until α8.3, so the pause behaviour is identical.
     assert real_resp.provider != mock_resp.provider
     assert real_resp.provider_job_id != mock_resp.provider_job_id
+
+
+# --- resolve: async completion lifecycle (α8.3) ------------------------------
+
+_STATUS_URL = "https://queue.fal.run/requests/fal-req-123/status"
+_RESPONSE_URL = "https://queue.fal.run/requests/fal-req-123"
+_ENVELOPE = {"status_url": _STATUS_URL, "response_url": _RESPONSE_URL}
+
+
+def _router(*, status: httpx.Response, result: httpx.Response | None = None) -> _Handler:
+    """Route a resolve's two GETs: ``…/status`` → ``status``, else → ``result``."""
+
+    def _responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return status
+        assert result is not None, f"unexpected result fetch: {request.url}"
+        return result
+
+    return _responder
+
+
+async def test_resolve_in_progress_stays_in_progress() -> None:
+    provider, rec = _provider(_router(status=httpx.Response(200, json={"status": "IN_PROGRESS"})))
+
+    resp = await provider.resolve(provider_job_id="fal-req-123", envelope=_ENVELOPE)
+
+    assert resp.status is ProviderStatus.IN_PROGRESS
+    assert resp.provider_job_id == "fal-req-123"
+    assert resp.usage is None
+    # Only the status was polled — no result fetch while the job is still running.
+    assert len(rec.requests) == 1
+    assert rec.requests[0].url.path.endswith("/status")
+
+
+async def test_resolve_completed_returns_succeeded_with_video_and_usage() -> None:
+    provider, rec = _provider(
+        _router(
+            status=httpx.Response(200, json={"status": "COMPLETED"}),
+            result=httpx.Response(
+                200, json={"video": {"url": "https://cdn.fal/out.mp4", "duration": 8}}
+            ),
+        )
+    )
+
+    resp = await provider.resolve(provider_job_id="fal-req-123", envelope=_ENVELOPE)
+
+    assert resp.status is ProviderStatus.SUCCEEDED
+    assert resp.video_ref == "https://cdn.fal/out.mp4"
+    assert resp.usage is not None
+    assert resp.usage.unit == "seconds"
+    assert resp.usage.quantity == 8
+    # status then result — two GETs.
+    assert len(rec.requests) == 2
+
+
+async def test_resolve_error_status_returns_failed() -> None:
+    provider, _ = _provider(_router(status=httpx.Response(200, json={"status": "ERROR"})))
+
+    resp = await provider.resolve(provider_job_id="fal-req-123", envelope=_ENVELOPE)
+
+    assert resp.status is ProviderStatus.FAILED
+    assert resp.error is not None
+
+
+async def test_resolve_transport_error_is_transient_provider_error() -> None:
+    def _boom(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    provider, _ = _provider(_boom)
+
+    with pytest.raises(ProviderUnavailable):
+        await provider.resolve(provider_job_id="fal-req-123", envelope=_ENVELOPE)
+
+
+async def test_resolve_without_status_url_raises() -> None:
+    provider, _ = _provider(_accepted())
+
+    with pytest.raises(ProviderUnavailable):
+        await provider.resolve(provider_job_id="fal-req-123", envelope={})
 
 
 async def test_typed_errors_are_provider_errors() -> None:

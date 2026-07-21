@@ -6,6 +6,102 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.3 — Completion Engine (poll-first) — the resume slice (2026-07-22)
+
+The **first slice to move orchestration state since α7.6**: it closes the async loop α8.2 opened.
+α8.2 proved a real async provider can drive the pause seam (`submit → IN_PROGRESS → provider_job_id
+→ paused`); α8.3 adds the **single, idempotent completion engine** ADR-0041 **D5** mandates — the
+sole writer that turns an in-flight provider job's terminal outcome into aggregate state. The
+decisive architectural fact, verified in grounding, is that **the runner already supports resume**:
+`AdvanceWorkflowRun` re-advances a `running` run and *skips already-`succeeded` steps*. So the
+completion engine does **not** re-implement step execution and **never re-dispatches** the async
+command (**W8.3.3**). It resolves the job, records the deferred **terminal usage** row under the
+**checkpointed** `request_id`, marks the paused step `succeeded`, flips `paused → running`, and hands
+continuation back to the **unchanged** runner. Completion → resume is deliberately split across **two
+public seams** so no service reaches into runner internals: `CompletionEngine` (resolve the provider
+job under the per-run lease) → **`ResumeWorkflowRun`** (own the atomic *resume + terminal usage +
+step-succeeded + delegate continuation* transaction) → `AdvanceWorkflowRun` (step-execution semantics
+untouched, entered via a new **public** continuation entrypoint). Every future completion mechanism
+(the α8.3b webhook, manual resume, admin replay) converges on the single public `ResumeWorkflowRun`
+seam — a stable orchestration API, not a private helper.
+
+**Ingress = polling only** for α8.3 (D6 "poll-first, built first"); the webhook receiver is a *thin
+second ingress to the identical `complete()`* deferred to **α8.3b**. The async capability is now
+modelled as a **lifecycle** (Q3): `VideoProvider.submit()` (renamed from `generate_video` — already
+submit-only by construction) + a new `resolve()` (terminal `SUCCEEDED`/`FAILED`, or `IN_PROGRESS` if
+still running). This generalises to every future async provider (Runway, Kling, Pika, Luma, …) and
+keeps orchestration provider-agnostic (**W8.3.4** — the engine reads only
+`ProviderResponse.status`/`usage`/`output`; the adapter owns all payload parsing). **Exactly-once
+resume** (**W8.3.2**) is guaranteed by the per-run `workflow_run:<id>` lease (D8) *and* the
+`paused → running` CAS backstop: concurrent ingresses contend on the lease, and the loser's CAS
+writes nothing. Terminal usage is idempotent on `request_id` (the recorder dedupes replays). The
+engine is **library-only** (D11 runner-before-worker): `complete()` + `poll_once()` driven
+synchronously by a test loop or trigger — **no Celery/Redis/daemon**. **Zero migration** — every
+table needed already exists; the only new persistence surface is two repo methods on existing tables
+(`resume_run` CAS `paused → running`, `list_paused` global scan). **Explicitly forbidden and absent:**
+webhook receiver + signature verification (→ α8.3b) · media registration / `video_ref` (→ α8.4) ·
+FFmpeg · storage/download of provider output · export · new providers · provider selection / fallback
+· rate limiter · circuit breaker · any change to the pure step handlers or the `StepCommand` dispatch
+`kind` contract · schema migrations. Four invariants govern the slice: **W8.3.1** (single idempotent
+entrypoint; a replay for an already-resumed/terminal run is a no-op), **W8.3.2** (exactly-once
+resume), **W8.3.3** (completion delegates, never re-dispatches), **W8.3.4** (orchestration stays
+provider-agnostic). See `docs/engineering/PHASE3_ALPHA8_3_PREFLIGHT.md` and **ADR-0041**
+(D5/D6/D8/D11).
+
+#### Added
+- **`CompletionEngine`** (`app/application/use_cases/workflow/completion_engine.py`, new) — the
+  completion engine: one public idempotent `complete(project_id, run_id)` (acquire the per-run lease
+  → read the `_paused` handoff → `dispatcher.resolve_job(...)` → leave paused if still `IN_PROGRESS`,
+  else delegate a terminal result to `ResumeWorkflowRun`) plus a `poll_once()` polling ingress that
+  scans all `paused` runs (oldest-first) and completes each under its own lease. Provider I/O happens
+  outside any DB transaction; the lease + CAS (not a long-held row lock) provide isolation.
+- **`ResumeWorkflowRun`** (`app/application/use_cases/workflow/resume_workflow_run.py`, new) — the
+  **public atomic-resume use case** every completion mechanism converges on. In one transaction:
+  idempotent no-op if not `paused` → `resume_run` CAS (`paused → running`, the exactly-once gate) →
+  `WorkflowRunResumed` → terminal usage under the checkpointed `request_id` → `mark_step_succeeded`
+  (+ opaque terminal envelope) → delegate continuation to `AdvanceWorkflowRun.continue_paused_run_in_uow`
+  on the *same* open UoW → commit. On `FAILED` it settles the run failed itself (a failed step must
+  not be driven), emitting a `WorkflowRunFailed` error **shape-identical** to the α7.6 inline path.
+- **`VideoProvider.resolve`** (`app/infrastructure/ai/providers/ports.py`; impls in `fal/video.py`
+  and `mocks/mock_video.py`) — the completion half of the async lifecycle. Fal `resolve` GETs the
+  checkpointed `status_url`/`response_url` from the α8.2 opaque envelope and maps status → the
+  existing typed `ProviderError` buckets; the mock resolves deterministically (tests need no network).
+- **`ProviderDispatcherPort.resolve_job`** (`app/application/interfaces/provider_dispatcher.py`;
+  impl in `dispatcher.py`) — additive: routes a paused VIDEO job to `provider.resolve(...)`; a
+  synchronous capability has no resolvable job → terminal `ProviderValidationError`.
+- **`WorkflowRunResumed` event** (`app/application/use_cases/workflow/_events.py`) — emitted on
+  `paused → running`, carrying `step_index` + `provider_job_id` (Q9; `event_version` `"1.0"`).
+- **Repo methods (no migration)** — `IWorkflowRunRepository.resume_run` (CAS `paused → running`) and
+  `list_paused` (global paused scan for the poller), with SQL + fake implementations.
+- **Completion config** (`app/core/config.py`) — `completion_lock_owner` (default
+  `"completion-engine"`) and `completion_lease_seconds` (default `60.0`).
+- **Unit tests** — `tests/unit/application/use_cases/workflow/test_completion_engine.py` (idempotent
+  `complete`, exactly-once resume under a held foreign lease, `IN_PROGRESS`-leaves-paused,
+  resume→drive-to-succeeded, terminal-usage under the checkpointed `request_id`, FAILED settlement,
+  no-re-dispatch, `poll_once` sweep); extended dispatcher (`resolve_job` routes VIDEO / rejects sync),
+  Fal `resolve` (status→result GETs, `IN_PROGRESS`/`ERROR`/transport-fault mapping), and mock
+  `resolve` cases.
+
+#### Changed
+- **Runner (`AdvanceWorkflowRun`)** — behaviour-preserving refactor: `execute()`'s step-loop + settle
+  core is extracted into a private `_drive_and_settle`; a new **public** `continue_paused_run_in_uow`
+  drives an already-`running` run's remaining steps + settles on the **caller's open UoW** (no
+  transaction, no commit), letting `ResumeWorkflowRun` commit resume + continuation atomically. Exactly
+  one copy of step-execution remains; `execute()`'s observable behaviour is unchanged. The `_paused`
+  checkpoint handoff is additively enriched (Fork 1A) with `command_index` / `capability` / `model_id`
+  / `tenant_id` and the opaque submit `envelope`, so completion records terminal usage deterministically
+  without re-running a handler.
+- **Dispatcher (`StepCommandDispatcher`)** — the one VIDEO call-site now calls `provider.submit(...)`
+  (renamed from `generate_video`); the closed `StepCommand.kind` table and dispatch contract are
+  unchanged (`"generate_video"` is a *workflow* verb, not a provider method).
+- **DI container** (`app/core/container.py`) — composes `ResumeWorkflowRun` (shared UoW + runner) and
+  `CompletionEngine` (UoW + resume + dispatcher + lease config); the runner/dispatcher/recorder/relay
+  and lock-manager implementations are untouched.
+
+#### Version
+- App version bumped to **`0.4.23-phase3-alpha8.3`** (staying on `0.4.x`; first orchestration-state
+  move since α7.6 — the async completion/resume loop behind the unchanged Phase-3 runner).
+
 ### Phase 3 Slice α8.2 — First Real Async Provider (Fal.ai Video, submit-only) — the pause-proving slice (2026-07-21)
 
 The **first real *async* provider** slice: it replaces the *one* remaining async-shaped

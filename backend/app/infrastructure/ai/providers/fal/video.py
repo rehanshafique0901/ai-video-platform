@@ -54,6 +54,7 @@ timeout                      ``ProviderTimeout``              transient
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -69,6 +70,7 @@ from app.application.interfaces.providers import (
     ProviderStatus,
     ProviderTimeout,
     ProviderUnavailable,
+    ProviderUsage,
     ProviderValidationError,
 )
 
@@ -116,7 +118,7 @@ class FalVideoProvider:
         """
         self._client = client
 
-    async def generate_video(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
+    async def submit(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
         model = req.model or _DEFAULT_MODEL
         if model not in _SUPPORTED_MODELS:
             # A bad route is a malformed request, not a provider fault — terminal,
@@ -155,6 +157,81 @@ class FalVideoProvider:
             usage=None,  # Q5: no billable outcome on submit; α8.3 records terminal usage
         )
 
+    async def resolve(
+        self, *, provider_job_id: str, envelope: Mapping[str, Any]
+    ) -> GenerateVideoResponse:
+        """Resolve a submitted Fal job to a terminal (or still-in-progress) result (α8.3).
+
+        Called by the completion engine — never the dispatcher. Reads the α8.2 opaque
+        envelope's ``status_url`` / ``response_url``, GETs the queue status, and (on
+        ``COMPLETED``) GETs the result payload. Returns the neutral
+        :class:`GenerateVideoResponse`: ``IN_PROGRESS`` while the job is queued/running
+        (the completion engine leaves the run paused and backs off), ``SUCCEEDED`` with
+        a ``video_ref`` + terminal ``usage`` on completion, or ``FAILED`` on a Fal
+        error. Transport faults raise transient :class:`ProviderError` (the poller
+        retries on the next tick). Not bound by W7.6.2 — resolving is a read, not the
+        one-shot submit dispatch.
+        """
+        status_url = envelope.get("status_url")
+        if not isinstance(status_url, str) or not status_url:
+            # No completion coordinate to poll — a provider/checkpoint anomaly.
+            raise ProviderUnavailable(
+                f"fal video resolve: envelope for job {provider_job_id!r} has no 'status_url'"
+            )
+
+        status_resp = await self._get(status_url)
+        status_body = self._parse_json_body(status_resp, context="status")
+        fal_status = str(status_body.get("status", "")).upper()
+
+        if fal_status in ("IN_QUEUE", "IN_PROGRESS"):
+            # Still running — mirror the submit shape so the completion engine leaves
+            # the run paused (no state change) and re-polls on the next tick.
+            return GenerateVideoResponse(
+                request_id="",
+                provider=self.metadata.id,
+                status=ProviderStatus.IN_PROGRESS,
+                provider_job_id=provider_job_id,
+                output=dict(envelope),
+                usage=None,
+            )
+
+        if fal_status != "COMPLETED":
+            # ERROR / CANCELLED / unknown → terminal failure (the run fails).
+            return GenerateVideoResponse(
+                request_id="",
+                provider=self.metadata.id,
+                status=ProviderStatus.FAILED,
+                provider_job_id=provider_job_id,
+                output=dict(envelope),
+                error=f"fal video job {provider_job_id} terminal status={fal_status or 'UNKNOWN'!r}",
+                usage=None,
+            )
+
+        # COMPLETED → fetch the result payload for the video ref + duration.
+        result_url = envelope.get("response_url") or status_body.get("response_url")
+        if not isinstance(result_url, str) or not result_url:
+            raise ProviderUnavailable(
+                f"fal video resolve: completed job {provider_job_id!r} has no 'response_url'"
+            )
+        result_resp = await self._get(result_url)
+        result = self._parse_json_body(result_resp, context="result")
+        video_ref = self._extract_video_url(result)
+        seconds = self._extract_duration_seconds(result)
+        return GenerateVideoResponse(
+            request_id="",
+            provider=self.metadata.id,
+            status=ProviderStatus.SUCCEEDED,
+            provider_job_id=provider_job_id,
+            video_ref=video_ref,
+            output={
+                "schema_version": _ENVELOPE_SCHEMA_VERSION,
+                "provider": "fal",
+                "provider_job_id": provider_job_id,
+                "video_ref": video_ref,
+            },
+            usage=ProviderUsage(unit="seconds", quantity=seconds) if seconds is not None else None,
+        )
+
     async def health(self) -> ProviderHealth:
         # Static — the registry does not consult health, so a live probe would add
         # network + auth surface for no behavioural gain (mirrors α8.1).
@@ -170,6 +247,52 @@ class FalVideoProvider:
             raise ProviderTimeout(f"fal video submit timed out: {exc}") from exc
         except httpx.HTTPError as exc:  # transient — connection / transport fault
             raise ProviderUnavailable(f"fal video submit failed: {exc}") from exc
+
+    # -- resolve: read status / result (α8.3) ------------------------------- #
+
+    async def _get(self, url: str) -> httpx.Response:
+        """GET an absolute Fal URL (status / result); map transport faults to transient."""
+        try:
+            return await self._client.get(url)
+        except httpx.TimeoutException as exc:  # transient — poller retries next tick
+            raise ProviderTimeout(f"fal video resolve timed out: {exc}") from exc
+        except httpx.HTTPError as exc:  # transient — connection / transport fault
+            raise ProviderUnavailable(f"fal video resolve failed: {exc}") from exc
+
+    def _parse_json_body(self, response: httpx.Response, *, context: str) -> dict[str, Any]:
+        """Raise on HTTP error, then return the JSON object body (transient if malformed)."""
+        self._raise_for_status(response)
+        body = self._json_or_none(response)
+        if not isinstance(body, dict):
+            raise ProviderUnavailable(
+                f"fal video resolve: {context} response was not a JSON object"
+            )
+        return body
+
+    @staticmethod
+    def _extract_video_url(result: dict[str, Any]) -> str | None:
+        """Pull the generated video URL from a Fal result payload (defensive across routes)."""
+        video = result.get("video")
+        if isinstance(video, dict):
+            url = video.get("url")
+            if isinstance(url, str) and url:
+                return url
+        # Some routes nest under 'videos'/'output' or expose a top-level 'url'.
+        for key in ("url", "video_url"):
+            url = result.get(key)
+            if isinstance(url, str) and url:
+                return url
+        return None
+
+    @staticmethod
+    def _extract_duration_seconds(result: dict[str, Any]) -> int | None:
+        """Pull the billable generated duration (seconds) if the result reports one."""
+        for source in (result.get("video"), result):
+            if isinstance(source, dict):
+                value = source.get("duration") or source.get("duration_seconds")
+                if isinstance(value, int | float) and value > 0:
+                    return int(round(value))
+        return None
 
     # -- status → neutral error (same map as α8.1) -------------------------- #
 

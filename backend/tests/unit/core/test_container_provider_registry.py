@@ -14,10 +14,14 @@ Proves the signed-off wiring at the composition root:
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import httpx
 import pytest
 
 from app.application.interfaces.providers import Capability
+from app.application.use_cases.workflow.completion_engine import CompletionEngine
+from app.application.use_cases.workflow.resume_workflow_run import ResumeWorkflowRun
 from app.core import container
 from app.core.config import Settings
 from app.infrastructure.ai.providers.fal import FalVideoProvider
@@ -134,3 +138,34 @@ async def test_build_fal_client_bakes_in_the_injected_secret() -> None:
         assert str(client.base_url) == "https://queue.fal.run"
     finally:
         await client.aclose()
+
+
+# --- α8.3 completion-engine composition --------------------------------------
+
+
+def test_completion_engine_factory_wires_lease_from_settings() -> None:
+    # The α8.3 factories construct at the composition root (no DB connection —
+    # the engine is lazy) with the lease owner/duration read from settings.
+    container.reset()
+    try:
+        container.init(_settings(completion_lock_owner="poller-1", completion_lease_seconds=42.0))
+        engine = container.get_completion_engine()
+        assert isinstance(engine, CompletionEngine)
+        assert engine._owner == "poller-1"
+        assert engine._lease == timedelta(seconds=42.0)
+        # The resume seam it delegates to shares its runner's UoW (atomic continuation).
+        assert isinstance(engine._resume, ResumeWorkflowRun)
+    finally:
+        container.reset()
+
+
+def test_resume_workflow_run_factory_shares_uow_with_its_runner() -> None:
+    container.reset()
+    try:
+        container.init(_settings())
+        resume = container.get_resume_workflow_run_use_case()
+        assert isinstance(resume, ResumeWorkflowRun)
+        # The runner MUST share the use case's UoW so continuation joins the resume txn.
+        assert resume._runner._uow is resume._uow
+    finally:
+        container.reset()

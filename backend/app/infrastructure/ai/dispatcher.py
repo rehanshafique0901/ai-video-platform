@@ -14,8 +14,8 @@ in this slice (D3.3) — it keeps ignoring ``StepResult.commands`` until α7.6.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import cast
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
 
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.providers import (
@@ -58,6 +58,22 @@ class StepCommandDispatcher(ProviderDispatcherPort):
             )
         return await handler(command)
 
+    async def resolve_job(
+        self,
+        capability: Capability,
+        *,
+        provider_job_id: str,
+        envelope: Mapping[str, Any],
+    ) -> ProviderResponse:
+        # α8.3 completion path: only the async VIDEO capability exposes ``resolve``.
+        # A synchronous capability has no job to resolve — malformed, terminal.
+        if capability is not Capability.VIDEO:
+            raise ProviderValidationError(
+                f"capability {capability!r} is synchronous and has no resolvable job"
+            )
+        provider = cast(VideoProvider, self._registry.resolve(Capability.VIDEO))
+        return await provider.resolve(provider_job_id=provider_job_id, envelope=envelope)
+
     # -- discovery (delegated to the registry) ------------------------------ #
 
     def supports(self, capability: Capability) -> bool:
@@ -97,7 +113,10 @@ class StepCommandDispatcher(ProviderDispatcherPort):
     async def _generate_video(self, command: StepCommand) -> ProviderResponse:
         provider = cast(VideoProvider, self._registry.resolve(Capability.VIDEO))
         args = command.args
-        return await provider.generate_video(
+        # α8.3: the async lifecycle's *submit* half (renamed from ``generate_video``);
+        # the closed ``kind`` table above is unchanged — ``generate_video`` is the
+        # workflow verb, ``submit`` the provider verb.
+        return await provider.submit(
             GenerateVideoRequest(
                 request_id=self._request_id(command),
                 prompt=str(args.get("prompt", "")),
