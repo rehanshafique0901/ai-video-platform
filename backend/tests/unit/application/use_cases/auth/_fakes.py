@@ -1948,6 +1948,14 @@ class FakeWorkflowRunRepository(IWorkflowRunRepository):
             finished_at=datetime.now(UTC),
         )
 
+    async def mark_run_paused(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        # CAS ``running → paused`` (α7.6). ``paused`` is not terminal → no ``finished_at``.
+        return self._cas_run(
+            workflow_run_id,
+            {WorkflowRunStatus.RUNNING.value},
+            status=WorkflowRunStatus.PAUSED.value,
+        )
+
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         run = self._runs.get(workflow_run_id)
         if run is None or run.project_id != project_id:

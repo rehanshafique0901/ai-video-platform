@@ -12,6 +12,9 @@ The signed-off Q8 event set:
 * ``WorkflowRunCreated``   — a run was queued (steps seeded ``pending``).
 * ``WorkflowRunStarted``   — the runner took the run ``queued → running``.
 * ``WorkflowStepCompleted``— a step succeeded (carries ``step_index``/``step_name``).
+* ``WorkflowRunPaused``    — an async command returned ``IN_PROGRESS``; the run
+  settled ``running → paused`` (carries ``step_index``/``provider_job_id`` so the
+  α8.3 completion service can resume — α7.6 sign-off Q8).
 * ``WorkflowRunSucceeded`` — all steps done; run settled ``running → succeeded``.
 * ``WorkflowRunFailed``    — a step failed terminally; run settled ``→ failed``.
 * ``WorkflowRunCanceled``  — the run was canceled.
@@ -34,6 +37,7 @@ AGGREGATE_TYPE = "workflow_run"
 EVENT_WORKFLOW_RUN_CREATED = "WorkflowRunCreated"
 EVENT_WORKFLOW_RUN_STARTED = "WorkflowRunStarted"
 EVENT_WORKFLOW_STEP_COMPLETED = "WorkflowStepCompleted"
+EVENT_WORKFLOW_RUN_PAUSED = "WorkflowRunPaused"
 EVENT_WORKFLOW_RUN_SUCCEEDED = "WorkflowRunSucceeded"
 EVENT_WORKFLOW_RUN_FAILED = "WorkflowRunFailed"
 EVENT_WORKFLOW_RUN_CANCELED = "WorkflowRunCanceled"
@@ -100,6 +104,30 @@ async def emit_workflow_step_completed(
         actor_user_id=actor_user_id,
         step_index=step_index,
         step_name=step_name,
+    )
+
+
+async def emit_workflow_run_paused(
+    uow: IUnitOfWork,
+    run: WorkflowRun,
+    *,
+    step_index: int,
+    provider_job_id: str | None,
+    actor_user_id: UUID | None,
+) -> None:
+    """Append a ``WorkflowRunPaused`` event for an async ``IN_PROGRESS`` command (α7.6 Q8).
+
+    Carries the paused ``step_index`` and the provider's ``provider_job_id`` so the
+    α8.3 completion service can resolve the job and resume under the same
+    ``request_id``. No usage is recorded for the pause (Q6 — terminal-only).
+    """
+    await _emit(
+        uow,
+        run,
+        EVENT_WORKFLOW_RUN_PAUSED,
+        actor_user_id=actor_user_id,
+        step_index=step_index,
+        provider_job_id=provider_job_id,
     )
 
 

@@ -160,6 +160,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.application.interfaces.repositories import (
         IEventOutboxRepository,
         IMediaRepository,
+        IModelPricingRepository,
         IProjectRepository,
         IProjectVersionRepository,
         IPromptRepository,
@@ -170,6 +171,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         ISessionRepository,
         ITenantRepository,
         ITimelineRepository,
+        IUsageRecordRepository,
         IUserRepository,
         IWorkflowRunRepository,
     )
@@ -181,6 +183,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         EventOutboxRepository,
     )
     from app.infrastructure.repositories.media_repository import MediaRepository
+    from app.infrastructure.repositories.model_pricing_repository import (
+        ModelPricingRepository,
+    )
     from app.infrastructure.repositories.project_repository import ProjectRepository
     from app.infrastructure.repositories.project_version_repository import (
         ProjectVersionRepository,
@@ -195,6 +200,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.session_repository import SessionRepository
     from app.infrastructure.repositories.tenant_repository import TenantRepository
     from app.infrastructure.repositories.timeline_repository import TimelineRepository
+    from app.infrastructure.repositories.usage_record_repository import (
+        UsageRecordRepository,
+    )
     from app.infrastructure.repositories.user_repository import UserRepository
     from app.infrastructure.repositories.workflow_run_repository import (
         WorkflowRunRepository,
@@ -256,6 +264,10 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 )
                 self.provider_settings = cast(
                     IProviderSettingsRepository, ProviderSettingsRepository(self._session)
+                )
+                self.usage = cast(IUsageRecordRepository, UsageRecordRepository(self._session))
+                self.model_pricing = cast(
+                    IModelPricingRepository, ModelPricingRepository(self._session)
                 )
                 return self
 

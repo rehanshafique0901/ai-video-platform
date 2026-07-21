@@ -257,8 +257,79 @@ def _always_transient(name: str) -> StepHandler:
     return handler
 
 
+# --------------------------------------------------------------------------- #
+# α7.6 provider-backed pipelines (the "first pipeline").
+#
+# These are still **pure** handlers — they only *emit* a StepCommand; the runner
+# (imperative shell) injects the deterministic ``request_id`` and dispatches it to
+# a provider (α7.4 dispatcher → mock provider). The handlers never see a
+# ``ProviderResponse`` and never do I/O (W7.6.1 keeps the runner provider-agnostic;
+# the handlers are provider-agnostic by construction).
+#
+# * ``generate-image@1.0.0`` — the fully-executable pipeline: prepare a prompt, then
+#   emit a ``generate_image`` command. The mock returns ``SUCCEEDED`` inline, so the
+#   run completes (prompt → image → usage → checkpoint → succeeded).
+# * ``generate-video@1.0.0`` — the minimal pause pipeline: emit a ``generate_video``
+#   command. The mock returns ``IN_PROGRESS`` + a ``provider_job_id``, so the runner
+#   pauses (α8.3 owns completion). Nothing beyond pause.
+#
+# Both carry ``model_id`` from the run input into the command; the runner fails fast
+# if it is absent (usage cannot be priced without a real ``ai_models`` row — Q4).
+# --------------------------------------------------------------------------- #
+
+GENERATE_IMAGE = "generate-image"
+GENERATE_VIDEO = "generate-video"
+
+
+def _generation_args(ctx: StepContext, extra: dict[str, Any]) -> dict[str, Any]:
+    """Build a command arg bag, threading ``model``/``model_id`` from the run input.
+
+    ``model_id`` is copied verbatim (as a string) only when present; a missing id
+    yields a command the runner rejects with a terminal ``MODEL_ID_MISSING`` (Q4).
+    The runner injects ``request_id`` — handlers never mint it (D5).
+    """
+    args = dict(extra)
+    model_id = ctx.run_input.get("model_id")
+    if model_id is not None:
+        args["model"] = str(model_id)
+        args["model_id"] = str(model_id)
+    return args
+
+
+def _prepare_image_prompt(ctx: StepContext) -> StepResult:
+    """Pure: derive a deterministic prompt from the run input (no I/O)."""
+    subject = str(ctx.run_input.get("subject", "a subject"))
+    prompt = f"{subject}, cinematic lighting, high detail"
+    return StepResult.ok(output={"prompt": prompt}, checkpoint_state={"prompt": prompt})
+
+
+def _generate_image_step(ctx: StepContext) -> StepResult:
+    """Pure: emit a ``generate_image`` command carrying the prior step's prompt."""
+    prompt = str((ctx.prior_state or {}).get("prompt", ""))
+    args = _generation_args(ctx, {"prompt": prompt, "size": ctx.run_input.get("size", "1024x1024")})
+    return StepResult.ok(
+        output={"prompt": prompt},
+        checkpoint_state={"prompt": prompt},
+        commands=(StepCommand(kind="generate_image", args=args),),
+    )
+
+
+def _generate_video_step(ctx: StepContext) -> StepResult:
+    """Pure: emit a ``generate_video`` command (the mock returns ``IN_PROGRESS``)."""
+    subject = str(ctx.run_input.get("subject", "a scene"))
+    prompt = f"{subject}, short clip"
+    args = _generation_args(
+        ctx, {"prompt": prompt, "duration_seconds": ctx.run_input.get("duration_seconds", 5)}
+    )
+    return StepResult.ok(
+        output={"prompt": prompt},
+        checkpoint_state={"prompt": prompt},
+        commands=(StepCommand(kind="generate_video", args=args),),
+    )
+
+
 def default_registry() -> WorkflowRegistry:
-    """Build a registry pre-loaded with the α7.2 deterministic workflows."""
+    """Build a registry pre-loaded with the α7.2 deterministic + α7.6 provider workflows."""
     registry = WorkflowRegistry()
     registry.register(
         WorkflowDefinition(
@@ -297,6 +368,24 @@ def default_registry() -> WorkflowRegistry:
             key=RETRY_EXHAUST,
             version=WORKFLOW_VERSION_1,
             steps=(StepDefinition("doomed", _always_transient("doomed"), max_retries=2),),
+        )
+    )
+    # α7.6 provider-backed pipelines (dispatched by the runner via the α7.4 mocks).
+    registry.register(
+        WorkflowDefinition(
+            key=GENERATE_IMAGE,
+            version=WORKFLOW_VERSION_1,
+            steps=(
+                StepDefinition("prepare-prompt", _prepare_image_prompt),
+                StepDefinition("generate-image", _generate_image_step),
+            ),
+        )
+    )
+    registry.register(
+        WorkflowDefinition(
+            key=GENERATE_VIDEO,
+            version=WORKFLOW_VERSION_1,
+            steps=(StepDefinition("generate-video", _generate_video_step),),
         )
     )
     return registry

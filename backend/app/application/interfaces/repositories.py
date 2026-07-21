@@ -1665,6 +1665,16 @@ class IWorkflowRunRepository(ABC):
         ...
 
     @abstractmethod
+    async def mark_run_paused(self, workflow_run_id: UUID) -> WorkflowRun | None:
+        """CAS ``running → paused`` for an async ``IN_PROGRESS`` command (α7.6, Q2).
+
+        ``paused`` is **not terminal** — ``finished_at`` is left unset; the α8.3
+        completion service resumes the run under the checkpointed ``provider_job_id``.
+        Returns the paused run, or ``None`` if the run was not ``running``.
+        """
+        ...
+
+    @abstractmethod
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         """Status-guarded cancel: ``{queued,running,paused} → canceled`` (sets ``finished_at``).
 

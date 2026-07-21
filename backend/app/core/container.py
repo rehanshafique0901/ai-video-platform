@@ -597,7 +597,13 @@ def get_get_workflow_run_use_case() -> GetWorkflowRun:
 
 
 def get_advance_workflow_run_use_case() -> AdvanceWorkflowRun:
-    return AdvanceWorkflowRun(uow=get_unit_of_work())
+    # α7.6: the runner is now wired to the α7.4 dispatcher so it can interpret a
+    # pure step's StepCommands (dispatch → mock provider → record usage → checkpoint).
+    # Deterministic α7.2 workflows emit no commands, so they never touch it.
+    return AdvanceWorkflowRun(
+        uow=get_unit_of_work(),
+        dispatcher=get_step_command_dispatcher(),
+    )
 
 
 def get_cancel_workflow_run_use_case() -> CancelWorkflowRun:

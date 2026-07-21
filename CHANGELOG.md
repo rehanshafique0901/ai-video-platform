@@ -6,6 +6,87 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α7.6 — First Pipeline (mock) — runner ⇄ dispatcher ⇄ recorder ⇄ outbox, end-to-end (2026-07-19)
+
+The **composition** slice: it introduces **almost no new infrastructure** and
+instead wires the five seams already built (α7.2 runner · α7.4 dispatcher · α7.5
+recorder · α7.3 outbox · checkpoints) into **one complete, deterministic,
+in-process orchestration loop** — proving the entire stack end-to-end with **no
+external provider dependency** (mocks stand in behind the dispatcher). The α7.2
+`AdvanceWorkflowRun` is **extended, not forked** (Q6): after a pure step handler
+succeeds, the runner now interprets its `StepResult.commands` — minting a
+**deterministic** `request_id` (`run_id:step_index:command_index`, D5/Q3),
+dispatching each command **exactly once** (W7.6.2 — retries are the runner's alone,
+never the dispatcher's) via the injected `ProviderDispatcherPort`, recording
+**terminal** usage in the **same** transaction (Q5), and either **pausing** on
+`IN_PROGRESS` (Q2) or checkpointing the **opaque** provider envelope (W7.6.1). Two
+pipelines ship: **`generate-image@1.0.0`** — fully executable (prepare-prompt →
+mock image `SUCCEEDED` → priced `usage_records` row → checkpoint → `succeeded`) —
+and **`generate-video@1.0.0`** — minimal pause seam (mock `IN_PROGRESS` +
+`provider_job_id` → `running → paused`; **nothing** beyond pause: no completion, no
+polling, no webhook — Q1). **Explicitly forbidden and absent:** real providers,
+HTTP/SDKs, Redis/Celery/broker, polling loops, webhooks, and **`Media` rows** (Q7 —
+generated media stays checkpointed; α8.4 owns registration). **Zero migration** —
+reuses every existing table/enum. Two invariants govern the seam: **W7.6.1 — the
+runner never interprets provider payloads** (it knows only `StepCommand` /
+`ProviderResponse` / `ProviderStatus`; `image_ref` / prompt text / JSON payloads /
+video metadata belong to the dispatcher + provider adapter) and **W7.6.2 — exactly
+one dispatcher invocation per `StepCommand`.** See
+`docs/engineering/PHASE3_ALPHA7_6_PREFLIGHT.md` and **ADR-0041** (D4/D11/D13).
+
+#### Added
+- **Provider-backed workflow pipelines** (`app/domain/workflow/registry.py`) — the
+  `generate-image@1.0.0` (steps `prepare-prompt` → `generate-image`) and
+  `generate-video@1.0.0` (step `generate-video`) definitions, registered in
+  `default_registry()`, plus their **pure** handlers (`_prepare_image_prompt` /
+  `_generate_image_step` / `_generate_video_step` and the `_generation_args`
+  helper). Handlers only *emit* a `StepCommand` and thread `model` / `model_id` from
+  the run input into its args — they never mint the `request_id`, never see a
+  `ProviderResponse`, and do no I/O (provider-agnostic by construction).
+- **Runner command execution** (`app/application/use_cases/workflow/advance_workflow_run.py`)
+  — `AdvanceWorkflowRun` gains an optional `dispatcher: ProviderDispatcherPort` (+
+  `default_currency`). After a step succeeds it runs `_execute_commands`: mints the
+  deterministic `request_id`, injects it into a fresh `StepCommand`, dispatches
+  **once** (W7.6.2), maps `ProviderError` → transient (runner-retry up to the step
+  bound) / terminal (fail), handles `IN_PROGRESS` → pause and `FAILED` → record
+  failed usage **then** fail (Q9), and records `SUCCEEDED` usage — all in the run's
+  single transaction. The provider `output` is stored as an **opaque** checkpoint
+  envelope via `_response_view` (W7.6.1). Fail-fast `MODEL_ID_MISSING` before
+  dispatch (Q4). On pause the run settles `running → paused`, checkpoints the resume
+  coordinates (`provider_job_id`, `pending_step_index`), and emits `WorkflowRunPaused`.
+- **`record_usage_in_uow(...)`** (`app/application/use_cases/usage/usage_recorder_service.py`)
+  — a **transaction-participating** helper that runs the account → price →
+  idempotent-insert body on an **already-open** UoW **without committing**, so the
+  runner records usage inside its own transaction (Q5). `UsageRecorderService.record`
+  is refactored to wrap it (open → helper → commit) — the α7.5 public API is
+  **unchanged**.
+- **`WorkflowRunPaused` event** (`app/application/use_cases/workflow/_events.py`) —
+  the single new event (Q8), carrying `step_index` + `provider_job_id` so the α8.3
+  completion service can resume under the same `request_id`. No usage for a pause
+  (Q6 — terminal-only).
+- **`mark_run_paused` CAS** — `IWorkflowRunRepository.mark_run_paused` +
+  its SQLAlchemy impl: a status-guarded `running → paused` that leaves `finished_at`
+  **unset** (`paused` is not terminal). Mirrored in the test fakes.
+- **DI wiring** (`app/core/container.py`) — `get_advance_workflow_run_use_case()`
+  injects `dispatcher=get_step_command_dispatcher()`; the integration test UoW
+  (`tests/integration/conftest.py`) wires `usage` + `model_pricing` for parity.
+- **Docs** — this CHANGELOG, the α7.6 pre-flight sign-off, the content-generation
+  pipeline note (§13 row + change log), and an ADR-0041 change-log line.
+- **Tests** — unit (`test_advance_workflow_run_pipeline.py`, a `_ScriptedDispatcher`
+  fake: image success + opaque checkpoint + priced usage; deterministic `request_id`
+  + replay idempotency; video pause on `IN_PROGRESS` — `PAUSED` + event + no usage;
+  provider `FAILED` — records usage then fails; transient retry with stable
+  `request_id`; `model_id` fail-fast before dispatch; α7.2 backward-compat with a
+  wired dispatcher) and integration (`test_first_pipeline_e2e.py`, the real runner +
+  registry + `StepCommandDispatcher` + mocks + recorder on live SQL: image pipeline
+  to `succeeded` with a priced `usage_records` row + verbatim opaque checkpoint +
+  the started→completed×2→succeeded outbox chain; video pipeline to `paused` with
+  the resume checkpoint, `WorkflowRunPaused`, and **no** usage).
+
+#### Version
+- App version bumped to **`0.4.20-phase3-alpha7.6-dev`** (staying on `0.4.x`; still
+  Phase-3 orchestration infrastructure).
+
 ### Phase 3 Slice α7.5 — Usage Recorder (priced, idempotent `usage_records` seam) (2026-07-18)
 
 Activates the persistence that already exists (`usage_records`, `ai_model_pricing`)
