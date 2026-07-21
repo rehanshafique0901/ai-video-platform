@@ -6,6 +6,77 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.1 — First Real Provider (OpenAI Images, synchronous) — the adapter slice (2026-07-21)
+
+The **adapter** slice: it replaces the *one* mocked box at the bottom of the α7.6
+pipeline — the image provider — with a **real** synchronous OpenAI Images adapter,
+and proves the α7.4 abstraction / α7.6 orchestration can drive an external system
+**without any orchestration-layer change**. The runner, `StepCommandDispatcher`,
+`UsageRecorderService`, relay, lock manager, `ProviderRegistry` class, neutral DTOs,
+and `ports.py` are all **byte-for-byte unchanged**; the entire behavioural diff lives
+inside the provider leaf (`app/infrastructure/ai/providers/openai/`) plus minimal DI
+wiring in the container. `OpenAIImageProvider` implements the existing `ImageProvider`
+protocol over `POST /images/generations` (`dall-e-3`, `response_format="url"` — a
+compact URL ref so **no storage layer** is needed; `gpt-image-1`/base64 waits for
+α8.4), makes **exactly one** HTTP request per call (**W7.6.2** — all retry belongs to
+the runner), and maps HTTP status → the existing typed `ProviderError` buckets
+(401/403 → auth·terminal; other 4xx/policy → validation·terminal; 429 →
+rate-limited·transient; 5xx/connection → unavailable·transient; timeout →
+timeout·transient) so **nothing HTTP leaks upward** (Q7). The container composes the
+registry by config: with `OPENAI_API_KEY` set, IMAGE resolves to the real provider;
+without it, IMAGE stays on `MockImageProvider` — **exactly one provider per
+capability, no selection engine, no fallback** (Q5). LLM/VIDEO/VOICE remain mock.
+**Zero migration.** Three signed-off invariants govern the slice: **W8.1.1 —
+adapters are completely configuration-blind** (the provider receives a
+pre-authenticated `httpx.AsyncClient`; it performs no env/DB/filesystem/vault lookup
+and never sees the raw key — *constructors receive secrets, they never retrieve
+them*, Q4); **W8.1.2 — exactly one real capability** (IMAGE only); and **W8.1.3 —
+observational equivalence**: the real adapter returns the *same* `GenerateImageResponse`
+shape, populated field-set, and `SUCCEEDED` semantics as the mock, so the runner
+cannot tell which produced a response — only the values (image URL, provider id)
+differ. **Explicitly forbidden and absent:** Celery · Redis · webhooks · polling ·
+storage · media registration · export · video/LLM/voice real providers ·
+multi-provider fallback · provider selection · rate limiter · circuit breaker. See
+`docs/engineering/PHASE3_ALPHA8_1_PREFLIGHT.md` and **ADR-0041** (D1/D4/D10).
+
+#### Added
+- **`OpenAIImageProvider`** (`app/infrastructure/ai/providers/openai/image.py`, new
+  `openai/` subpackage in the strict provider leaf) — a synchronous adapter over the
+  OpenAI image-generations endpoint implementing `ImageProvider`. Imports only
+  `httpx` + the neutral provider DTOs/errors (no runner/dispatcher/recorder/workflow
+  import — import-linter leaf contract still KEPT). Validates the requested model
+  against a supported set (`dall-e-3`/`dall-e-2`) **before** any network call
+  (unsupported → terminal `ProviderValidationError`, zero HTTP), performs one
+  request, maps status → typed error, and returns `SUCCEEDED` with `image_ref` +
+  `usage(unit="images")`. Static `health()` (Q10 — the registry does not consult
+  health yet).
+- **OpenAI settings** (`app/core/config.py`) — `openai_api_key: SecretStr | None`
+  (default `None` → provider stays mock), `openai_base_url` (default
+  `https://api.openai.com/v1`), and `openai_timeout_seconds` (default `60.0`, must be
+  `> 0`). Mirrored in `backend/.env.example`.
+- **Unit tests** — `tests/unit/infrastructure/ai/providers/test_openai_image.py`
+  (success shape, request payload, one-request-per-call, the full status→error map,
+  timeout/connection faults, empty/`url`-less 200 bodies, metadata, static health,
+  and the **W8.1.3** observational-equivalence check against `MockImageProvider`, all
+  through an in-memory `httpx.MockTransport` — CI never touches the network);
+  `tests/unit/core/test_container_provider_registry.py` (Q5/W8.1.2 composition:
+  key-present → real IMAGE provider, key-absent → mock, LLM/VIDEO/VOICE always mock,
+  and the injected key baked into the shared client's `Authorization` header); plus
+  new `Settings` cases in `tests/unit/core/test_config.py`.
+
+#### Changed
+- **DI container** (`app/core/container.py`) — the provider registry is now built by
+  `init(settings)` (it joins the `init`/`shutdown`/`reset` lifecycle) via two new
+  private helpers: `_build_openai_client(settings)` (a single shared,
+  pre-authenticated `httpx.AsyncClient`, or `None` when no key is configured) and
+  `_build_provider_registry(client)` (registers the real or mock IMAGE provider and
+  the three mocks). `get_provider_registry()` returns that init-built singleton;
+  `shutdown()` now `aclose()`s the shared client. `StepCommandDispatcher` and the
+  runner factory are unchanged — they still receive a `ProviderRegistry` and never
+  learn which concrete provider serves a capability (W8.1.3).
+- **Dependencies** (`backend/pyproject.toml`) — `httpx>=0.27.0` promoted from the
+  `dev` extra to a **core runtime** dependency (a real provider now calls it).
+
 ### Phase 3 Slice α7.6 — First Pipeline (mock) — runner ⇄ dispatcher ⇄ recorder ⇄ outbox, end-to-end (2026-07-19)
 
 The **composition** slice: it introduces **almost no new infrastructure** and

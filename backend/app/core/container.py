@@ -27,10 +27,12 @@ from __future__ import annotations
 import secrets
 from collections.abc import AsyncIterator
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
+from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
@@ -92,7 +94,15 @@ from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
 from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
 from app.core.config import Settings
 from app.infrastructure.ai.dispatcher import StepCommandDispatcher
-from app.infrastructure.ai.providers.registry import PROVIDER_REGISTRY, ProviderRegistry
+from app.infrastructure.ai.providers.mocks import (
+    MockImageProvider,
+    MockLLMProvider,
+    MockVideoProvider,
+    MockVoiceProvider,
+)
+from app.infrastructure.ai.providers.openai import OpenAIImageProvider
+from app.infrastructure.ai.providers.ports import Provider
+from app.infrastructure.ai.providers.registry import ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
@@ -110,6 +120,11 @@ _token_issuer: AuthTokenIssuer | None = None
 _dummy_password_hash: str | None = None
 _clock: SystemClock | None = None
 _publisher: PublisherPort | None = None
+# α8.1: the process-wide provider registry + the shared OpenAI HTTP client.
+# The registry is now settings-dependent (it wires the real IMAGE provider iff
+# an OpenAI key is configured), so it joins the init/shutdown/reset lifecycle.
+_provider_registry: ProviderRegistry | None = None
+_openai_client: httpx.AsyncClient | None = None
 
 
 def init(settings: Settings) -> None:
@@ -121,6 +136,7 @@ def init(settings: Settings) -> None:
     """
     global _engine, _session_factory, _password_hasher, _jwt_service
     global _token_issuer, _dummy_password_hash, _clock, _publisher
+    global _provider_registry, _openai_client
     if _engine is not None:
         return
     _engine = make_engine(settings.database_url)
@@ -148,21 +164,66 @@ def init(settings: Settings) -> None:
     # fan-out. Real consumers / a broker-backed publisher are wired in later
     # slices behind the same ``PublisherPort`` without touching the relay.
     _publisher = InProcessPublisher()
+    # α8.1: wire the provider registry. When an OpenAI key is configured, build a
+    # single shared, pre-authenticated httpx client and register the real
+    # ``OpenAIImageProvider`` for IMAGE; otherwise the IMAGE capability stays on
+    # the deterministic mock. LLM / VIDEO / VOICE are always mock (W8.1.2). The
+    # secret is injected into the client here and never read by the provider
+    # (W8.1.1 — adapters are configuration-blind; Q4 — receive, never retrieve).
+    _openai_client = _build_openai_client(settings)
+    _provider_registry = _build_provider_registry(_openai_client)
+
+
+def _build_openai_client(settings: Settings) -> httpx.AsyncClient | None:
+    """A shared, pre-authenticated OpenAI client — or ``None`` when no key is set."""
+    key = settings.openai_api_key
+    if key is None:
+        return None
+    return httpx.AsyncClient(
+        base_url=settings.openai_base_url,
+        timeout=settings.openai_timeout_seconds,
+        headers={"Authorization": f"Bearer {key.get_secret_value()}"},
+    )
+
+
+def _build_provider_registry(openai_client: httpx.AsyncClient | None) -> ProviderRegistry:
+    """Compose the registry: exactly one provider per capability (no selection).
+
+    IMAGE resolves to the real ``OpenAIImageProvider`` iff a client was built,
+    else the mock; LLM / VIDEO / VOICE are always mock. ``resolve`` stays a direct
+    lookup — there is no fallback, priority, weighting, or health ordering (Q5).
+    """
+    registry = ProviderRegistry()
+    registry.register(provider=MockLLMProvider(), capabilities=[Capability.LLM])
+    registry.register(provider=MockVideoProvider(), capabilities=[Capability.VIDEO])
+    registry.register(provider=MockVoiceProvider(), capabilities=[Capability.VOICE])
+    image_provider: Provider = (
+        OpenAIImageProvider(client=openai_client)
+        if openai_client is not None
+        else MockImageProvider()
+    )
+    registry.register(provider=image_provider, capabilities=[Capability.IMAGE])
+    return registry
 
 
 async def shutdown() -> None:
-    """Dispose the engine. Called by ``app.main``'s lifespan handler."""
-    global _engine, _session_factory
+    """Dispose the engine + the shared OpenAI client. Called by the lifespan handler."""
+    global _engine, _session_factory, _provider_registry, _openai_client
     if _engine is not None:
         await _engine.dispose()
+    if _openai_client is not None:
+        await _openai_client.aclose()
     _engine = None
     _session_factory = None
+    _provider_registry = None
+    _openai_client = None
 
 
 def reset() -> None:
     """Test-only: clear all singletons so the next ``init`` rebuilds them."""
     global _engine, _session_factory, _password_hasher, _jwt_service
     global _token_issuer, _dummy_password_hash, _clock, _publisher
+    global _provider_registry, _openai_client
     _engine = None
     _session_factory = None
     _password_hasher = None
@@ -171,6 +232,11 @@ def reset() -> None:
     _dummy_password_hash = None
     _clock = None
     _publisher = None
+    # Test-only: drop the registry + client refs. Tests run without an OpenAI key,
+    # so ``_openai_client`` is ``None`` here (no un-awaited client to close); the
+    # real client is closed in ``shutdown()`` on the production lifespan path.
+    _provider_registry = None
+    _openai_client = None
 
 
 def _require_init() -> None:
@@ -240,13 +306,17 @@ def get_relay_service() -> RelayService:
 
 
 def get_provider_registry() -> ProviderRegistry:
-    """The process-wide provider registry (α7.4).
+    """The process-wide provider registry (α7.4, settings-composed in α8.1).
 
-    A framework-free singleton wired with the four deterministic mocks. Real
-    providers register here in α8.x without changing callers. Stateless w.r.t.
-    settings, so it needs no ``init``/``reset`` lifecycle.
+    Built by :func:`init` with exactly one provider per capability: the real
+    ``OpenAIImageProvider`` for IMAGE when an OpenAI key is configured, else the
+    mock; LLM / VIDEO / VOICE always mock. Callers (dispatcher → runner) are
+    unchanged — they still ``resolve`` a capability and never learn which concrete
+    provider served it (W8.1.3).
     """
-    return PROVIDER_REGISTRY
+    _require_init()
+    assert _provider_registry is not None
+    return _provider_registry
 
 
 def get_step_command_dispatcher() -> ProviderDispatcherPort:

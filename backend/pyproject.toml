@@ -22,6 +22,10 @@ dependencies = [
     # e-mail address structure per RFC 5321/5322 + IDN. Used by the auth
     # request DTOs in ``app/api/v1/schemas/auth.py``.
     "email-validator>=2.2.0,<3",
+    # Phase 3 Slice α8.1 (first real provider: OpenAI Images) — added 2026-07-21.
+    # Async HTTP client the provider adapters call. Promoted from the `dev`
+    # extra to a core runtime dependency now that a real provider ships.
+    "httpx>=0.27.0",
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -61,9 +65,8 @@ dev = [
     "pytest==8.3.3",
     "pytest-cov==5.0.0",
     "pytest-asyncio==0.24.0",
-    # Phase 3 Slice α1 — async HTTP client for FastAPI TestClient +
-    # the integration suite's httpx.AsyncClient.
-    "httpx>=0.27.0",
+    # NB: httpx (FastAPI TestClient + the integration suite's AsyncClient) is a
+    # core runtime dependency as of α8.1 — see [project.dependencies] above.
     # Type stubs for libraries the test suite touches.
     "types-PyYAML==6.0.12.20240917",
     # YAML loader used by some CI integrations & schema fixtures.

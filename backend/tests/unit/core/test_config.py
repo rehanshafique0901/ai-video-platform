@@ -21,6 +21,9 @@ def _clean_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "JWT_REFRESH_TTL_SECONDS",
         "LOG_LEVEL",
         "ENVIRONMENT",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -44,6 +47,46 @@ def test_settings_loads_required_vars(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.unit
 def test_settings_rejects_missing_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+def test_openai_settings_default_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # α8.1: with no OPENAI_API_KEY the provider stays mock; base URL + timeout have
+    # sane defaults so the IMAGE capability never fails to configure.
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.openai_api_key is None
+    assert s.openai_base_url == "https://api.openai.com/v1"
+    assert s.openai_timeout_seconds == 60.0
+
+
+@pytest.mark.unit
+def test_openai_api_key_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The key is a SecretStr — it does not leak in repr and must be unwrapped
+    # explicitly (the container does this once when building the shared client).
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret")
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "12.5")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.openai_api_key is not None
+    assert s.openai_api_key.get_secret_value() == "sk-super-secret"
+    assert "sk-super-secret" not in repr(s.openai_api_key)
+    assert s.openai_timeout_seconds == 12.5
+
+
+@pytest.mark.unit
+def test_openai_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
 

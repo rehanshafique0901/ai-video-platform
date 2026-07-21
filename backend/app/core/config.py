@@ -56,6 +56,27 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     environment: Environment = "local"
 
+    # ---- Providers · OpenAI Images (Slice α8.1) -------------------------
+    # Optional. Present → the process wires the real synchronous
+    # ``OpenAIImageProvider`` for ``Capability.IMAGE``; absent → the IMAGE
+    # capability stays on ``MockImageProvider`` (LLM/VIDEO/VOICE always mock).
+    # The container injects this key into the provider's shared httpx client;
+    # the provider never reads it (W8.1.1 — adapters are configuration-blind).
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        description="OpenAI API key. When unset, IMAGE stays on the mock provider.",
+    )
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        description="Base URL for the OpenAI REST API.",
+        min_length=1,
+    )
+    openai_timeout_seconds: float = Field(
+        default=60.0,
+        description="Per-request timeout for the OpenAI image call (one attempt).",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
