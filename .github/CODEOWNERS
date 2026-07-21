@@ -1,0 +1,45 @@
+# CODEOWNERS — a second, GitHub-native layer of the ADR-0042 orchestration
+# platform freeze. Changes to the frozen platform API require the platform
+# owner's review, so a contract-affecting change is *seen*, not only flagged by
+# the `freeze-guard` CI job. Keep this list in lock-step with ADR-0042 §D1 and
+# backend/scripts/check_frozen_platform.py (FROZEN_PATHS).
+#
+# NOTE: CODEOWNERS enforcement only bites when branch protection requires
+# code-owner review; it is otherwise advisory. That is intentional — the point
+# is to make a frozen-path change a conscious, reviewed decision.
+
+# --- Frozen orchestration surface (ADR-0042 §D1) ---------------------------
+
+# Runner + resume + completion (the async orchestration loop)
+/backend/app/application/use_cases/workflow/advance_workflow_run.py   @rehanshafique0901
+/backend/app/application/use_cases/workflow/resume_workflow_run.py    @rehanshafique0901
+/backend/app/application/use_cases/workflow/completion_engine.py      @rehanshafique0901
+/backend/app/application/use_cases/workflow/_events.py                @rehanshafique0901
+
+# Dispatch + provider registry + provider contracts (ports & neutral DTOs)
+/backend/app/infrastructure/ai/dispatcher.py                          @rehanshafique0901
+/backend/app/infrastructure/ai/providers/ports.py                     @rehanshafique0901
+/backend/app/infrastructure/ai/providers/registry.py                  @rehanshafique0901
+/backend/app/application/interfaces/providers.py                      @rehanshafique0901
+/backend/app/application/interfaces/provider_dispatcher.py            @rehanshafique0901
+
+# Usage recording (service + pricing + port)
+/backend/app/application/use_cases/usage/usage_recorder_service.py    @rehanshafique0901
+/backend/app/application/use_cases/usage/accounting.py                @rehanshafique0901
+/backend/app/application/interfaces/usage_recorder.py                 @rehanshafique0901
+
+# Relay + distributed locks
+/backend/app/application/use_cases/relay/relay_service.py             @rehanshafique0901
+/backend/app/infrastructure/repositories/distributed_lock_manager.py  @rehanshafique0901
+/backend/app/application/interfaces/locks.py                          @rehanshafique0901
+
+# Workflow registry + aggregate + status enums (lifecycle + checkpoint owner)
+/backend/app/domain/workflow/registry.py                              @rehanshafique0901
+/backend/app/domain/workflow/workflow_run.py                          @rehanshafique0901
+/backend/app/domain/workflow/workflow_run_status.py                   @rehanshafique0901
+/backend/app/domain/workflow/workflow_step_status.py                  @rehanshafique0901
+
+# The freeze mechanism itself — guard, ADR, and this file.
+/backend/scripts/check_frozen_platform.py                             @rehanshafique0901
+/docs/decisions/ADR-0042-orchestration-platform-freeze.md             @rehanshafique0901
+/.github/CODEOWNERS                                                   @rehanshafique0901

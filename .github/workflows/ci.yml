@@ -31,6 +31,39 @@ permissions:
   contents: read
 
 jobs:
+  # ADR-0042 — Orchestration Platform Freeze. A lightweight governance guard,
+  # separate from the ADR-0028 quality gate: it fails when a change touches a
+  # frozen orchestration module (the stable platform API) without a conscious
+  # override marker. This is deliberately fast (no DB, no install) so the
+  # tripwire is cheap on every PR and push.
+  freeze-guard:
+    name: Orchestration freeze (ADR-0042)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # Full history so the guard can diff against the base ref / pushed range.
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Enforce orchestration platform freeze
+        env:
+          NO_COLOR: "1"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          echo "freeze-guard base ref: ${BASE}"
+          python backend/scripts/check_frozen_platform.py --base "${BASE}"
+
   gate:
     name: Stages 1–10
     runs-on: ubuntu-latest

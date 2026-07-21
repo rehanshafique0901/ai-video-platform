@@ -6,6 +6,50 @@
 
 ## [Unreleased]
 
+### Governance — Orchestration Platform Freeze (ADR-0042) (2026-07-22)
+
+With `v0.4.23-phase3-alpha8.3` the async orchestration loop closed end-to-end and the core became
+**feature-complete**: α7.x built the substrate, and α8.1–α8.3 proved it drives both synchronous and
+asynchronous *real* providers without duplicating orchestration or exposing runner internals. The
+remaining Phase 3 work (α8.3b webhook ingress, α8.4 media + FFmpeg, α8.5 export/publishing) is
+**integration on top of stable seams**, not orchestration design — exactly when a freeze pays off.
+This is a **governance** change: no application code, no schema migration, no runtime behaviour
+change, **no version bump** (mirroring ADR-0041's docs-only precedent). It makes the boundary
+explicit *and mechanically enforced*, so a feature slice can't quietly reshape the core for a
+shortcut; if a slice appears to need a core change, that surfaces as an ADR-worthy architectural gap
+rather than slipping into a feature branch.
+
+#### Added
+- **ADR-0042** (`docs/decisions/ADR-0042-orchestration-platform-freeze.md`) — defines the **frozen
+  public orchestration surface** (§D1: runner, `ResumeWorkflowRun`, `CompletionEngine`, workflow
+  events, dispatcher, provider ports + registry + neutral DTOs, usage recorder + pricing + port,
+  relay, distributed lock manager + port, workflow registry/aggregate/status enums), the **change
+  policy** (§D2: bug/security/perf/observability/docs allowed; signature/DTO/checkpoint/lifecycle/
+  retry/provider-protocol/usage-semantics changes require a new ADR), the **platform guarantees**
+  (§D3, G1–G10: single dispatch, deterministic request IDs, exactly-once completion under locks,
+  provider-agnostic orchestration, exactly-once usage, versioned checkpoints, resume never
+  re-dispatches, configuration-blind providers, runner/provider boundary, two public resume seams),
+  and **enforcement** (§D4).
+- **`backend/scripts/check_frozen_platform.py`** — a dependency-free guard that diffs the change set
+  against a base ref and **fails** if any frozen path is touched without an override marker
+  (`Freeze-Override: ADR-XXXX <reason>` commit trailer, or `ALLOW_FROZEN_CHANGES=1` for local
+  iteration). `FROZEN_PATHS` is the single machine-readable mirror of ADR-0042 §D1. Run locally
+  before fast-forwarding: `python backend/scripts/check_frozen_platform.py --base main`.
+- **`freeze-guard` CI job** (`.github/workflows/ci.yml`) — a fast, DB-free job (separate from the
+  ADR-0028 ten-stage quality gate) that runs the guard on every pull request (diffing the PR base)
+  and every push to `main` (diffing the pushed range).
+- **`.github/CODEOWNERS`** — requires the platform owner's review for the frozen paths: a second,
+  GitHub-native layer so a contract-affecting change is *seen*, not only flagged.
+- **`tests/unit/scripts/test_check_frozen_platform.py`** — unit coverage for the guard's matching /
+  override / decision logic, plus a lock-step assertion that every `FROZEN_PATHS` entry still exists
+  on disk (a rename without updating the list — or the ADR — fails the suite).
+
+#### Notes
+- Explicitly **not** frozen: concrete provider *adapters* (`providers/openai|fal|mocks/`) and all
+  new-capability surfaces (new ingress/downstream use cases, repositories, routers, DI wiring, tests)
+  — these are the growth surfaces new work plugs into. `v0.4.23-phase3-alpha8.3` is hereby the point
+  at which the orchestration platform is feature-complete.
+
 ### Phase 3 Slice α8.3 — Completion Engine (poll-first) — the resume slice (2026-07-22)
 
 The **first slice to move orchestration state since α7.6**: it closes the async loop α8.2 opened.
