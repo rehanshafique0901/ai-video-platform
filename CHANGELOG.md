@@ -77,6 +77,10 @@ multi-provider fallback · provider selection · rate limiter · circuit breaker
 - **Dependencies** (`backend/pyproject.toml`) — `httpx>=0.27.0` promoted from the
   `dev` extra to a **core runtime** dependency (a real provider now calls it).
 
+#### Version
+- App version bumped to **`0.4.21-phase3-alpha8.1`** (staying on `0.4.x`; first
+  real external provider behind the unchanged Phase-3 orchestration).
+
 ### Phase 3 Slice α7.6 — First Pipeline (mock) — runner ⇄ dispatcher ⇄ recorder ⇄ outbox, end-to-end (2026-07-19)
 
 The **composition** slice: it introduces **almost no new infrastructure** and
