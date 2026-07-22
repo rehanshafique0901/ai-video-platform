@@ -6,6 +6,57 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.3b — Webhook Completion Ingress (Fal) — a thin second ingress (2026-07-22)
+
+The **first integration slice built entirely on top of the frozen platform** (ADR-0042). It adds a
+*second* way to learn a provider job finished — an inbound Fal webhook — alongside α8.3's polling,
+and both converge on the **same** frozen `CompletionEngine.complete()`. The webhook is a **signal,
+not a source of truth** (new invariant **W8.3b.1**): after signature verification it is used *only*
+to locate the paused run; `complete()` then re-resolves the job authoritatively. No frozen
+orchestration path changed — the freeze guard stayed green with **zero override markers** for the
+whole branch. Runtime capability change → version bump to `0.4.24-phase3-alpha8.3b`.
+
+#### Added
+- **`IWebhookVerifier` port + neutral DTOs** (`app/application/interfaces/webhook_verifier.py`) —
+  provider-agnostic `verify(body, headers) -> VerifiedWebhook(provider_job_id)`, with
+  `WebhookVerificationError` (→ 401) and `WebhookMalformedError` (→ 400). Returns only the resume
+  coordinate (the provider job id) — never the payload's claimed result.
+- **`FalWebhookVerifier`** (`app/infrastructure/ai/providers/fal/webhook.py`) — ED25519 verification
+  against Fal's **public** JWKS keys (fetched via an injected `httpx` client + `cryptography`,
+  cached with a TTL). Requires the `X-Fal-Webhook-{Request-Id,User-Id,Timestamp,Signature}` headers,
+  enforces a timestamp-tolerance replay guard, and verifies the canonical
+  `"\n".join([request_id, user_id, timestamp, sha256(body)])` message. Strict provider leaf (httpx +
+  cryptography + the neutral port only).
+- **`IWorkflowRunRepository.find_paused_by_provider_job_id`** — an **additive, non-frozen** lookup
+  (impl + fakes) that resolves the webhook's only trusted datum (the job id) to its paused run by
+  matching the `_paused.provider_job_id` in the latest checkpoint JSONB. Documented as an
+  implementation detail, not a new architectural contract. **Zero migration.**
+- **`ReceiveProviderWebhook` use case** (`app/application/use_cases/workflow/`) — verify → find paused
+  run → trigger `CompletionEngine.complete()`. Performs **no writes** (W8.3b.1); all state changes
+  stay inside the frozen completion pipeline. Duplicate deliveries are inherently safe (retry after
+  resume → no paused run → ack; retry mid-processing → held lease → ack).
+- **`POST /api/v1/webhooks/providers/{provider}`** router — thin, unauthenticated (the *signature* is
+  the auth), reads the **raw** body, and maps outcomes: `401` bad/stale/missing signature, `400`
+  malformed, `404` unknown provider, `200` accepted (resumed/in-progress/duplicate/unknown job id).
+- **Config** (`FAL_WEBHOOK_JWKS_URL`, `FAL_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS`,
+  `FAL_WEBHOOK_JWKS_CACHE_SECONDS`) + lazy container wiring (verifier built on first use so the common
+  test path opens no HTTP client).
+- **Unit tests** — verifier (real ED25519 keypair over an in-memory JWKS: valid / tampered / wrong
+  key / missing header / non-hex / stale / rotation / caching), ingress (resume / unknown / duplicate
+  / unsupported / bad-signature-no-op / poll-vs-webhook race), and router status mapping + raw-body
+  passthrough.
+
+#### Notes
+- **W8.1.1 clarification:** the "configuration-blind adapter" invariant governs *credentials /
+  authentication material*. Fal's JWKS holds **public verification keys** — configuration-independent
+  trust anchors — so fetching + caching them is permitted and injects no secret.
+- **Deferred (signed off):** inbound webhook **receipt persistence**. The `idempotency_keys` table
+  exists but has no application consumer; wiring one would mean a new `IIdempotencyRepository` +
+  `IUnitOfWork.idempotency` + every fake UoW — a cross-cutting subsystem, not a thin ingress.
+  Exactly-once is already owned by `complete()`'s lease + `paused → running` CAS, and 200-on-duplicate
+  holds without a receipt. A first-class idempotency subsystem arrives when ≥2 inbound endpoints need
+  shared receipt/audit semantics (Fal + Stripe + publishing/OAuth callbacks).
+
 ### Governance — Orchestration Platform Freeze (ADR-0042) (2026-07-22)
 
 With `v0.4.23-phase3-alpha8.3` the async orchestration loop closed end-to-end and the core became

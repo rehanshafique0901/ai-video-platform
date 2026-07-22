@@ -1699,6 +1699,21 @@ class IWorkflowRunRepository(ABC):
         ...
 
     @abstractmethod
+    async def find_paused_by_provider_job_id(self, provider_job_id: str) -> WorkflowRun | None:
+        """Return the ``paused`` run whose checkpoint carries ``provider_job_id``, or ``None``.
+
+        An **implementation detail of the repository** (α8.3b), *not* a new
+        architectural contract: it merely resolves the webhook's only trusted datum
+        (the provider job id) to the run that is paused on it, by matching the
+        ``_paused.provider_job_id`` field persisted in the latest checkpoint. Used by
+        the webhook ingress to obtain ``(project_id, id)`` for the frozen
+        ``CompletionEngine.complete()``. Returns ``None`` when no *paused* run matches
+        (unknown job id, or already resumed/terminal) — an idempotent no-op for the
+        caller.
+        """
+        ...
+
+    @abstractmethod
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         """Status-guarded cancel: ``{queued,running,paused} → canceled`` (sets ``finished_at``).
 

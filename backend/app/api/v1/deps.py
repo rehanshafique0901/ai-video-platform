@@ -88,6 +88,7 @@ from app.application.use_cases.workflow.cancel_workflow_run import CancelWorkflo
 from app.application.use_cases.workflow.create_workflow_run import CreateWorkflowRun
 from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
 from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
+from app.application.use_cases.workflow.receive_provider_webhook import ReceiveProviderWebhook
 from app.core import container
 from app.core.errors import UnauthorizedError
 from app.domain.identity.user import User
@@ -231,6 +232,12 @@ AdvanceWorkflowRunDep = Annotated[
 ]
 CancelWorkflowRunDep = Annotated[
     CancelWorkflowRun, Depends(container.get_cancel_workflow_run_use_case)
+]
+
+# ---- Use-case dependencies (Slice α8.3b — Webhook completion ingress) --
+
+ReceiveProviderWebhookDep = Annotated[
+    ReceiveProviderWebhook, Depends(container.get_receive_provider_webhook_use_case)
 ]
 
 

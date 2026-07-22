@@ -38,6 +38,7 @@ from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.application.interfaces.webhook_verifier import IWebhookVerifier
 from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
@@ -94,10 +95,11 @@ from app.application.use_cases.workflow.completion_engine import CompletionEngin
 from app.application.use_cases.workflow.create_workflow_run import CreateWorkflowRun
 from app.application.use_cases.workflow.get_workflow_run import GetWorkflowRun
 from app.application.use_cases.workflow.list_workflow_runs import ListWorkflowRuns
+from app.application.use_cases.workflow.receive_provider_webhook import ReceiveProviderWebhook
 from app.application.use_cases.workflow.resume_workflow_run import ResumeWorkflowRun
 from app.core.config import Settings
 from app.infrastructure.ai.dispatcher import StepCommandDispatcher
-from app.infrastructure.ai.providers.fal import FalVideoProvider
+from app.infrastructure.ai.providers.fal import FalVideoProvider, FalWebhookVerifier
 from app.infrastructure.ai.providers.mocks import (
     MockImageProvider,
     MockLLMProvider,
@@ -131,6 +133,10 @@ _publisher: PublisherPort | None = None
 _provider_registry: ProviderRegistry | None = None
 _openai_client: httpx.AsyncClient | None = None
 _fal_client: httpx.AsyncClient | None = None
+# α8.3b: the inbound Fal webhook verifier + its dedicated JWKS HTTP client. Built
+# unconditionally (verification uses Fal's PUBLIC JWKS keys, no API key needed).
+_fal_webhook_verifier: IWebhookVerifier | None = None
+_fal_webhook_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -183,6 +189,9 @@ def init(settings: Settings) -> None:
     _openai_client = _build_openai_client(settings)
     _fal_client = _build_fal_client(settings)
     _provider_registry = _build_provider_registry(_openai_client, _fal_client)
+    # α8.3b: the Fal webhook verifier is built *lazily* (see
+    # ``_get_fal_webhook_verifier``) so the common test path (init without ever
+    # hitting the webhook route) never opens an HTTP client it must close.
 
 
 def _build_openai_client(settings: Settings) -> httpx.AsyncClient | None:
@@ -245,17 +254,22 @@ def _build_provider_registry(
 async def shutdown() -> None:
     """Dispose the engine + the shared provider clients. Called by the lifespan handler."""
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
+    global _fal_webhook_verifier, _fal_webhook_client
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
         await _openai_client.aclose()
     if _fal_client is not None:
         await _fal_client.aclose()
+    if _fal_webhook_client is not None:
+        await _fal_webhook_client.aclose()
     _engine = None
     _session_factory = None
     _provider_registry = None
     _openai_client = None
     _fal_client = None
+    _fal_webhook_verifier = None
+    _fal_webhook_client = None
     _settings = None
 
 
@@ -264,6 +278,7 @@ def reset() -> None:
     global _engine, _session_factory, _password_hasher, _jwt_service
     global _token_issuer, _dummy_password_hash, _clock, _publisher
     global _provider_registry, _openai_client, _fal_client, _settings
+    global _fal_webhook_verifier, _fal_webhook_client
     _settings = None
     _engine = None
     _session_factory = None
@@ -279,6 +294,8 @@ def reset() -> None:
     _provider_registry = None
     _openai_client = None
     _fal_client = None
+    _fal_webhook_verifier = None
+    _fal_webhook_client = None
 
 
 def _require_init() -> None:
@@ -761,4 +778,47 @@ def get_completion_engine() -> CompletionEngine:
         dispatcher=get_step_command_dispatcher(),
         owner=settings.completion_lock_owner,
         lease=timedelta(seconds=settings.completion_lease_seconds),
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.3b — Webhook completion ingress)
+# ---------------------------------------------------------------------
+
+
+def _get_fal_webhook_verifier() -> IWebhookVerifier:
+    """Lazily build + memoise the Fal webhook verifier and its JWKS client.
+
+    Built on first use (not at ``init``) so the common test path never opens an
+    HTTP client it must close. The client has no base URL / auth header — Fal's
+    JWKS holds **public** verification keys (W8.1.1 governs credentials, not
+    public trust anchors), and the JWKS URL is absolute.
+    """
+    global _fal_webhook_verifier, _fal_webhook_client
+    _require_init()
+    if _fal_webhook_verifier is None:
+        settings = _get_settings()
+        assert _clock is not None
+        _fal_webhook_client = httpx.AsyncClient(timeout=settings.fal_timeout_seconds)
+        _fal_webhook_verifier = FalWebhookVerifier(
+            client=_fal_webhook_client,
+            jwks_url=settings.fal_webhook_jwks_url,
+            clock=_clock,
+            timestamp_tolerance_seconds=settings.fal_webhook_timestamp_tolerance_seconds,
+            jwks_cache_seconds=settings.fal_webhook_jwks_cache_seconds,
+        )
+    return _fal_webhook_verifier
+
+
+def get_receive_provider_webhook_use_case() -> ReceiveProviderWebhook:
+    """Factory: the α8.3b webhook ingress (verify → find paused run → complete()).
+
+    Provider-agnostic: ``verifiers`` is a per-provider registry (α8.3b ships only
+    Fal). The ingress reads with its own UoW and delegates all state changes to the
+    frozen completion engine (W8.3b.1).
+    """
+    return ReceiveProviderWebhook(
+        uow=get_unit_of_work(),
+        completion_engine=get_completion_engine(),
+        verifiers={"fal": _get_fal_webhook_verifier()},
     )

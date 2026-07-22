@@ -13,5 +13,6 @@ seam; completion (poll / webhook / resume / usage) is α8.3.
 from __future__ import annotations
 
 from app.infrastructure.ai.providers.fal.video import FalVideoProvider
+from app.infrastructure.ai.providers.fal.webhook import FalWebhookVerifier
 
-__all__ = ["FalVideoProvider"]
+__all__ = ["FalVideoProvider", "FalWebhookVerifier"]

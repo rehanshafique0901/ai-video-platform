@@ -1970,6 +1970,21 @@ class FakeWorkflowRunRepository(IWorkflowRunRepository):
         rows.sort(key=lambda r: (r.created_at, str(r.id)))
         return rows
 
+    async def find_paused_by_provider_job_id(self, provider_job_id: str) -> WorkflowRun | None:
+        # α8.3b: match the newest checkpoint's ``_paused.provider_job_id`` on a
+        # ``paused`` run (mirrors the JSONB path query in the SQL repo).
+        checkpoints = sorted(
+            self._checkpoints, key=lambda c: (c.created_at, str(c.id)), reverse=True
+        )
+        for checkpoint in checkpoints:
+            state = checkpoint.state if isinstance(checkpoint.state, dict) else {}
+            paused = state.get("_paused") if isinstance(state, dict) else None
+            if isinstance(paused, dict) and paused.get("provider_job_id") == provider_job_id:
+                run = self._runs.get(checkpoint.workflow_run_id)
+                if run is not None and run.status == WorkflowRunStatus.PAUSED.value:
+                    return run
+        return None
+
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRun | None:
         run = self._runs.get(workflow_run_id)
         if run is None or run.project_id != project_id:

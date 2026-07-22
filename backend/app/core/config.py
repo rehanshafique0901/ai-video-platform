@@ -118,6 +118,30 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Webhook ingress · Fal.ai completion callbacks (Slice α8.3b) -----
+    # The webhook is a *trigger* only (W8.3b.1): it verifies the signature,
+    # finds the paused run by ``provider_job_id``, and calls the SAME frozen
+    # ``CompletionEngine.complete()`` — the payload never mutates state. Fal
+    # signs callbacks with ED25519; we verify against the **public** keys from
+    # its JWKS endpoint (a configuration-independent trust anchor — the W8.1.1
+    # "configuration-blind" invariant governs *credentials*, not public
+    # verification keys). No secret is injected here.
+    fal_webhook_jwks_url: str = Field(
+        default="https://rest.fal.ai/.well-known/jwks.json",
+        description="Fal.ai JWKS endpoint (ED25519 public keys for webhook verification).",
+        min_length=1,
+    )
+    fal_webhook_timestamp_tolerance_seconds: int = Field(
+        default=300,
+        description="Max |now - X-Fal-Webhook-Timestamp| accepted (replay guard).",
+        gt=0,
+    )
+    fal_webhook_jwks_cache_seconds: float = Field(
+        default=3600.0,
+        description="JWKS cache TTL (seconds); Fal rotates keys — do not exceed 24h.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

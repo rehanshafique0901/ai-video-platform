@@ -274,6 +274,27 @@ class WorkflowRunRepository(IWorkflowRunRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_run_to_entity(r) for r in rows]
 
+    async def find_paused_by_provider_job_id(
+        self, provider_job_id: str
+    ) -> WorkflowRunEntity | None:
+        # α8.3b webhook lookup — implementation detail, not a new contract. The
+        # provider job id lives only in the checkpoint's ``_paused`` block (it is not
+        # a column), so we match the JSONB path ``state->'_paused'->>'provider_job_id'``
+        # on a ``paused`` run. Newest checkpoint first for determinism. Correctness of
+        # the resulting resume is still owned by CompletionEngine's lease + CAS.
+        stmt = (
+            select(WorkflowRunRow)
+            .join(WorkflowCheckpointRow, WorkflowCheckpointRow.workflow_run_id == WorkflowRunRow.id)
+            .where(WorkflowRunRow.status == WorkflowRunStatus.PAUSED.value)
+            .where(
+                WorkflowCheckpointRow.state["_paused"]["provider_job_id"].astext == provider_job_id
+            )
+            .order_by(WorkflowCheckpointRow.created_at.desc(), WorkflowCheckpointRow.id.desc())
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).scalars().first()
+        return _run_to_entity(row) if row is not None else None
+
     async def cancel(self, project_id: UUID, workflow_run_id: UUID) -> WorkflowRunEntity | None:
         # Status-guarded CAS (no version token — D3.2/D3.7). The ``status IN (...)``
         # predicate makes the terminal-state guard race-safe at the DB: a run the

@@ -45,6 +45,7 @@ from app.api.v1.routers import (
     timeline,
     users,
     versions,
+    webhooks,
     workflow_runs,
 )
 from app.core import container
@@ -95,7 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="AI Video Platform — backend",
-        version="0.4.23-phase3-alpha8.3",
+        version="0.4.24-phase3-alpha8.3b-dev",
         lifespan=lifespan,
     )
 
@@ -115,5 +116,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(timeline.router, prefix="/api/v1")
     app.include_router(render_jobs.router, prefix="/api/v1")
     app.include_router(workflow_runs.router, prefix="/api/v1")
+    app.include_router(webhooks.router, prefix="/api/v1")
 
     return app
