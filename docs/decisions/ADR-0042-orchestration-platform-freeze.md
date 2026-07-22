@@ -210,8 +210,45 @@ logged decision — which is the entire point.
 
 ---
 
+## Accepted risks (platform validation, pre-α8.4, 2026-07-22)
+
+A grounded validation pass after `v0.4.24-phase3-alpha8.3b` confirmed the platform
+is sound where it matters: freeze-guard coverage is complete (self-test green,
+lock-step "every frozen path exists"), crash recovery self-heals (`poll_once()` →
+`list_paused()` re-discovers every paused run; the webhook is best-effort, polling
+is the backstop), the completion flow is correct, and every public seam has a DI
+factory. Two **known limitations** are recorded here as *accepted risks* — neither
+is a current defect, neither blocks α8.4, and both are tracked so they surface as
+intentional decisions rather than drift:
+
+- **AR-1 — the dispatcher lacks structured dispatch logging.** `dispatcher.py`
+  (the single-dispatch seam, G1) emits no structlog events, unlike every other
+  orchestration seam (completion engine / resume / runner / relay). This affects
+  **observability, not correctness**. Closing it is permitted under D2 without a
+  new ADR (observability is an allowed change). *Re-evaluate when operational
+  telemetry requirements increase.*
+- **AR-2 — the `_paused` checkpoint block is implicitly versioned.** The Fork 1A
+  handoff (`provider` / `request_id` / `provider_job_id` / `pending_step_index` /
+  `command_index` / `capability` / `model_id` / `tenant_id` / opaque `envelope`)
+  carries no top-level `schema_version`. It has exactly **one producer**
+  (`AdvanceWorkflowRun`) and is read defensively by its consumers, so this is a
+  *future evolution* concern, not an active incompatibility. **Per D2, any
+  incompatible change to this block is a checkpoint-schema change and requires a
+  dedicated ADR** (introducing an explicit `schema_version`) *before*
+  implementation — it must not be reshaped inside a feature slice. The α8.4
+  pre-flight's **first** design question is therefore "does α8.4 need to change the
+  `_paused`/checkpoint contract?" — if no, proceed additively; if yes, stop and
+  write the ADR first.
+
+---
+
 ## Change log
 
+- **2026-07-22 — Accepted risks recorded.** Post-`v0.4.24-phase3-alpha8.3b`
+  validation pass documented **AR-1** (dispatcher observability gap, D2-allowed to
+  fix) and **AR-2** (`_paused` block implicitly versioned; incompatible evolution
+  requires a dedicated ADR). No code/behaviour/schema change; carried forward as
+  explicit α8.4 pre-flight design checkpoints.
 - **2026-07-22 — Accepted.** Freeze established immediately after
   `v0.4.23-phase3-alpha8.3`. Ships `check_frozen_platform.py`, the `freeze-guard`
   CI job, and `CODEOWNERS`; defines the frozen surface (D1), change policy (D2),
