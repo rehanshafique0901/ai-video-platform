@@ -6,6 +6,84 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.4a — Generated Media Ingestion — download / store / register (2026-07-22)
+
+The platform's **first *producing* capability** and its **first real outbox consumer**. When a run
+settles `running → succeeded`, a downstream subscriber on the existing `WorkflowRunSucceeded` event
+downloads the provider's produced artifact (`image_ref` / `video_ref`), stores the bytes via a new
+`IObjectStorage` port (local filesystem in α8.4a), and registers a `MediaAsset(source="generated")`.
+This turns the orchestration layer into a **platform**: independent consumers (analytics, billing,
+export, …) can now attach to the same event stream without the runner ever knowing. Ingestion is
+strictly downstream of — and never mutates — the frozen pipeline (new invariants **W8.4.1** +
+**W8.4.2**); the freeze guard stayed green with **zero override markers**. Runtime capability change →
+version bump to `0.4.25-phase3-alpha8.4a`. FFmpeg / thumbnails / render jobs are deferred to α8.4b.
+
+#### Added
+- **`IObjectStorage` port + `StoredObject` / `ObjectStorageError`**
+  (`app/application/interfaces/object_storage.py`) — the platform's first backend-neutral blob store
+  (`put` / `get` / `exists` / `delete` by opaque `/`-delimited key). Lets S3 / R2 / GCS / Azure / MinIO
+  adapters replace the local one later with **no use-case change**.
+- **`LocalObjectStorage`** (`app/infrastructure/storage/local_object_storage.py`) — filesystem adapter
+  (`<root>/<bucket>/<key>`, `storage_backend="local"`), file I/O off the event loop via
+  `asyncio.to_thread`, confines keys to the bucket root (rejects `..` traversal).
+- **`IMediaDownloader` port + `DownloadedMedia` / `MediaDownloadError`**
+  (`app/application/interfaces/media_downloader.py`) — neutral "fetch an artifact by URL" seam, kept
+  **separate from the frozen provider ports** (α8.4a Fork B): the provider already resolved the job;
+  downloading the result is generic infrastructure.
+- **`HttpMediaDownloader`** (`app/infrastructure/media/http_media_downloader.py`) — single-GET fetch
+  over an injected `httpx` client with a hard byte cap; any non-2xx / transport error / timeout / cap
+  breach maps to a neutral `MediaDownloadError` (the subscriber's retry is the relay's, not the
+  downloader's).
+- **`IngestGeneratedMedia` use case** (`app/application/use_cases/media/ingest_generated_media.py`) —
+  reads a succeeded run's steps, extracts each `image_ref` / `video_ref` from the opaque provider
+  output envelopes, downloads **outside any DB transaction**, stores, and registers a
+  `MediaAsset(source="generated")`. Idempotent via a **deterministic** storage key in
+  `(run, step, request_id)`: a redelivery re-writes identical bytes and the `media_assets`
+  storage-key uniqueness raises `ConflictError` → caught as an already-ingested no-op. Minimal
+  metadata only (checksum, mime, size, coordinates, provider); duration / dimensions / codec deferred
+  to α8.4b.
+- **`GeneratedMediaIngestionSubscriber`** (`app/application/use_cases/media/generated_media_subscriber.py`)
+  — the first `EventHandler` registered on the in-process `PublisherPort`; filters
+  `WorkflowRunSucceeded`, builds a **fresh** use case per event (own UoW), idempotent under the relay's
+  at-least-once redelivery.
+- **`IProjectRepository.get_ownership(project_id) -> (tenant_id, owner_user_id) | None`** — a
+  **system-only, non-frozen** lookup (mirrors α8.3b's `find_paused_by_provider_job_id`) so the
+  server-side subscriber can resolve the owning `(tenant, user)` for a run's project. Never wired to an
+  HTTP endpoint; deliberately sidesteps the owner-scoped anti-enumeration posture of `get_owned`.
+- **Config** — `media_storage_root`, `media_storage_bucket`, `media_download_timeout_seconds`,
+  `media_download_max_bytes`.
+- **Container wiring** — object storage + downloader (with a dedicated `httpx` client) built **lazily**
+  on first ingestion (disposed in `shutdown()`), and the subscriber registered on the publisher at
+  `init()`; the α7.3 relay is untouched.
+- **Tests** — unit coverage for `LocalObjectStorage`, `HttpMediaDownloader`, `IngestGeneratedMedia`
+  (happy path, idempotent redelivery, multi-ref, no-media / non-succeeded / missing-ownership no-ops),
+  and the subscriber (trigger / ignore other events / malformed payload).
+
+#### Invariants
+- **W8.4.1** — generated-media ingestion is strictly downstream of the frozen completion pipeline; the
+  runner / completion / dispatcher never download, store, or register media.
+- **W8.4.2** — ingestion is **observational**: it may create downstream artifacts (storage objects,
+  `MediaAsset` rows, logs, metrics) but must never mutate `WorkflowRun`, `WorkflowCheckpoint`, steps,
+  `UsageRecord`, or any orchestration decision.
+
+#### Unchanged (freeze holds)
+- No migrations. No frozen orchestration path changed (`AdvanceWorkflowRun`, `ResumeWorkflowRun`,
+  `CompletionEngine`, dispatcher, provider ports, usage recorder, relay, lock manager, `_paused`
+  checkpoint contract). Full gate green: ruff, black, mypy, import-linter (6 contracts), 555 unit
+  tests, `check_frozen_platform.py --base main` OK with zero overrides.
+
+### Governance — Platform validation (pre-α8.4): two accepted risks recorded (2026-07-22)
+
+A grounded validation pass after `v0.4.24-phase3-alpha8.3b` (freeze-guard coverage, crash recovery,
+completion correctness, DI coverage) confirmed the orchestration platform is sound and neither finding
+blocks α8.4. Two **known limitations** are recorded as *accepted risks* in ADR-0042 (docs-only, no code
+change) so they surface as intentional decisions rather than drift:
+- **AR-1** — `dispatcher.py` (single-dispatch seam, G1) has no structured logging; observability, not
+  correctness. Fixable under ADR-0042 §D2 without a new ADR.
+- **AR-2** — the `_paused` checkpoint handoff has no top-level `schema_version` (one producer, read
+  defensively). *Future* evolution concern; per §D2 any incompatible change requires a dedicated ADR
+  first. The α8.4 pre-flight's first design question is whether α8.4 must touch the checkpoint contract.
+
 ### Phase 3 Slice α8.3b — Webhook Completion Ingress (Fal) — a thin second ingress (2026-07-22)
 
 The **first integration slice built entirely on top of the frozen platform** (ADR-0042). It adds a

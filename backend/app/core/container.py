@@ -32,6 +32,8 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.media_downloader import IMediaDownloader
+from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
@@ -44,7 +46,11 @@ from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.application.use_cases.media.delete_media import DeleteMedia
+from app.application.use_cases.media.generated_media_subscriber import (
+    GeneratedMediaIngestionSubscriber,
+)
 from app.application.use_cases.media.get_media import GetMedia
+from app.application.use_cases.media.ingest_generated_media import IngestGeneratedMedia
 from app.application.use_cases.media.list_media import ListMedia
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
@@ -111,11 +117,13 @@ from app.infrastructure.ai.providers.ports import Provider
 from app.infrastructure.ai.providers.registry import ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
+from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.token_issuer import AuthTokenIssuer
+from app.infrastructure.storage import LocalObjectStorage
 from app.infrastructure.uow.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 
 _engine: AsyncEngine | None = None
@@ -137,6 +145,12 @@ _fal_client: httpx.AsyncClient | None = None
 # unconditionally (verification uses Fal's PUBLIC JWKS keys, no API key needed).
 _fal_webhook_verifier: IWebhookVerifier | None = None
 _fal_webhook_client: httpx.AsyncClient | None = None
+# α8.4a: the generated-media ingestion pieces — object storage (local FS adapter),
+# the artifact downloader + its dedicated httpx client. The downstream subscriber
+# is registered on the in-process publisher at init.
+_object_storage: IObjectStorage | None = None
+_media_downloader: IMediaDownloader | None = None
+_media_download_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -174,11 +188,17 @@ def init(settings: Settings) -> None:
     # never a real user's password.
     _dummy_password_hash = _password_hasher.hash(secrets.token_urlsafe(32))
     _clock = SystemClock()
-    # α7.3: the outbox relay's publish target. In-process, zero handlers by
-    # default — the relay marks events published after a successful (empty)
-    # fan-out. Real consumers / a broker-backed publisher are wired in later
-    # slices behind the same ``PublisherPort`` without touching the relay.
-    _publisher = InProcessPublisher()
+    # α7.3: the outbox relay's publish target. In-process; α8.4a registers the FIRST
+    # real consumer — the generated-media ingestion subscriber for
+    # ``WorkflowRunSucceeded`` — behind the same ``PublisherPort`` (the relay is
+    # untouched). A broker-backed publisher can replace this later identically. The
+    # subscriber holds a *factory* (not an instance); the object storage + artifact
+    # downloader it needs are built lazily on the first ingestion (see
+    # ``get_ingest_generated_media_use_case``) so the common test path opens no
+    # HTTP client it must close.
+    _publisher = InProcessPublisher(
+        [GeneratedMediaIngestionSubscriber(get_ingest_generated_media_use_case)]
+    )
     # α8.1/α8.2: wire the provider registry. When a provider's key is configured,
     # build a single shared, pre-authenticated httpx client and register the real
     # provider for that capability; otherwise the capability stays on its
@@ -255,6 +275,7 @@ async def shutdown() -> None:
     """Dispose the engine + the shared provider clients. Called by the lifespan handler."""
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
+    global _object_storage, _media_downloader, _media_download_client
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -263,6 +284,8 @@ async def shutdown() -> None:
         await _fal_client.aclose()
     if _fal_webhook_client is not None:
         await _fal_webhook_client.aclose()
+    if _media_download_client is not None:
+        await _media_download_client.aclose()
     _engine = None
     _session_factory = None
     _provider_registry = None
@@ -270,6 +293,9 @@ async def shutdown() -> None:
     _fal_client = None
     _fal_webhook_verifier = None
     _fal_webhook_client = None
+    _object_storage = None
+    _media_downloader = None
+    _media_download_client = None
     _settings = None
 
 
@@ -279,6 +305,7 @@ def reset() -> None:
     global _token_issuer, _dummy_password_hash, _clock, _publisher
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
+    global _object_storage, _media_downloader, _media_download_client
     _settings = None
     _engine = None
     _session_factory = None
@@ -296,6 +323,9 @@ def reset() -> None:
     _fal_client = None
     _fal_webhook_verifier = None
     _fal_webhook_client = None
+    _object_storage = None
+    _media_downloader = None
+    _media_download_client = None
 
 
 def _require_init() -> None:
@@ -821,4 +851,55 @@ def get_receive_provider_webhook_use_case() -> ReceiveProviderWebhook:
         uow=get_unit_of_work(),
         completion_engine=get_completion_engine(),
         verifiers={"fal": _get_fal_webhook_verifier()},
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.4a — Generated media ingestion)
+# ---------------------------------------------------------------------
+
+
+def _get_object_storage() -> IObjectStorage:
+    """Lazily build + memoise the object-storage adapter (local FS in α8.4a)."""
+    global _object_storage
+    _require_init()
+    if _object_storage is None:
+        settings = _get_settings()
+        _object_storage = LocalObjectStorage(
+            root=settings.media_storage_root, bucket=settings.media_storage_bucket
+        )
+    return _object_storage
+
+
+def _get_media_downloader() -> IMediaDownloader:
+    """Lazily build + memoise the artifact downloader + its dedicated HTTP client.
+
+    Built on first ingestion (not at ``init``) so the common test path opens no HTTP
+    client it must close; the client is disposed in ``shutdown()``.
+    """
+    global _media_downloader, _media_download_client
+    _require_init()
+    if _media_downloader is None:
+        settings = _get_settings()
+        _media_download_client = httpx.AsyncClient(
+            timeout=settings.media_download_timeout_seconds, follow_redirects=True
+        )
+        _media_downloader = HttpMediaDownloader(
+            client=_media_download_client, max_bytes=settings.media_download_max_bytes
+        )
+    return _media_downloader
+
+
+def get_ingest_generated_media_use_case() -> IngestGeneratedMedia:
+    """Factory: the α8.4a generated-media ingestion use case (fresh UoW per call).
+
+    Invoked by the ``WorkflowRunSucceeded`` subscriber once per delivered event, so
+    each ingestion runs in its own Unit of Work. Object storage + downloader are
+    process-wide (memoised); the use case is strictly downstream of — and never
+    mutates — the frozen orchestration pipeline (W8.4.1 / W8.4.2).
+    """
+    return IngestGeneratedMedia(
+        uow=get_unit_of_work(),
+        storage=_get_object_storage(),
+        downloader=_get_media_downloader(),
     )

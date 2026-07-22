@@ -142,6 +142,32 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Generated media ingestion (Slice α8.4a) ------------------------
+    # After a run succeeds, a downstream subscriber downloads the provider's
+    # produced artifact (image_ref/video_ref) and stores it via ``IObjectStorage``,
+    # registering a ``MediaAsset(source='generated')``. α8.4a ships the local
+    # filesystem backend; S3/R2/GCS adapters swap in later with no use-case change.
+    media_storage_root: str = Field(
+        default="./var/media",
+        description="Filesystem root for the local object-storage adapter (α8.4a).",
+        min_length=1,
+    )
+    media_storage_bucket: str = Field(
+        default="generated",
+        description="Logical bucket/container generated media is written into.",
+        min_length=1,
+    )
+    media_download_timeout_seconds: float = Field(
+        default=60.0,
+        description="Per-request timeout for fetching a produced artifact (one attempt).",
+        gt=0,
+    )
+    media_download_max_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        description="Hard cap on a downloaded artifact's size (bytes); guards memory.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -403,6 +403,13 @@ class FakeProjectRepository(IProjectRepository):
             return None
         return project
 
+    async def get_ownership(self, project_id: UUID) -> tuple[UUID, UUID] | None:
+        # System-only lookup (α8.4a) — a live row in ``_rows`` is a live project.
+        project = self._rows.get(project_id)
+        if project is None:
+            return None
+        return (project.tenant_id, project.owner_user_id)
+
     async def list_owned(
         self,
         tenant_id: UUID,

@@ -311,6 +311,20 @@ class IProjectRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_ownership(self, project_id: UUID) -> tuple[UUID, UUID] | None:
+        """Return ``(tenant_id, owner_user_id)`` for a live project by id, or ``None``.
+
+        A **system-only** lookup for server-side event consumers (α8.4a
+        generated-media ingestion resolves the owning ``(tenant, user)`` for a
+        succeeded run's project so it can register the produced ``MediaAsset`` under
+        the correct owner). This is an **implementation detail, not a user-facing
+        read** — it is never wired to an HTTP endpoint, so it deliberately sidesteps
+        the owner-scoped anti-enumeration posture of :meth:`get_owned`. Returns
+        ``None`` when the project is missing or soft-deleted.
+        """
+        ...
+
+    @abstractmethod
     async def list_owned(
         self,
         tenant_id: UUID,

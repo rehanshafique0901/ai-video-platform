@@ -92,6 +92,18 @@ class ProjectRepository(IProjectRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    async def get_ownership(self, project_id: UUID) -> tuple[UUID, UUID] | None:
+        # System-only lookup (α8.4a): resolve the owning (tenant, user) for a live
+        # project by id, WITHOUT the owner-scoped filter — used by the server-side
+        # generated-media subscriber, never by a user-facing endpoint.
+        stmt = (
+            select(ProjectRow.tenant_id, ProjectRow.owner_user_id)
+            .where(ProjectRow.id == project_id)
+            .where(ProjectRow.deleted_at.is_(None))
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        return (row.tenant_id, row.owner_user_id) if row is not None else None
+
     async def list_owned(
         self,
         tenant_id: UUID,
