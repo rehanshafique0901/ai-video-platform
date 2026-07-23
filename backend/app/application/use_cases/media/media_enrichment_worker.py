@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.media.enrich_generated_media import (
+    CURRENT_ENRICHMENT_VERSION,
     EnrichGeneratedMedia,
     EnrichGeneratedMediaResult,
 )
@@ -49,9 +50,11 @@ class MediaEnrichmentWorker:
         self._batch_size = batch_size
 
     async def run_once(self) -> MediaEnrichmentPollResult:
-        """Claim + enrich the oldest un-enriched generated videos in the batch."""
+        """Claim + enrich the oldest below-target-version generated videos in the batch."""
         async with self._uow:
-            assets = await self._uow.media.list_unenriched_generated_videos(limit=self._batch_size)
+            assets = await self._uow.media.list_enrichable_generated_videos(
+                target_version=CURRENT_ENRICHMENT_VERSION, limit=self._batch_size
+            )
 
         outcomes: list[EnrichGeneratedMediaResult] = []
         for asset in assets:

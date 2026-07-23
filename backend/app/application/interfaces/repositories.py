@@ -821,16 +821,24 @@ class IMediaRepository(ABC):
         ...
 
     @abstractmethod
-    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAsset]:
-        """Return live generated **video** assets not yet enriched, oldest first (α8.4c).
+    async def list_enrichable_generated_videos(
+        self, *, target_version: int, limit: int
+    ) -> list[MediaAsset]:
+        """Return live **primary** generated video assets below ``target_version`` (α8.4c/d).
 
         The media-enrichment poll ingress (mirrors ``list_paused`` / ``list_claimable``):
-        ``kind='video' AND source='generated' AND deleted_at IS NULL AND NOT
-        (source_metadata ? 'enrichment')``, ordered ``created_at ASC, id ASC``, capped
-        at ``limit``. Owner-agnostic (server-side worker). The ``enrichment`` marker
-        key is written onto the parent's ``source_metadata`` when enrichment settles,
-        so an asset **drops out** of this set once processed — the claimable set is
-        bounded and shrinking. Side-effect-free.
+        ``kind='video' AND source='generated' AND deleted_at IS NULL`` **AND** the asset
+        is *primary* (recursion guard, W8.4d.1 — ``NOT (source_metadata ?
+        'parent_media_asset_id')``, so derived assets are never enrichment inputs)
+        **AND** its enrichment version is stale
+        (``COALESCE((source_metadata #>> '{enrichment,version}')::int, 0) <
+        target_version``), ordered ``created_at ASC, id ASC``, capped at ``limit``.
+
+        Owner-agnostic (server-side worker). Version-based (α8.4d Fork D): bumping
+        ``CURRENT_ENRICHMENT_VERSION`` re-claims already-enriched assets so new derived
+        artifacts backfill; α8.4c markers (no ``version``) count as ``0``. An asset
+        **drops out** once its marker reaches ``target_version`` — the set is bounded
+        and shrinking. Side-effect-free.
         """
         ...
 

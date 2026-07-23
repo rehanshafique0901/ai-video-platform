@@ -8,7 +8,16 @@ use-case change.
 
 from __future__ import annotations
 
+from app.infrastructure.render.ffmpeg_gif_previewer import FfmpegGifPreviewer
+from app.infrastructure.render.ffmpeg_preview_clipper import FfmpegPreviewClipper
 from app.infrastructure.render.ffmpeg_renderer import FfmpegRenderer
 from app.infrastructure.render.ffmpeg_thumbnailer import FfmpegThumbnailer
+from app.infrastructure.render.ffmpeg_waveform_renderer import FfmpegWaveformRenderer
 
-__all__ = ["FfmpegRenderer", "FfmpegThumbnailer"]
+__all__ = [
+    "FfmpegGifPreviewer",
+    "FfmpegPreviewClipper",
+    "FfmpegRenderer",
+    "FfmpegThumbnailer",
+    "FfmpegWaveformRenderer",
+]

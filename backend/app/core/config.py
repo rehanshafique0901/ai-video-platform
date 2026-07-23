@@ -210,6 +210,28 @@ class Settings(BaseSettings):
         description="Max generated videos a single MediaEnrichmentWorker.run_once() claims.",
         gt=0,
     )
+    # α8.4d derived previews (preview clip / GIF / waveform). FFmpeg binary config reused.
+    enrichment_preview_max_seconds: float = Field(
+        default=5.0, description="Max duration of a derived preview clip.", gt=0
+    )
+    enrichment_preview_max_width: int = Field(
+        default=640, description="Max width (px) of a derived preview clip; never upscales.", gt=0
+    )
+    enrichment_gif_max_seconds: float = Field(
+        default=3.0, description="Max duration sampled into a derived GIF preview.", gt=0
+    )
+    enrichment_gif_fps: int = Field(
+        default=10, description="Frame rate of a derived GIF preview.", gt=0
+    )
+    enrichment_gif_max_width: int = Field(
+        default=480, description="Max width (px) of a derived GIF preview.", gt=0
+    )
+    enrichment_waveform_width: int = Field(
+        default=640, description="Width (px) of a derived waveform image.", gt=0
+    )
+    enrichment_waveform_height: int = Field(
+        default=120, description="Height (px) of a derived waveform image.", gt=0
+    )
 
 
 @lru_cache(maxsize=1)

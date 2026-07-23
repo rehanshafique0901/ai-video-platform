@@ -32,8 +32,10 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.media_downloader import IMediaDownloader
 from app.application.interfaces.object_storage import IObjectStorage
+from app.application.interfaces.preview_clipper import IPreviewClipper
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
@@ -42,6 +44,7 @@ from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.thumbnailer import IThumbnailer
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.application.interfaces.waveform_renderer import IWaveformRenderer
 from app.application.interfaces.webhook_verifier import IWebhookVerifier
 from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
@@ -49,6 +52,13 @@ from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.enrich_generated_media import EnrichGeneratedMedia
+from app.application.use_cases.media.enrichers import (
+    Enricher,
+    GifEnricher,
+    PreviewEnricher,
+    ThumbnailEnricher,
+    WaveformEnricher,
+)
 from app.application.use_cases.media.generated_media_subscriber import (
     GeneratedMediaIngestionSubscriber,
 )
@@ -125,7 +135,13 @@ from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
-from app.infrastructure.render import FfmpegRenderer, FfmpegThumbnailer
+from app.infrastructure.render import (
+    FfmpegGifPreviewer,
+    FfmpegPreviewClipper,
+    FfmpegRenderer,
+    FfmpegThumbnailer,
+    FfmpegWaveformRenderer,
+)
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -159,6 +175,9 @@ _object_storage: IObjectStorage | None = None
 _media_downloader: IMediaDownloader | None = None
 _renderer: IRenderer | None = None
 _thumbnailer: IThumbnailer | None = None
+_preview_clipper: IPreviewClipper | None = None
+_gif_previewer: IGifPreviewer | None = None
+_waveform_renderer: IWaveformRenderer | None = None
 _media_download_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
@@ -285,6 +304,7 @@ async def shutdown() -> None:
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
+    global _preview_clipper, _gif_previewer, _waveform_renderer
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -307,6 +327,9 @@ async def shutdown() -> None:
     _media_download_client = None
     _renderer = None
     _thumbnailer = None
+    _preview_clipper = None
+    _gif_previewer = None
+    _waveform_renderer = None
     _settings = None
 
 
@@ -317,6 +340,7 @@ def reset() -> None:
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
+    global _preview_clipper, _gif_previewer, _waveform_renderer
     _settings = None
     _engine = None
     _session_factory = None
@@ -339,6 +363,9 @@ def reset() -> None:
     _media_download_client = None
     _renderer = None
     _thumbnailer = None
+    _preview_clipper = None
+    _gif_previewer = None
+    _waveform_renderer = None
 
 
 def _require_init() -> None:
@@ -983,14 +1010,79 @@ def _get_thumbnailer() -> IThumbnailer:
     return _thumbnailer
 
 
+def _get_preview_clipper() -> IPreviewClipper:
+    """Lazily build + memoise the FFmpeg preview clipper (configuration-blind, W8.1.1)."""
+    global _preview_clipper
+    _require_init()
+    if _preview_clipper is None:
+        settings = _get_settings()
+        _preview_clipper = FfmpegPreviewClipper(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _preview_clipper
+
+
+def _get_gif_previewer() -> IGifPreviewer:
+    """Lazily build + memoise the FFmpeg GIF previewer (configuration-blind, W8.1.1)."""
+    global _gif_previewer
+    _require_init()
+    if _gif_previewer is None:
+        settings = _get_settings()
+        _gif_previewer = FfmpegGifPreviewer(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _gif_previewer
+
+
+def _get_waveform_renderer() -> IWaveformRenderer:
+    """Lazily build + memoise the FFmpeg waveform renderer (configuration-blind, W8.1.1)."""
+    global _waveform_renderer
+    _require_init()
+    if _waveform_renderer is None:
+        settings = _get_settings()
+        _waveform_renderer = FfmpegWaveformRenderer(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _waveform_renderer
+
+
+def _build_enrichers() -> list[Enricher]:
+    """The α8.4d derived-preview pipeline (order = thumbnail, preview, gif, waveform)."""
+    settings = _get_settings()
+    return [
+        ThumbnailEnricher(_get_thumbnailer(), at_seconds=settings.enrichment_thumbnail_at_seconds),
+        PreviewEnricher(
+            _get_preview_clipper(),
+            max_seconds=settings.enrichment_preview_max_seconds,
+            max_width=settings.enrichment_preview_max_width,
+        ),
+        GifEnricher(
+            _get_gif_previewer(),
+            max_seconds=settings.enrichment_gif_max_seconds,
+            fps=settings.enrichment_gif_fps,
+            max_width=settings.enrichment_gif_max_width,
+        ),
+        WaveformEnricher(
+            _get_waveform_renderer(),
+            width=settings.enrichment_waveform_width,
+            height=settings.enrichment_waveform_height,
+        ),
+    ]
+
+
 def get_enrich_generated_media_use_case() -> EnrichGeneratedMedia:
-    """Factory: the α8.4c single-asset enrichment use case (fresh UoW per call)."""
+    """Factory: the α8.4c/d derived-preview enrichment pipeline (fresh UoW per call)."""
     settings = _get_settings()
     return EnrichGeneratedMedia(
         get_unit_of_work(),
         _get_object_storage(),
-        _get_thumbnailer(),
-        thumbnail_at_seconds=settings.enrichment_thumbnail_at_seconds,
+        _build_enrichers(),
         workspace_dir=settings.render_workspace_dir,
         lease=timedelta(seconds=settings.render_timeout_seconds),
     )

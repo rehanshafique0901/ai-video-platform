@@ -1274,14 +1274,29 @@ class FakeMediaRepository(IMediaRepository):
                 return media
         return None
 
-    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAsset]:
+    async def list_enrichable_generated_videos(
+        self, *, target_version: int, limit: int
+    ) -> list[MediaAsset]:
+        def _version(md: object) -> int:
+            if not isinstance(md, dict):
+                return 0
+            enr = md.get("enrichment")
+            if not isinstance(enr, dict):
+                return 0
+            v = enr.get("version")
+            return v if isinstance(v, int) else 0
+
         candidates = [
             m
             for m in self._media.values()
             if m.kind == "video"
             and m.source == "generated"
             and getattr(m, "deleted_at", None) is None
-            and not (isinstance(m.source_metadata, dict) and "enrichment" in m.source_metadata)
+            # recursion guard (W8.4d.1): derived assets are never enrichment inputs.
+            and not (
+                isinstance(m.source_metadata, dict) and "parent_media_asset_id" in m.source_metadata
+            )
+            and _version(m.source_metadata) < target_version
         ]
         candidates.sort(key=lambda m: (m.created_at, m.id))
         return candidates[:limit]

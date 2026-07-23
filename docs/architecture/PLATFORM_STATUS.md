@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.27-phase3-alpha8.4c` |
-| **Latest runtime tag** | `v0.4.27-phase3-alpha8.4c` |
+| **Application version** | `0.4.28-phase3-alpha8.4d` |
+| **Latest runtime tag** | `v0.4.28-phase3-alpha8.4d` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c, α8.4d all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -122,6 +122,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Generated media ingestion | ✅ | α8.4a | download / store / register `MediaAsset` |
 | Render engine | ✅ | α8.4b | Timeline → FFmpeg → output `MediaAsset` |
 | Media enrichment (thumbnail + metadata) | ✅ | α8.4c | derived-media poll worker; pure function of the parent `MediaAsset` |
+| Derived previews (preview clip / GIF / waveform) | ✅ | α8.4d | enricher pipeline; versioned marker + backfill; derived media terminal |
 
 ### Invariant catalog
 
@@ -156,6 +157,10 @@ by review + tests, not the mechanical guard:
 - **W8.4c.3** — derived media is reproducible from its parent `MediaAsset` alone;
   enrichment never depends on provider payloads, checkpoints, Timeline state, or
   render-job history — `MediaAsset → Thumbnail` is a pure function of the parent.
+- **W8.4d.1** — derived media is terminal. A derived `MediaAsset` SHALL NOT participate
+  as the source of further enrichment; enrichment operates exclusively on primary
+  generated/rendered assets. Derived artifacts are observational outputs only (the
+  derivation graph is a shallow tree, never a cycle).
 
 ---
 
@@ -185,7 +190,7 @@ the freeze was designed to preserve.
 
 | Slice | Scope |
 |---|---|
-| **α8.4d** | Media/render enhancements — previews, GIF previews, waveform generation, audio mixing, transition/effect enhancements, FFmpeg quality improvements |
+| **α8.4e** | Render composition enhancements — audio mixing, transitions/effects, FFmpeg quality tuning (changes *what the render is*, not a transform of an existing asset) |
 | **α8.5** | Export & publishing — `export_jobs`, storage providers, publishing/notifications, downstream integrations |
 
 All remaining work is **downstream of the frozen orchestration platform** — new

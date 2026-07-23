@@ -6,6 +6,82 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.4d — Derived-Preview Enrichment — preview clip + GIF + waveform (2026-07-24)
+
+Extends the α8.4c enrichment seam with the remaining **derived-preview** artifacts. The
+gating question — *"can this be expressed as a pure downstream transformation of an
+existing `MediaAsset`?"* — split the α8.4c-deferred list: **preview clip / GIF /
+waveform** are transforms of a finished asset (α8.4d), while **audio mixing /
+transitions / render quality tuning** change *what the render is* (composition) and are
+deferred to a new **α8.4e** render slice. The **same** `MediaEnrichmentWorker` now runs
+a **pipeline of independent enrichers** — thumbnail (α8.4c) + preview + GIF + waveform —
+each a pure `parent (+ bytes) → one derived artifact` transform behind its own neutral
+FFmpeg port. The enrichment marker is now **versioned**: bumping
+`CURRENT_ENRICHMENT_VERSION` (1 → 2) re-claims already-enriched assets so α8.4c-era
+videos backfill previews; a **recursion guard** (new invariant **W8.4d.1**) ensures
+derived assets are never themselves enriched. Freeze guard green, **zero override
+markers**; **zero migration**. Runtime capability change → version bump to
+`0.4.28-phase3-alpha8.4d`.
+
+#### Added
+- **Neutral ports (α8.4d Fork C — discrete, never a "God" `IMediaEnricher`)** —
+  `IPreviewClipper` (`preview_clipper.py`), `IGifPreviewer` (`gif_previewer.py`),
+  `IWaveformRenderer` (`waveform_renderer.py`), each with its own DTO + neutral error.
+  `IWaveformRenderer.waveform` returns `None` for a **silent source** (not applicable,
+  not a failure).
+- **FFmpeg adapters** — `FfmpegPreviewClipper` (trim + downscale → MP4),
+  `FfmpegGifPreviewer` (`fps` + lanczos scale → GIF), `FfmpegWaveformRenderer`
+  (`showwavespic`, audio-probed) in `app/infrastructure/render/`; **configuration-blind**
+  (W8.1.1 — reuse the α8.4b binary config); every failure maps to the port's neutral
+  error via a shared `_ffmpeg_exec` helper.
+- **Internal enricher pipeline** (`app/application/use_cases/media/enrichers/`) — an
+  `Enricher` ABC + `DerivedArtifact` DTO and `ThumbnailEnricher` / `PreviewEnricher` /
+  `GifEnricher` / `WaveformEnricher`. The worker orchestrates; each enricher owns
+  applicability, its deterministic key, and its derived-asset + metadata contribution.
+  **Implementation detail only** — no new platform abstraction, worker, or ADR.
+- **`EnrichGeneratedMedia` refactor** — from one thumbnail to a pipeline over a single
+  materialization: run each applicable enricher, register each derived `MediaAsset`
+  (idempotent, `ConflictError` recovery), merge ids + scalars into
+  `source_metadata.enrichment`, and set `version = CURRENT_ENRICHMENT_VERSION` **iff
+  every applicable enricher succeeded**. Per-artifact failure isolation: a transient
+  failure leaves the version un-bumped so a later pass retries (recovering the already-
+  registered artifacts).
+- **Versioned + recursion-guarded claim scan** — `IMediaRepository`.`list_unenriched_generated_videos`
+  → `list_enrichable_generated_videos(*, target_version, limit)`:
+  `kind='video' AND source='generated' AND deleted_at IS NULL AND NOT (source_metadata ?
+  'parent_media_asset_id') AND COALESCE((source_metadata #>> '{enrichment,version}')::int,
+  0) < target_version`. Additive, non-frozen.
+- **Config** — `enrichment_preview_max_seconds` / `enrichment_preview_max_width` /
+  `enrichment_gif_max_seconds` / `enrichment_gif_fps` / `enrichment_gif_max_width` /
+  `enrichment_waveform_width` / `enrichment_waveform_height`; FFmpeg binary config reused.
+- **Container wiring** — lazy `FfmpegPreviewClipper` / `FfmpegGifPreviewer` /
+  `FfmpegWaveformRenderer` (cleared on `shutdown`/`reset`); `_build_enrichers()` assembles
+  the pipeline into the existing `get_enrich_generated_media_use_case()` factory.
+- **Tests** — the full derived set from one materialization; **backfill** (α8.4c-era
+  marker, version 0 → re-claimed → gains previews); **idempotent re-run** (no dupes);
+  **recursion guard / W8.4d.1** (a derived video is never claimed or enriched); **per-
+  artifact failure isolation** (partial status, version un-bumped, re-claimable);
+  **waveform-not-applicable** (clean, terminal); guards (non-video / unsupported storage
+  / locked); worker drain / batch / empty; plus **opt-in** real-FFmpeg preview/gif/
+  waveform roundtrips (incl. the silent-source `None` path) skipped without the binary.
+
+#### Invariants
+- **W8.4c.1 / W8.4c.2 / W8.4c.3** — carry over unchanged (observational, parent-only,
+  pure-function enrichment).
+- **W8.4d.1 (new) — Derived media is terminal.** A derived `MediaAsset` SHALL NOT
+  participate as the source of further enrichment processing. Enrichment operates
+  exclusively on **primary** generated or rendered `MediaAsset`s. Derived artifacts are
+  observational outputs only. (Enforced by the recursion guard — the derivation graph is
+  a shallow tree, never a cycle.)
+
+#### Unchanged (freeze holds)
+- No migrations (derived artifacts are `media_assets` rows on the existing `media_kind`
+  enum; provenance + the versioned marker are JSONB `source_metadata`; the scan change is
+  additive). No frozen orchestration path changed. No `_paused` / checkpoint contract
+  change. Freeze guard green, **zero override markers** (α8.4d gating criterion). Audio
+  mixing / transitions / render quality tuning deferred to α8.4e (they change composition,
+  not a transform of an existing asset).
+
 ### Phase 3 Slice α8.4c — Media Enrichment — generated video → thumbnail + probed metadata (2026-07-24)
 
 The platform's **first *derived-media* capability**. A new **poll worker** (mirroring the α8.3

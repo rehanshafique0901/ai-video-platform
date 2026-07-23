@@ -28,7 +28,7 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Integer, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -154,17 +154,26 @@ class MediaRepository(IMediaRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
-    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAssetEntity]:
-        # α8.4c enrichment claim scan: live generated videos without the
-        # ``enrichment`` marker in source_metadata (the JSONB ``?`` key test), oldest
-        # first. Owner-agnostic (server-side worker); the set shrinks as assets are
-        # marked enriched. Total order (created_at, id) ASC.
+    async def list_enrichable_generated_videos(
+        self, *, target_version: int, limit: int
+    ) -> list[MediaAssetEntity]:
+        # α8.4c/d enrichment claim scan: live *primary* generated videos whose
+        # enrichment version is below the target. Owner-agnostic; the set shrinks as
+        # assets reach target_version. Total order (created_at, id) ASC.
+        #
+        #   NOT (source_metadata ? 'parent_media_asset_id')  -- recursion guard (W8.4d.1)
+        #   COALESCE((source_metadata #>> '{enrichment,version}')::int, 0) < target
+        version_int = func.coalesce(
+            MediaAssetRow.source_metadata[("enrichment", "version")].astext.cast(Integer),
+            0,
+        )
         stmt = (
             select(MediaAssetRow)
             .where(MediaAssetRow.kind == "video")
             .where(MediaAssetRow.source == "generated")
             .where(MediaAssetRow.deleted_at.is_(None))
-            .where(~MediaAssetRow.source_metadata.has_key("enrichment"))
+            .where(~MediaAssetRow.source_metadata.has_key("parent_media_asset_id"))
+            .where(version_int < target_version)
             .order_by(MediaAssetRow.created_at.asc(), MediaAssetRow.id.asc())
             .limit(limit)
         )
