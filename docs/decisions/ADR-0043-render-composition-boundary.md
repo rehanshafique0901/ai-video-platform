@@ -2,7 +2,9 @@
 
 **Status:** Accepted (a **governance** decision — docs-only. **No application code,
 no schema migration, no runtime behaviour change, no app version bump.** Mirrors the
-ADR-0041/ADR-0042 docs-only precedent.) Every α8.4e composition slice cites it.
+ADR-0041/ADR-0042 docs-only precedent.) Every composition slice (α8.4e onward) cites it.
+Composition **correctness** is governed by RC1–RC6 (D2); render **execution / scalability**
+(for GPU/distributed work) by the performance invariants RP1–RP9 (Appendix A).
 
 **A boundary, not a freeze.** ADR-0042 *froze* the orchestration core because it was
 feature-complete. The render layer is the opposite: α8.4e is about to **grow** it
@@ -164,8 +166,76 @@ per-slice invariants remain valid and are now framed as instances of RC1–RC6.
 
 ---
 
+## Appendix A — Render Performance & Scalability Invariants (RP1–RP9)
+
+**Forward-looking governance, not a freeze.** RC1–RC6 (D2) bound *what composition may
+depend on and produce*. This appendix bounds *how the render layer executes* as it scales
+to GPU and distributed rendering. These are **performance invariants** (architectural
+constraints), **not** performance optimizations — they say what must remain true, not how
+fast. Like RC1–RC6 they are **review-enforced** (pre-flight checklist), ship **no guard**,
+and freeze nothing. They are written **before** GPU/distributed code exists so that work
+has a contract to satisfy, exactly as ADR-0042 preceded the integration slices.
+
+Today's CPU FFmpeg renderer already satisfies **RP1–RP7 and RP9** as its baseline; **RP8**
+is the forward contract that keeps a future GPU/remote renderer a drop-in. Each future
+render slice (α8.4f onward, and any GPU/distributed work) should answer RP1–RP9 in its
+pre-flight alongside the RC1–RC6 matrix.
+
+- **RP1 — No provider or network I/O in composition.** A render worker performs no calls
+  to AI providers or external services while composing. All inputs are pre-materialized
+  `MediaAsset` bytes fetched from `IObjectStorage`; nothing is downloaded from a provider
+  URL mid-render. (Operational projection of RC2.)
+- **RP2 — No orchestration writes.** A render worker's only persistent writes are the
+  `render_jobs` lifecycle fields, the output `MediaAsset`, storage objects, and render
+  events. It never writes `WorkflowRun`, checkpoints, usage records, or completion state.
+  (Projection of RC2 / W8.4b.1.)
+- **RP3 — Deterministic, safe retries.** Re-running a render job converges to a single
+  correct result: the deterministic output key + `media_assets` uniqueness turns a retry
+  into `ConflictError` → recover-existing, never a duplicate output or partial-state
+  corruption. All composition + file I/O run **outside** any DB transaction (no lock held
+  across CPU work). (Builds on RC3/RC6.)
+- **RP4 — Idempotent execution under concurrency.** Processing the same render job any
+  number of times, from any number of workers, yields exactly one output `MediaAsset` and
+  one terminal settle. Concurrent workers are excluded by the `render_job:<id>` lease + the
+  `queued → running` CAS — no double-render, no split-brain settle.
+- **RP5 — Bounded memory.** Composition memory stays bounded by a streaming design, not by
+  (timeline size × inputs). A renderer must not require loading all source/output media
+  fully into process memory as timelines grow; large compositions degrade gracefully, not
+  by OOM. (FFmpeg streams today; a constraint on any future engine.)
+- **RP6 — Bounded, reclaimable temporary storage.** Materialization uses a bounded scratch
+  workspace that is always reclaimed on exit (success *or* failure); no scratch accumulates
+  across jobs. Temp usage is bounded by the current job's inputs+output, not history.
+- **RP7 — Horizontal scalability / statelessness.** Render workers hold no state beyond the
+  database, object storage, and the distributed lease. Adding workers increases throughput
+  with no coordination beyond the per-job lease — no worker affinity, no shared in-process
+  state, no sticky routing.
+- **RP8 — CPU/GPU/remote interchangeability.** An alternate renderer (GPU, or a remote /
+  distributed render service) is a **drop-in behind `IRenderer`** that preserves RC1–RC6 —
+  especially RC6 functional equivalence. Swapping or adding an engine requires **no**
+  orchestration, use-case, schema, or `MediaAsset`-boundary change; engine selection is
+  configuration/DI, never a new coupling.
+- **RP9 — Reproducible outputs across hosts and versions.** For identical Timeline +
+  `MediaAsset`s + `RenderSpec` + configuration, outputs remain **functionally equivalent**
+  across renderer versions and across machines (RC6), which is what makes output caching,
+  distributed scheduling, and re-render-on-another-node sound.
+
+**Relationship to RC1–RC6.** RP1–RP2 and RP8–RP9 are the operational restatement of RC2
+and RC6; RP3–RP7 add execution/scalability constraints that RC1–RC6 imply but do not
+state. Together: RC1–RC6 govern *correctness of composition*, RP1–RP9 govern *safe,
+scalable execution of composition*. Neither freezes the render layer.
+
+---
+
 ## Change log
 
+- **2026-07-24 — Appendix A (RP1–RP9) added.** Render performance & scalability invariants
+  — no provider/network I/O (RP1), no orchestration writes (RP2), deterministic safe
+  retries (RP3), idempotent concurrent execution (RP4), bounded memory (RP5), bounded
+  reclaimable temp storage (RP6), horizontal statelessness (RP7), CPU/GPU/remote
+  interchangeability behind `IRenderer` (RP8), reproducible cross-host/version outputs
+  (RP9). Forward-looking governance ahead of GPU/distributed rendering; review-enforced,
+  **no guard, no freeze**; the current CPU renderer already meets RP1–RP7/RP9. No
+  code/behaviour/schema change, no app version bump.
 - **2026-07-24 — RC6 (renderer purity) added.** Made reproducibility an explicit
   architectural goal — same Timeline + `MediaAsset`s + `RenderSpec` + renderer version +
   configuration ⇒ *functionally equivalent* output (not bit-identical). Enables safe
