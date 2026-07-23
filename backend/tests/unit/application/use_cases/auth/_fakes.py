@@ -26,6 +26,7 @@ from app.application.interfaces.locks import IDistributedLockManager, Lease
 from app.application.interfaces.publisher import OutboxEvent
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
+    IExportJobRepository,
     IMediaRepository,
     IModelPricingRepository,
     IProjectRepository,
@@ -56,6 +57,8 @@ from app.application.interfaces.usage_recorder import (
     UsageRecordRow,
 )
 from app.core.errors import ConflictError, NotFoundError
+from app.domain.export.export_job import ExportJob, ExportJobClaim
+from app.domain.export.export_status import ExportStatus
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
@@ -1767,6 +1770,169 @@ class FakeRenderJobRepository(IRenderJobRepository):
         return updated
 
 
+# ---- Export-job repository --------------------------------------------
+
+
+_EXPORT_ACTIVE_STATUSES = (
+    ExportStatus.QUEUED.value,
+    ExportStatus.RUNNING.value,
+    ExportStatus.SUCCEEDED.value,
+)
+
+
+@dataclass
+class FakeExportJobRepository(IExportJobRepository):
+    """In-memory ``IExportJobRepository`` for α8.5a use-case unit tests.
+
+    Models the real adapter's observable contract: the partial-unique tuple
+    ``(render_job_id, format, quality, orientation)`` over active/fulfilled statuses
+    (``add`` raises ``ConflictError`` on a duplicate), render-derived ownership (resolved
+    through the shared ``FakeRenderJobRepository`` → ``project_id``), FIFO claim scan, and
+    the self-versioned worker CAS transitions (hand-set ``version + 1``).
+    """
+
+    _render_jobs: FakeRenderJobRepository = field(default_factory=FakeRenderJobRepository)
+    _jobs: dict[UUID, ExportJob] = field(default_factory=dict)
+    _order: dict[UUID, int] = field(default_factory=dict)
+    _seq: int = 0
+
+    def _project_id_of(self, render_job_id: UUID) -> UUID | None:
+        render_job = self._render_jobs._jobs.get(render_job_id)
+        return render_job.project_id if render_job is not None else None
+
+    async def add(
+        self,
+        *,
+        render_job_id: UUID,
+        requested_by_user_id: UUID,
+        format: str,
+        quality: str,
+        orientation: str,
+        status: str,
+    ) -> ExportJob:
+        for existing in self._jobs.values():
+            if (
+                existing.render_job_id == render_job_id
+                and existing.format == format
+                and existing.quality == quality
+                and existing.orientation == orientation
+                and existing.status in _EXPORT_ACTIVE_STATUSES
+            ):
+                raise ConflictError(
+                    "an active export already exists for this render + encoding",
+                    details={
+                        "constraint": "uq_export_jobs_render_job_id_format_quality_orientation"
+                    },
+                )
+        now = datetime.now(UTC)
+        job = ExportJob(
+            id=uuid4(),
+            render_job_id=render_job_id,
+            requested_by_user_id=requested_by_user_id,
+            format=format,
+            quality=quality,
+            orientation=orientation,
+            status=status,
+            output_media_asset_id=None,
+            download_count=0,
+            last_downloaded_at=None,
+            file_size_bytes=None,
+            finished_at=None,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        self._jobs[job.id] = job
+        self._seq += 1
+        self._order[job.id] = self._seq
+        return job
+
+    async def get_active(
+        self,
+        render_job_id: UUID,
+        *,
+        format: str,
+        quality: str,
+        orientation: str,
+    ) -> ExportJob | None:
+        for job in self._jobs.values():
+            if (
+                job.render_job_id == render_job_id
+                and job.format == format
+                and job.quality == quality
+                and job.orientation == orientation
+                and job.status in _EXPORT_ACTIVE_STATUSES
+            ):
+                return job
+        return None
+
+    async def get_owned(self, project_id: UUID, export_job_id: UUID) -> ExportJob | None:
+        job = self._jobs.get(export_job_id)
+        if job is None or self._project_id_of(job.render_job_id) != project_id:
+            return None
+        return job
+
+    async def list_claimable(self, *, limit: int) -> list[ExportJobClaim]:
+        rows = [j for j in self._jobs.values() if j.status == ExportStatus.QUEUED.value]
+        rows.sort(key=lambda j: self._order.get(j.id, 0))
+        claims: list[ExportJobClaim] = []
+        for job in rows[:limit]:
+            project_id = self._project_id_of(job.render_job_id)
+            if project_id is None:  # pragma: no cover — a claimable job always has a render
+                continue
+            claims.append(ExportJobClaim(export_job_id=job.id, project_id=project_id))
+        return claims
+
+    async def mark_running(self, export_job_id: UUID) -> ExportJob | None:
+        job = self._jobs.get(export_job_id)
+        if job is None or job.status != ExportStatus.QUEUED.value:
+            return None
+        updated = replace(
+            job,
+            status=ExportStatus.RUNNING.value,
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[export_job_id] = updated
+        return updated
+
+    async def mark_succeeded(
+        self,
+        export_job_id: UUID,
+        *,
+        output_media_asset_id: UUID,
+        file_size_bytes: int,
+    ) -> ExportJob | None:
+        job = self._jobs.get(export_job_id)
+        if job is None or job.status != ExportStatus.RUNNING.value:
+            return None
+        updated = replace(
+            job,
+            status=ExportStatus.SUCCEEDED.value,
+            finished_at=datetime.now(UTC),
+            output_media_asset_id=output_media_asset_id,
+            file_size_bytes=file_size_bytes,
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[export_job_id] = updated
+        return updated
+
+    async def mark_failed(self, export_job_id: UUID) -> ExportJob | None:
+        job = self._jobs.get(export_job_id)
+        if job is None or job.status != ExportStatus.RUNNING.value:
+            return None
+        updated = replace(
+            job,
+            status=ExportStatus.FAILED.value,
+            finished_at=datetime.now(UTC),
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[export_job_id] = updated
+        return updated
+
+
 # ---- Event outbox repository ------------------------------------------
 
 
@@ -2383,6 +2549,7 @@ class FakeUnitOfWork(IUnitOfWork):
         media: FakeMediaRepository | None = None,
         timeline: FakeTimelineRepository | None = None,
         render_jobs: FakeRenderJobRepository | None = None,
+        export_jobs: FakeExportJobRepository | None = None,
         outbox: FakeEventOutboxRepository | None = None,
         workflow_runs: FakeWorkflowRunRepository | None = None,
         locks: FakeDistributedLockManager | None = None,
@@ -2406,6 +2573,11 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_media = media or FakeMediaRepository()
         self._fake_timeline = timeline or FakeTimelineRepository()
         self._fake_render_jobs = render_jobs or FakeRenderJobRepository()
+        # Export jobs derive ownership through render jobs → share the same render fake so a
+        # created export resolves to its render's project (mirrors the real join).
+        self._fake_export_jobs = export_jobs or FakeExportJobRepository(
+            _render_jobs=self._fake_render_jobs
+        )
         self._fake_outbox = outbox or FakeEventOutboxRepository()
         self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
         self._fake_locks = locks or FakeDistributedLockManager()
@@ -2427,6 +2599,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.media = self._fake_media
         self.timeline = self._fake_timeline
         self.render_jobs = self._fake_render_jobs
+        self.export_jobs = self._fake_export_jobs
         self.outbox = self._fake_outbox
         self.workflow_runs = self._fake_workflow_runs
         self.locks = self._fake_locks

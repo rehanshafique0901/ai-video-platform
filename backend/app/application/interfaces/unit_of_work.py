@@ -24,6 +24,7 @@ from typing import Self
 from app.application.interfaces.locks import IDistributedLockManager
 from app.application.interfaces.repositories import (
     IEventOutboxRepository,
+    IExportJobRepository,
     IMediaRepository,
     IModelPricingRepository,
     IProjectRepository,
@@ -70,6 +71,7 @@ class IUnitOfWork(ABC):
     media: IMediaRepository  # α6.2
     timeline: ITimelineRepository  # α6.3a
     render_jobs: IRenderJobRepository  # α7.1
+    export_jobs: IExportJobRepository  # α8.5a
     outbox: IEventOutboxRepository  # α7.1 (+ α7.3 relay read/mark surface)
     workflow_runs: IWorkflowRunRepository  # α7.2
     locks: IDistributedLockManager  # α7.3

@@ -37,6 +37,7 @@ from app.application.interfaces.usage_recorder import (
     NewUsageRecord,
     UsageRecordRow,
 )
+from app.domain.export.export_job import ExportJob, ExportJobClaim
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
@@ -1586,6 +1587,146 @@ class IRenderJobRepository(ABC):
         version=version+1 WHERE id=:id AND status='running'``. Returns the settled
         job, or ``None`` when no row matched. ``error`` is a neutral dict (no
         provider/orchestration detail; W8.4b.2).
+        """
+        ...
+
+
+class IExportJobRepository(ABC):
+    """Persistence surface for ``export_jobs``. Introduced by Slice α8.5a.
+
+    An **export job** is a user's request to transcode a completed render's master
+    ``MediaAsset`` into one delivery encoding ``(format, quality, orientation)`` — strictly
+    downstream of render/enrichment (W8.5.1). The master render is canonical; exports are
+    replaceable delivery artifacts (W8.5.3).
+
+    **Ownership is derived through the render job → project** (``export_jobs`` carries
+    ``requested_by_user_id`` but no ``project_id`` / ``tenant_id``); the owner-facing methods
+    are project-scoped, and the caller has ALREADY established project ownership before
+    reaching this port (anti-enumeration, inherited from α5a/α7.1). Ownership resolves via
+    ``render_job_id → render_jobs.project_id``.
+
+    **Self-versioned aggregate.** ``export_jobs`` carries its own ``version``
+    (``VersionMixin``); the worker-facing CAS transitions hand-set ``version = version + 1``
+    over the guarded bump trigger (net +1), mirroring :class:`IRenderJobRepository`.
+
+    **Idempotency backstop.** :meth:`add` maps the partial-unique
+    ``uq_export_jobs_render_job_id_format_quality_orientation`` violation (ADR-0030 W1.1 —
+    over ``status IN ('queued','running','succeeded')``) to ``ConflictError``; the use case
+    resolves it by returning the existing active/fulfilled job (α8.5a Fork E).
+
+    **No ``error`` / ``started_at`` columns** (unlike ``render_jobs``): a failed export
+    records ``status='failed'`` + ``finished_at`` only; the reason lives in logs + the
+    ``ExportJobFailed`` event.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        render_job_id: UUID,
+        requested_by_user_id: UUID,
+        format: str,
+        quality: str,
+        orientation: str,
+        status: str,
+    ) -> ExportJob:
+        """Insert a queued export job and return it.
+
+        The caller (``CreateExportJob``) has ALREADY established project ownership of the
+        referenced render job and validated it is ``succeeded`` with a master output. ``id`` /
+        timestamps / ``version`` (=1) / ``download_count`` (=0) are DB-populated; worker-owned
+        fields (``finished_at`` / ``output_media_asset_id`` / ``file_size_bytes``) are ``NULL``.
+
+        Raises ``ConflictError`` if the partial-unique
+        ``uq_export_jobs_render_job_id_format_quality_orientation`` constraint is violated —
+        i.e. an active/fulfilled export for the same ``(render_job_id, format, quality,
+        orientation)`` already exists; the use case returns that existing job (Fork E).
+        """
+        ...
+
+    @abstractmethod
+    async def get_active(
+        self,
+        render_job_id: UUID,
+        *,
+        format: str,
+        quality: str,
+        orientation: str,
+    ) -> ExportJob | None:
+        """Return the active-or-fulfilled export for the tuple, or ``None``.
+
+        The idempotency pre-check / race-recovery lookup for ``CreateExportJob`` (Fork E):
+        matches ``status IN ('queued','running','succeeded')`` (the same predicate as the
+        partial-unique index), so a repeat request replays the existing delivery artifact
+        instead of minting a duplicate. ``failed`` / ``canceled`` rows are ignored (retry
+        after failure is permitted).
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(self, project_id: UUID, export_job_id: UUID) -> ExportJob | None:
+        """Return the export job with ``export_job_id`` under ``project_id``, or ``None``.
+
+        Ownership is resolved by joining ``export_jobs → render_jobs`` and matching
+        ``render_jobs.project_id``. ``None`` when the job is missing OR belongs to a
+        different project — deliberately indistinguishable so ``GET`` maps both to a uniform
+        ``404`` (mirror of α7.1 D3.3).
+        """
+        ...
+
+    # --- Worker-facing lifecycle transitions (α8.5a) ----------------------------
+    #
+    # These serve the export worker (``ExportWorker.run_once`` → ``ProcessExportJob``), NOT
+    # owner-facing HTTP. Each is a race-safe CAS with a status predicate + hand-set
+    # ``version = version + 1`` — mirroring the α8.4b render worker transitions.
+
+    @abstractmethod
+    async def list_claimable(self, *, limit: int) -> list[ExportJobClaim]:
+        """Return ``queued`` export jobs, oldest first, each with its owning ``project_id``.
+
+        The α8.5a poll ingress (mirrors ``IRenderJobRepository.list_claimable``): ordered
+        ``created_at ASC, id ASC`` (FIFO, total order). Joins through ``render_jobs`` to
+        resolve ``project_id`` so the worker can settle each job via the project-scoped
+        ports. NOT project-scoped — the worker is a server-side consumer. Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_running(self, export_job_id: UUID) -> ExportJob | None:
+        """Version-fenced claim: ``queued`` → ``running``.
+
+        Atomic CAS ``… SET status='running', version=version+1 WHERE id=:id AND
+        status='queued'``. Returns the running job, or ``None`` when no row matched (already
+        claimed/terminal) — the worker treats ``None`` as "another worker owns it" and skips.
+        (``export_jobs`` has no ``started_at`` column, unlike ``render_jobs``.)
+        """
+        ...
+
+    @abstractmethod
+    async def mark_succeeded(
+        self,
+        export_job_id: UUID,
+        *,
+        output_media_asset_id: UUID,
+        file_size_bytes: int,
+    ) -> ExportJob | None:
+        """Version-fenced finish: ``running`` → ``succeeded`` with the delivery artifact.
+
+        Atomic CAS ``… SET status='succeeded', finished_at=now(),
+        output_media_asset_id=:asset, file_size_bytes=:size, version=version+1 WHERE id=:id
+        AND status='running'``. Returns the settled job, or ``None`` when no row matched
+        (e.g. canceled mid-export).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_failed(self, export_job_id: UUID) -> ExportJob | None:
+        """Version-fenced finish: ``running`` → ``failed``.
+
+        Atomic CAS ``… SET status='failed', finished_at=now(), version=version+1 WHERE
+        id=:id AND status='running'``. Returns the settled job, or ``None`` when no row
+        matched. ``export_jobs`` has no ``error`` column — the reason lives in the log +
+        the ``ExportJobFailed`` event (W8.5.2).
         """
         ...
 

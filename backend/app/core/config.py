@@ -233,6 +233,15 @@ class Settings(BaseSettings):
         default=120, description="Height (px) of a derived waveform image.", gt=0
     )
 
+    # --- Export engine (α8.5a) ------------------------------------------------
+    # The export worker transcodes a completed render's master into a delivery encoding via
+    # IExporter (FFmpeg adapter, reusing the render binary + workspace + timeout config).
+    export_batch_size: int = Field(
+        default=10,
+        description="Max queued export jobs a single ExportWorker.run_once() claims.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

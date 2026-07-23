@@ -32,6 +32,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.exporter import IExporter
 from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.media_downloader import IMediaDownloader
 from app.application.interfaces.object_storage import IObjectStorage
@@ -50,6 +51,10 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.export.create_export_job import CreateExportJob
+from app.application.use_cases.export.export_worker import ExportWorker
+from app.application.use_cases.export.get_export_job import GetExportJob
+from app.application.use_cases.export.process_export_job import ProcessExportJob
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.enrich_generated_media import EnrichGeneratedMedia
 from app.application.use_cases.media.enrichers import (
@@ -133,6 +138,7 @@ from app.infrastructure.ai.providers.ports import Provider
 from app.infrastructure.ai.providers.registry import ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
+from app.infrastructure.export import FfmpegExporter
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
 from app.infrastructure.render import (
@@ -174,6 +180,7 @@ _fal_webhook_client: httpx.AsyncClient | None = None
 _object_storage: IObjectStorage | None = None
 _media_downloader: IMediaDownloader | None = None
 _renderer: IRenderer | None = None
+_exporter: IExporter | None = None
 _thumbnailer: IThumbnailer | None = None
 _preview_clipper: IPreviewClipper | None = None
 _gif_previewer: IGifPreviewer | None = None
@@ -304,7 +311,7 @@ async def shutdown() -> None:
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
-    global _preview_clipper, _gif_previewer, _waveform_renderer
+    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -326,6 +333,7 @@ async def shutdown() -> None:
     _media_downloader = None
     _media_download_client = None
     _renderer = None
+    _exporter = None
     _thumbnailer = None
     _preview_clipper = None
     _gif_previewer = None
@@ -340,7 +348,7 @@ def reset() -> None:
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
-    global _preview_clipper, _gif_previewer, _waveform_renderer
+    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter
     _settings = None
     _engine = None
     _session_factory = None
@@ -366,6 +374,7 @@ def reset() -> None:
     _preview_clipper = None
     _gif_previewer = None
     _waveform_renderer = None
+    _exporter = None
 
 
 def _require_init() -> None:
@@ -784,6 +793,19 @@ def get_cancel_render_job_use_case() -> CancelRenderJob:
 
 
 # ---------------------------------------------------------------------
+# Use-case factories (Slice α8.5a — Export engine, owner-facing)
+# ---------------------------------------------------------------------
+
+
+def get_create_export_job_use_case() -> CreateExportJob:
+    return CreateExportJob(uow=get_unit_of_work())
+
+
+def get_get_export_job_use_case() -> GetExportJob:
+    return GetExportJob(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
 # Use-case factories (Slice α7.2 — Workflow runs)
 # ---------------------------------------------------------------------
 # The runner-bearing use cases (create/advance) default to the module-level
@@ -988,6 +1010,56 @@ def get_render_worker() -> RenderWorker:
         uow=get_unit_of_work(),
         process=get_process_render_job_use_case(),
         batch_size=settings.render_batch_size,
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.5a — Export engine, worker path)
+# ---------------------------------------------------------------------
+
+
+def _get_exporter() -> IExporter:
+    """Lazily build + memoise the FFmpeg exporter (configuration-blind, W8.1.1).
+
+    Reuses the render binary + timeout config (same ffmpeg/ffprobe) — export is a distinct
+    domain (Fork C) but shares the platform's subprocess plumbing, mirroring the enrichment
+    adapters.
+    """
+    global _exporter
+    _require_init()
+    if _exporter is None:
+        settings = _get_settings()
+        _exporter = FfmpegExporter(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _exporter
+
+
+def get_process_export_job_use_case() -> ProcessExportJob:
+    """Factory: the α8.5a single-job export use case (fresh UoW per call)."""
+    settings = _get_settings()
+    return ProcessExportJob(
+        uow=get_unit_of_work(),
+        storage=_get_object_storage(),
+        exporter=_get_exporter(),
+        workspace_dir=settings.render_workspace_dir,
+        lease=timedelta(seconds=settings.render_timeout_seconds),
+    )
+
+
+def get_export_worker() -> ExportWorker:
+    """Factory: the α8.5a export poll ingress (``run_once`` drains queued export jobs).
+
+    Mirrors ``get_render_worker`` — a dedicated poller (Fork B) so CPU-bound transcoding
+    stays off the relay fan-out. Export is downstream, delivery-only (W8.5.1/W8.5.2).
+    """
+    settings = _get_settings()
+    return ExportWorker(
+        uow=get_unit_of_work(),
+        process=get_process_export_job_use_case(),
+        batch_size=settings.export_batch_size,
     )
 
 

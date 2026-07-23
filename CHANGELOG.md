@@ -6,6 +6,78 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.5a — Export Engine — render output → delivery encoding (2026-07-24)
+
+The **first delivery-stage slice** — downstream of render + enrichment. It adds an **export
+engine** that transcodes a completed render's master `MediaAsset` into requested
+`(format, quality)` **delivery encodings**, following the platform's established
+claim → lease → transform → idempotent-settle → event worker model. Entirely outside the
+**ADR-0042** frozen orchestration surface (Gate 1) and within **ADR-0043** — export is a
+delivery transform operating on a *finished, immutable* render (RC5) and is deterministic
+(RC6 / RP1–RP9). The `export_jobs` table + `export_*` enums were already modelled (ADR-0030),
+so **zero migration**. Freeze guard green, **zero override markers**. Runtime capability →
+version bump to `0.4.30-phase3-alpha8.5a`.
+
+Export is **delivery-only and same-orientation** (Fork F, tightened at sign-off): it changes
+container / codec / bitrate / **resolution** within the master's own orientation
+(`horizontal→horizontal`, `vertical→vertical`, `square→square`), scaling with preserved
+aspect and **no** pad / crop. Cross-orientation exports (which change *presentation*, not
+delivery) and any letterbox / pillarbox / smart-reframe are **deferred** to a future policy
+slice — a request whose orientation differs from the master's is a `422`. Publishing,
+notifications, download-serving endpoints, storage-provider backends, and CDN are deferred to
+**α8.5b** (Fork A).
+
+#### Added
+- **`IExporter` port + `FfmpegExporter` adapter (Fork C1 — a discrete domain, never the
+  renderer)** — `ExportSpec` (`source_path`, `output_path`, `format`, `quality`,
+  `orientation`) → `ExportResult` (stored-object facts). The adapter maps `quality` → a fixed
+  resolution box, `orientation` → its box orientation, `format` → container/codec
+  (`mp4`=h264/aac, `mov`=h264/aac, `webm`=vp9/opus, `gif`=palettegen/paletteuse, no audio);
+  scaling preserves aspect (`force_original_aspect_ratio=decrease` + even rounding, no pad).
+  Deterministic encode knobs (fixed CRF / GIF fps). Configuration-blind (W8.1.1 — reuses the
+  render binary config). Shared `EXPORT_FORMAT_MIME` / `EXPORT_FORMAT_KIND` on the port.
+- **`CreateExportJob` use case + HTTP ingress** — `POST /projects/{id}/render-jobs/{id}/exports`
+  (201, or 200 idempotent replay) + `GET …/exports/{id}` (status). Gates project ownership
+  (404), requires the render `succeeded` with a master output (422 otherwise), enforces the
+  **same-orientation** guard against the master's dimensions (422), and is idempotent per
+  `(render_job, format, quality, orientation)` (Fork E, backed by the partial-unique index).
+- **`ProcessExportJob` + `ExportWorker` (Fork B1 — a poll worker, not the relay)** — claims a
+  `queued` job under an `export_job:<id>` lease (`queued`→`running` CAS), resolves the master
+  (the **only** legal source, Fork D), materializes it from `IObjectStorage`, transcodes via
+  `IExporter`, stores under a **deterministic key**, registers a delivery `MediaAsset`
+  (`source='generated'`, `source_metadata.origin='export'` + master lineage), and settles
+  `succeeded` (with `output_media_asset_id` + `file_size_bytes`) or `failed` — emitting
+  `ExportJobCreated` / `ExportJobSucceeded` / `ExportJobFailed` on the transactional outbox.
+- **Additive persistence** — `IExportJobRepository` (+ SQLAlchemy adapter + in-memory fake) —
+  `add` (partial-unique → `ConflictError`), `get_active`, render-derived `get_owned`,
+  worker-facing `list_claimable` (FIFO, resolving each job's owning `project_id` via
+  `render_jobs`), and self-versioned `mark_running` / `mark_succeeded` / `mark_failed` CAS.
+  Domain `ExportJob` / `ExportStatus` / `ExportJobClaim`; `export_jobs` wired into the UoW.
+- **Tests** — create (queue + event, idempotent replay, distinct-encoding, ownership 404s,
+  master-not-ready 422, cross-orientation 422, same-orientation vertical, unknown-dims 422,
+  invalid enums); process (master → delivery asset with export lineage, GIF → image kind,
+  deterministic-key idempotency recovers the existing asset, failure path, missing master,
+  non-queued no-op, lock skip); worker (FIFO drain, empty no-op); get (ownership 404s); plus
+  `FfmpegExporter` unit validation + `_target_box` math and **opt-in** real-FFmpeg mp4
+  (orientation-preserving) + gif roundtrips (skipped without the binary).
+
+#### Invariants
+- **W8.5.1 (new) — Export is downstream-only.** It never recomposes, mutates, or re-renders
+  the master; it only reads a finished `MediaAsset` and produces a new delivery `MediaAsset`
+  (upholds RC5).
+- **W8.5.2 (new) — Export consumes only a `MediaAsset` + request params.** Never a Timeline,
+  provider output/URL, checkpoint, request/job id, or webhook (mirror of W8.4b.2 / W8.4c.2).
+- **W8.5.3 (new) — The rendered `MediaAsset` is the canonical master; exports are replaceable
+  delivery artifacts.** Same master + same `(format, quality, orientation)` ⇒ a functionally
+  equivalent delivery (RC6), regenerable at any time; deleting/regenerating a delivery never
+  affects the master. One master → N replaceable encodings (MP4 / MOV / WEBM / GIF).
+
+#### Unchanged (freeze holds)
+- **Zero migrations** (`export_jobs` + `export_*` enums already modelled, ADR-0030). No frozen
+  orchestration path changed (ADR-0042 Gate 1). Export satisfies ADR-0043 RC5/RC6 + RP1–RP9
+  (Gate 2). Freeze guard green, **zero override markers**. Publishing / notifications /
+  download service / storage-provider backends / CDN and cross-orientation reframe deferred.
+
 ### Phase 3 Slice α8.4e — Render Composition — audio mixing (2026-07-24)
 
 The **first render-composition slice** and the first feature implemented entirely under

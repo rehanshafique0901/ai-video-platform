@@ -39,6 +39,8 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.export.create_export_job import CreateExportJob
+from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.list_media import ListMedia
@@ -217,6 +219,11 @@ CreateRenderJobDep = Annotated[CreateRenderJob, Depends(container.get_create_ren
 ListRenderJobsDep = Annotated[ListRenderJobs, Depends(container.get_list_render_jobs_use_case)]
 GetRenderJobDep = Annotated[GetRenderJob, Depends(container.get_get_render_job_use_case)]
 CancelRenderJobDep = Annotated[CancelRenderJob, Depends(container.get_cancel_render_job_use_case)]
+
+# ---- Use-case dependencies (Slice α8.5a — Export jobs) ----------------
+
+CreateExportJobDep = Annotated[CreateExportJob, Depends(container.get_create_export_job_use_case)]
+GetExportJobDep = Annotated[GetExportJob, Depends(container.get_get_export_job_use_case)]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
 
