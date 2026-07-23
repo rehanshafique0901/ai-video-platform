@@ -6,24 +6,35 @@ both authenticated via :data:`CurrentUserDep`:
 * ``POST /projects/{pid}/render-jobs/{rid}/exports``               → 201 (or 200 on idempotent
   replay), queue a delivery export of the render's master.
 * ``GET  /projects/{pid}/render-jobs/{rid}/exports/{export_id}``   → 200, fetch one export.
+* ``GET  …/exports/{export_id}/download``                          → 200, stream the artifact
+  bytes (α8.5b.1).
 
 Export is downstream, delivery-only (W8.5.1/W8.5.2): the router stays thin — DTO projection +
 envelope + the 201/200 create split; the ownership gate, master-readiness check, the
 same-orientation guard (Fork F), and idempotency live in the use cases. Execution is the
-α8.5a export worker (jobs stay ``queued`` until it claims them). Download-serving is deferred
-to α8.5b.
+α8.5a export worker (jobs stay ``queued`` until it claims them).
+
+Download serving (α8.5b.1) resolves + authorizes + readiness-guards in ``DownloadExport`` and
+renders the neutral :data:`DeliveryDecision` it returns — a byte stream now, a signed-URL
+redirect once the α8.5b.2 cloud adapters exist (no endpoint change).
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
-from app.api.v1.deps import CreateExportJobDep, CurrentUserDep, GetExportJobDep
+from app.api.v1.deps import (
+    CreateExportJobDep,
+    CurrentUserDep,
+    DownloadExportDep,
+    GetExportJobDep,
+)
 from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.export import ExportJobCreateRequest, ExportJobPublic
+from app.application.interfaces.download_delivery import RedirectDelivery
 from app.domain.export.export_job import ExportJob
 
 router = APIRouter(
@@ -106,3 +117,35 @@ async def get_export_job(
         tenant_id=current_user.tenant_id,
     )
     return JSONResponse(content=envelope(_to_public(job), request))
+
+
+@router.get("/{export_job_id}/download")
+async def download_export(
+    project_id: UUID,
+    render_job_id: UUID,
+    export_job_id: UUID,
+    current_user: CurrentUserDep,
+    use_case: DownloadExportDep,
+) -> Response:
+    """Download a completed export's bytes (owner-only, α8.5b.1).
+
+    Streams the delivery artifact with ``Content-Disposition: attachment`` (local delivery),
+    or — once the α8.5b.2 cloud adapters exist — a ``302`` redirect to a signed URL. ``404``
+    when the export/artifact is not the caller's or its bytes are unavailable; ``409`` when the
+    export is not yet ``succeeded`` with a delivery artifact. Download telemetry is updated
+    best-effort and never affects the response (W8.5b.3).
+    """
+    decision = await use_case.execute(
+        project_id=project_id,
+        render_job_id=render_job_id,
+        export_job_id=export_job_id,
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+    if isinstance(decision, RedirectDelivery):
+        return RedirectResponse(url=decision.url, status_code=status.HTTP_302_FOUND)
+
+    headers = {"Content-Disposition": f'attachment; filename="{decision.filename}"'}
+    if decision.content_length is not None:
+        headers["Content-Length"] = str(decision.content_length)
+    return StreamingResponse(decision.chunks, media_type=decision.media_type, headers=headers)

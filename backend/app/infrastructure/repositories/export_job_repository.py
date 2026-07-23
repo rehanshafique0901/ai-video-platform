@@ -178,6 +178,26 @@ class ExportJobRepository(IExportJobRepository):
         row = (await self._session.execute(upd)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    # ---- download accounting (α8.5b.1) --------------------------------
+
+    async def record_download(self, export_job_id: UUID) -> ExportJobEntity | None:
+        # Telemetry only — NOT a lifecycle CAS: no ``version`` bump (W8.5b.3). Guarded on
+        # ``status='succeeded'`` so a non-servable job is never counted. Called best-effort by
+        # the download use case; a failure here is swallowed as telemetry loss.
+        upd = (
+            update(ExportJobRow)
+            .where(ExportJobRow.id == export_job_id)
+            .where(ExportJobRow.status == ExportStatus.SUCCEEDED.value)
+            .values(
+                download_count=ExportJobRow.download_count + 1,
+                last_downloaded_at=func.now(),
+                updated_at=func.now(),
+            )
+            .returning(ExportJobRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
 
 def _row_to_entity(row: ExportJobRow) -> ExportJobEntity:
     return ExportJobEntity(

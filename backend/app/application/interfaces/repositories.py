@@ -1730,6 +1730,25 @@ class IExportJobRepository(ABC):
         """
         ...
 
+    # --- Download accounting (α8.5b.1) ------------------------------------------
+    #
+    # Owner-facing telemetry, NOT a lifecycle transition. Deliberately does NOT bump
+    # ``version`` (download counts are metrics, not OCC state — W8.5b.3) and is called
+    # best-effort by the download use case: a failure here is telemetry loss, never a
+    # user-visible download failure.
+
+    @abstractmethod
+    async def record_download(self, export_job_id: UUID) -> ExportJob | None:
+        """Increment download telemetry on a ``succeeded`` export (α8.5b.1).
+
+        Atomic ``… SET download_count = download_count + 1, last_downloaded_at = now(),
+        updated_at = now() WHERE id=:id AND status='succeeded'``. Returns the updated job, or
+        ``None`` when no row matched (missing, or not ``succeeded`` — a non-servable job is
+        never counted). Does **not** bump ``version``: this is accounting, not a state change,
+        and must never participate in optimistic-concurrency fences (W8.5b.3).
+        """
+        ...
+
 
 class IEventOutboxRepository(ABC):
     """Persistence surface for the transactional outbox (``event_outbox``, CR-4).

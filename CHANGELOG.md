@@ -6,6 +6,65 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.5b.1 — Download Serving — deliver an export artifact to the user (2026-07-24)
+
+The **first distribution-stage slice** — downstream of the α8.5a export engine. α8.5a made the
+delivery artifact *exist*; α8.5b.1 makes it *obtainable*: an authenticated, owner-scoped
+endpoint that streams a completed export's bytes. Grounding established that α8.5b is **four**
+downstream capabilities with different risk profiles, so this slice ships only the smallest,
+zero-migration, highest-value one — **download serving** — and explicitly defers cloud storage
+backends (α8.5b.2), notifications (α8.5b.3), and publishing (α8.6). Entirely outside the
+**ADR-0042** frozen surface (Gate 1) and *below* the **ADR-0043** render boundary (Gate 2):
+download is a pure read + transfer that never re-encodes or mutates the artifact (RC5 / W8.5.3).
+The `export_jobs.download_count` / `last_downloaded_at` columns already existed (ADR-0030), so
+**zero migration**. Freeze guard green, **zero override markers**. Runtime capability → version
+bump to `0.4.31-phase3-alpha8.5b1`.
+
+#### Added
+- **`IDownloadDelivery` port + `LocalStreamDelivery` adapter (Fork A — the seam, local only).**
+  `deliver(DownloadRequest) → DeliveryDecision` where the decision is a `StreamDelivery` (bytes
+  streamed through the API) or a `RedirectDelivery` (signed-URL redirect). α8.5b.1 implements
+  **`LocalStreamDelivery` only** (reads the object from `IObjectStorage`, yields it in 64 KiB
+  chunks; refuses non-local backends); **no** `signed_url()` / S3 / R2 / CDN code — those are
+  α8.5b.2, and arrive with no endpoint change. Pure transfer (W8.5b.2): the bytes are never
+  re-encoded, resized, or transformed.
+- **`DownloadExport` use case + HTTP ingress.** `GET /projects/{id}/render-jobs/{id}/exports/{id}/download`
+  resolves + authorizes (owner-only via the existing project → render-job gate; foreign/missing
+  → `404`, anti-enumeration), requires the export `succeeded` with a live
+  `output_media_asset_id` (`409` otherwise — Fork C), resolves the delivery `MediaAsset`, and
+  renders the `DeliveryDecision` (`200` streamed attachment, or `302` redirect for the future
+  cloud shape). Missing/foreign artifact or unavailable bytes → `404`.
+- **Best-effort download accounting (Fork B / W8.5b.3).** New additive
+  `IExportJobRepository.record_download` — `download_count += 1`, `last_downloaded_at = now()`
+  guarded on `status='succeeded'`, **no `version` bump** (telemetry, not an OCC transition).
+  Called in its own short transaction after delivery is prepared and **swallowed on failure**:
+  a counter-store outage is telemetry loss, never a failed download; no retry.
+- **Tests** — use case (stream + accounting; foreign-user / wrong-render-job / missing-export
+  404s; not-succeeded / succeeded-without-artifact 409s; vanished artifact + unavailable bytes
+  404 *not counted*; delivery-error → 404; **accounting failure does not fail the download**;
+  redirect pass-through); `LocalStreamDelivery` (chunked byte-identical stream, foreign
+  backend/bucket rejected, missing object → `ObjectStorageError`); router (streamed attachment
+  headers, `302` redirect, `404`/`409` envelope mapping).
+
+#### Invariants
+- **W8.5b.1 (new) — Download serving is observational and read-only.** It reads a finished
+  delivery `MediaAsset` and transfers its bytes; its only write is the `export_jobs` accounting
+  fields. It never mutates the artifact, the master, orchestration/render/export lifecycle, or
+  any upstream entity.
+- **W8.5b.2 (new) — Delivery is a pure transfer.** No encoding, transcoding, re-composition,
+  re-timing, or resize on the download path (reinforces RC5 + W8.5.3 — deliveries are
+  replaceable byte artifacts of the canonical master).
+- **W8.5b.3 (new) — Accounting never blocks or corrupts delivery.** Download-count updates are
+  best-effort, non-transactional with the byte transfer, and non-retrying; a failure is
+  telemetry loss, not a user-visible error.
+
+#### Unchanged (freeze holds)
+- **Zero migrations** (`download_count` / `last_downloaded_at` already modelled, ADR-0030). No
+  frozen orchestration path changed (ADR-0042 Gate 1). Download is below the render boundary and
+  upholds RC5/W8.5.3 (ADR-0043 Gate 2). Freeze guard green, **zero override markers**. No cloud
+  storage adapters / signed URLs / CDN / notifications / publishing / share links (deferred to
+  α8.5b.2 / α8.5b.3 / α8.6).
+
 ### Phase 3 Slice α8.5a — Export Engine — render output → delivery encoding (2026-07-24)
 
 The **first delivery-stage slice** — downstream of render + enrichment. It adds an **export

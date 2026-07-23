@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from app.application.interfaces.object_storage import IObjectStorage, StoredObject
+from app.application.interfaces.object_storage import (
+    IObjectStorage,
+    ObjectStorageError,
+    StoredObject,
+)
 from tests.unit.application.use_cases.auth._fakes import (
     FakeMediaRepository,
     FakeProjectRepository,
@@ -44,7 +48,10 @@ class FakeObjectStorage(IObjectStorage):
         return StoredObject(backend=_MASTER_BACKEND, bucket=_MASTER_BUCKET, key=key)
 
     async def get(self, *, key: str) -> bytes:
-        return self.objects[key]
+        try:
+            return self.objects[key]
+        except KeyError as exc:  # mirror LocalObjectStorage: missing object → ObjectStorageError
+            raise ObjectStorageError(f"failed to read object {key!r}: not found") from exc
 
     async def exists(self, *, key: str) -> bool:
         return key in self.objects
@@ -135,3 +142,65 @@ class ExportFixture:
         master_id = await self.seed_master(width=width, height=height)
         render_job_id = await self.seed_succeeded_render(master_id=master_id)
         return render_job_id, master_id
+
+    async def seed_delivery_asset(
+        self,
+        *,
+        format: str = "mp4",
+        kind: str = "video",
+        mime_type: str = "video/mp4",
+        data: bytes = b"DELIVERY-BYTES",
+        key: str | None = None,
+    ) -> UUID:
+        """Register a delivery ``MediaAsset`` (origin=export) + stash its bytes in storage."""
+        if key is None:
+            self._master_seq += 1
+            key = f"exports/delivery-{self._master_seq}.{format}"
+        self.storage.objects[key] = data
+        asset = await self.media.add(
+            tenant_id=self.tenant,
+            owner_user_id=self.owner,
+            kind=kind,
+            source="generated",
+            storage_backend=_MASTER_BACKEND,
+            storage_bucket=_MASTER_BUCKET,
+            storage_key=key,
+            mime_type=mime_type,
+            size_bytes=len(data),
+            checksum_sha256=b"\x00" * 32,
+            project_id=self.project_id,
+            scene_id=None,
+            prompt_id=None,
+            model_id=None,
+            provider=None,
+            width=1920,
+            height=1080,
+            duration_seconds=5.0,
+            source_metadata={"origin": "export"},
+        )
+        return asset.id
+
+    async def seed_succeeded_export(
+        self,
+        *,
+        render_job_id: UUID,
+        delivery_id: UUID,
+        format: str = "mp4",
+        quality: str = "hd_1080p",
+        orientation: str = "horizontal",
+        file_size_bytes: int = 14,
+    ) -> UUID:
+        """Create an export job and drive it queued → running → succeeded(delivery_id)."""
+        job = await self.exports.add(
+            render_job_id=render_job_id,
+            requested_by_user_id=self.owner,
+            format=format,
+            quality=quality,
+            orientation=orientation,
+            status="queued",
+        )
+        await self.exports.mark_running(job.id)
+        await self.exports.mark_succeeded(
+            job.id, output_media_asset_id=delivery_id, file_size_bytes=file_size_bytes
+        )
+        return job.id

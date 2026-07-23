@@ -32,6 +32,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.download_delivery import IDownloadDelivery
 from app.application.interfaces.exporter import IExporter
 from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.media_downloader import IMediaDownloader
@@ -52,6 +53,7 @@ from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.application.use_cases.export.create_export_job import CreateExportJob
+from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.export_worker import ExportWorker
 from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.export.process_export_job import ProcessExportJob
@@ -138,6 +140,7 @@ from app.infrastructure.ai.providers.ports import Provider
 from app.infrastructure.ai.providers.registry import ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
+from app.infrastructure.delivery import LocalStreamDelivery
 from app.infrastructure.export import FfmpegExporter
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
@@ -181,6 +184,8 @@ _object_storage: IObjectStorage | None = None
 _media_downloader: IMediaDownloader | None = None
 _renderer: IRenderer | None = None
 _exporter: IExporter | None = None
+# α8.5b.1: the download-delivery seam (local streaming adapter; cloud/redirect adapters α8.5b.2).
+_download_delivery: IDownloadDelivery | None = None
 _thumbnailer: IThumbnailer | None = None
 _preview_clipper: IPreviewClipper | None = None
 _gif_previewer: IGifPreviewer | None = None
@@ -311,7 +316,7 @@ async def shutdown() -> None:
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
-    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter
+    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -338,6 +343,7 @@ async def shutdown() -> None:
     _preview_clipper = None
     _gif_previewer = None
     _waveform_renderer = None
+    _download_delivery = None
     _settings = None
 
 
@@ -348,7 +354,7 @@ def reset() -> None:
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
-    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter
+    global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     _settings = None
     _engine = None
     _session_factory = None
@@ -375,6 +381,7 @@ def reset() -> None:
     _gif_previewer = None
     _waveform_renderer = None
     _exporter = None
+    _download_delivery = None
 
 
 def _require_init() -> None:
@@ -803,6 +810,24 @@ def get_create_export_job_use_case() -> CreateExportJob:
 
 def get_get_export_job_use_case() -> GetExportJob:
     return GetExportJob(uow=get_unit_of_work())
+
+
+def _get_download_delivery() -> IDownloadDelivery:
+    """Lazily build + memoise the download-delivery adapter (local streaming in α8.5b.1).
+
+    Wraps the process-wide object storage; cloud (signed-URL redirect) adapters replace this
+    behind the same port in α8.5b.2 with no use-case or endpoint change.
+    """
+    global _download_delivery
+    _require_init()
+    if _download_delivery is None:
+        _download_delivery = LocalStreamDelivery(_get_object_storage())
+    return _download_delivery
+
+
+def get_download_export_use_case() -> DownloadExport:
+    """Factory: the α8.5b.1 owner-facing export download use case (fresh UoW per call)."""
+    return DownloadExport(uow=get_unit_of_work(), delivery=_get_download_delivery())
 
 
 # ---------------------------------------------------------------------

@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.30-phase3-alpha8.5a` |
-| **Latest runtime tag** | `v0.4.30-phase3-alpha8.5a` |
+| **Application version** | `0.4.31-phase3-alpha8.5b1` |
+| **Latest runtime tag** | `v0.4.31-phase3-alpha8.5b1` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c, α8.4d, α8.4e, α8.5a all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1 all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -125,6 +125,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Derived previews (preview clip / GIF / waveform) | ✅ | α8.4d | enricher pipeline; versioned marker + backfill; derived media terminal |
 | Render composition — audio mixing | ✅ | α8.4e | first ADR-0043 slice; video + deterministic audio (`amix`, no DSP) |
 | Export engine (delivery encodings) | ✅ | α8.5a | delivery transform (RC5/RC6): master → `(format, quality)` delivery `MediaAsset`, same-orientation; poll worker + discrete `IExporter` |
+| Download serving (deliver artifact bytes) | ✅ | α8.5b.1 | owner-scoped `GET …/exports/{id}/download`; neutral `IDownloadDelivery` seam (`LocalStreamDelivery` now, redirect-ready); best-effort accounting |
 
 ### Invariant catalog
 
@@ -178,6 +179,16 @@ by review + tests, not the mechanical guard:
   delivery artifacts. Same master + same `(format, quality, orientation)` ⇒ a functionally
   equivalent delivery (RC6), regenerable at any time; deleting/regenerating a delivery never
   affects the master (one master → N replaceable encodings).
+- **W8.5b.1** — download serving is observational and read-only: it reads a finished delivery
+  `MediaAsset` and transfers its bytes; its only write is the `export_jobs` download accounting
+  (`download_count` / `last_downloaded_at`). It never mutates the artifact, the master, or any
+  upstream orchestration/render/export state.
+- **W8.5b.2** — delivery is a pure transfer: no encoding, transcoding, re-composition,
+  re-timing, or resize on the download path (the export engine already owns those; reinforces
+  RC5 + W8.5.3 — deliveries are replaceable byte artifacts of the canonical master).
+- **W8.5b.3** — accounting never blocks or corrupts delivery: download-count updates are
+  best-effort, non-transactional with the byte transfer, and non-retrying; a failure is
+  telemetry loss, not a user-visible error, and delivery never depends on the counter write.
 
 ---
 
@@ -221,7 +232,10 @@ the freeze was designed to preserve.
 |---|---|
 | **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
 | **α8.5a** | ✅ Export engine — delivery encodings (`ExportWorker` / `ProcessExportJob` / `IExporter`); shipped `v0.4.30` |
-| **α8.5b** | Publishing & delivery — publishing/notifications, `IObjectStorage` cloud backends (S3/R2/GCS), download-serving endpoints + CDN, downstream integrations |
+| **α8.5b.1** | ✅ Download serving — `DownloadExport` + `IDownloadDelivery` (`LocalStreamDelivery`); shipped `v0.4.31` |
+| **α8.5b.2** | Storage backends — `IObjectStorage.signed_url()` + `S3/R2/GCS/Azure` delivery adapters + CDN |
+| **α8.5b.3** | Notifications — `INotifier` + relay subscriber on `ExportJobSucceeded` (the `notifications` table already exists) |
+| **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers) |
 
 All remaining work is **downstream of the frozen orchestration platform** — new
 capabilities composed on stable seams, not redesigns of the workflow engine.

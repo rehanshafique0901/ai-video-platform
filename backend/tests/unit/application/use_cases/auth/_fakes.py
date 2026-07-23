@@ -1932,6 +1932,20 @@ class FakeExportJobRepository(IExportJobRepository):
         self._jobs[export_job_id] = updated
         return updated
 
+    async def record_download(self, export_job_id: UUID) -> ExportJob | None:
+        # Telemetry only — no version bump (W8.5b.3); guarded on 'succeeded'.
+        job = self._jobs.get(export_job_id)
+        if job is None or job.status != ExportStatus.SUCCEEDED.value:
+            return None
+        updated = replace(
+            job,
+            download_count=job.download_count + 1,
+            last_downloaded_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[export_job_id] = updated
+        return updated
+
 
 # ---- Event outbox repository ------------------------------------------
 
