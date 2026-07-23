@@ -72,9 +72,14 @@ class FakeRenderer(IRenderer):
         self._output = output
         self._error = error
         self.specs: list[RenderSpec] = []
+        # Captured while the temp workspace still exists (it is torn down after render).
+        self.audio_bytes: list[bytes] = []
+        self.input_bytes: list[bytes] = []
 
     async def render(self, spec: RenderSpec) -> RenderResult:
         self.specs.append(spec)
+        self.input_bytes = [Path(i.path).read_bytes() for i in spec.inputs]
+        self.audio_bytes = [Path(a.path).read_bytes() for a in spec.audio_inputs]
         if self._error is not None:
             raise self._error
         Path(spec.output_path).write_bytes(self._output)
@@ -132,7 +137,34 @@ class _Fixture:
         )
         return asset.id
 
-    async def seed_timeline(self, asset_ids: list[UUID]) -> UUID:
+    async def seed_audio_asset(self, key: str, data: bytes = b"AUD") -> UUID:
+        self.storage.objects[key] = data
+        asset = await self.media.add(
+            tenant_id=self.tenant,
+            owner_user_id=self.owner,
+            kind="audio",
+            source="generated",
+            storage_backend="local",
+            storage_bucket="generated",
+            storage_key=key,
+            mime_type="audio/mpeg",
+            size_bytes=len(data),
+            checksum_sha256=b"\x00" * 32,
+            project_id=self.project_id,
+            scene_id=None,
+            prompt_id=None,
+            model_id=None,
+            provider=None,
+            width=None,
+            height=None,
+            duration_seconds=5.0,
+            source_metadata={},
+        )
+        return asset.id
+
+    async def seed_timeline(
+        self, asset_ids: list[UUID], *, muted_video: bool = False, volume: float = 1.0
+    ) -> UUID:
         timeline = await self.timeline_repo.add(
             project_id=self.project_id,
             aspect_ratio="16:9",
@@ -145,7 +177,7 @@ class _Fixture:
             z_index=0,
             name="V1",
             locked=False,
-            muted=False,
+            muted=muted_video,
         )
         for i, asset_id in enumerate(asset_ids):
             await self.timeline_repo.add_clip(
@@ -155,11 +187,41 @@ class _Fixture:
                 end_seconds=float(i) + 1.0,
                 source_start_seconds=0.0,
                 source_end_seconds=1.0,
-                volume=1.0,
+                volume=volume,
                 locked=False,
             )
         self.timeline_id = timeline.id
         return timeline.id
+
+    async def add_audio_track(
+        self,
+        timeline_id: UUID,
+        asset_id: UUID,
+        *,
+        start_seconds: float = 0.0,
+        volume: float = 1.0,
+        muted: bool = False,
+        z_index: int = 1,
+    ) -> UUID:
+        track = await self.timeline_repo.add_track(
+            timeline_id=timeline_id,
+            kind="audio",
+            z_index=z_index,
+            name=f"A{z_index}",
+            locked=False,
+            muted=muted,
+        )
+        await self.timeline_repo.add_clip(
+            track_id=track.id,
+            media_asset_id=asset_id,
+            start_seconds=start_seconds,
+            end_seconds=start_seconds + 1.0,
+            source_start_seconds=0.0,
+            source_end_seconds=1.0,
+            volume=volume,
+            locked=False,
+        )
+        return track.id
 
     async def seed_job(self, timeline_id: UUID, *, status: str = "queued") -> UUID:
         job = await self.render_jobs.add(
@@ -325,3 +387,96 @@ async def test_locked_job_is_skipped() -> None:
     assert result.status == "skipped"
     assert result.reason == "locked"
     assert renderer.specs == []
+
+
+# --- α8.4e: audio composition ------------------------------------------------
+
+
+async def test_video_only_timeline_has_no_audio_inputs() -> None:
+    # Fork F: a timeline with no audio tracks → no audio inputs (renderer stays silent).
+    fx = _Fixture()
+    asset_id = await fx.seed_video_asset("srcA")
+    timeline_id = await fx.seed_timeline([asset_id])
+    job_id = await fx.seed_job(timeline_id)
+    renderer = FakeRenderer()
+
+    await _process(fx, renderer, job_id)
+
+    spec = renderer.specs[0]
+    assert spec.audio_inputs == ()
+    assert len(spec.inputs) == 1
+    assert spec.inputs[0].muted is False
+    assert spec.inputs[0].volume == 1.0
+
+
+async def test_clip_volume_and_track_mute_flow_to_video_render_input() -> None:
+    # A video clip carries its clip.volume; a muted video track sets muted=True
+    # (video is still composed — mute only drops the clip's own audio).
+    fx = _Fixture()
+    asset_id = await fx.seed_video_asset("srcA")
+    timeline_id = await fx.seed_timeline([asset_id], muted_video=True, volume=0.5)
+    job_id = await fx.seed_job(timeline_id)
+    renderer = FakeRenderer()
+
+    result = await _process(fx, renderer, job_id)
+
+    assert result.status == "rendered"
+    inp = renderer.specs[0].inputs[0]
+    assert inp.muted is True
+    assert inp.volume == 0.5
+
+
+async def test_audio_track_clip_becomes_audio_input() -> None:
+    # An audio-kind track's clip is overlaid as a dedicated AudioInput at its offset.
+    fx = _Fixture()
+    video_id = await fx.seed_video_asset("srcV")
+    music_id = await fx.seed_audio_asset("srcMusic")
+    timeline_id = await fx.seed_timeline([video_id])
+    await fx.add_audio_track(timeline_id, music_id, start_seconds=2.0, volume=0.8)
+    job_id = await fx.seed_job(timeline_id)
+    renderer = FakeRenderer()
+
+    result = await _process(fx, renderer, job_id)
+
+    assert result.status == "rendered"
+    spec = renderer.specs[0]
+    assert len(spec.inputs) == 1  # video unchanged
+    assert len(spec.audio_inputs) == 1
+    audio = spec.audio_inputs[0]
+    assert audio.start_seconds == 2.0
+    assert audio.volume == 0.8
+    # W8.4b.2: the audio input is materialized from the asset's storage bytes.
+    assert renderer.audio_bytes == [b"AUD"]
+
+
+async def test_muted_audio_track_is_skipped() -> None:
+    # A muted audio track contributes nothing (neither video nor audio).
+    fx = _Fixture()
+    video_id = await fx.seed_video_asset("srcV")
+    music_id = await fx.seed_audio_asset("srcMusic")
+    timeline_id = await fx.seed_timeline([video_id])
+    await fx.add_audio_track(timeline_id, music_id, muted=True)
+    job_id = await fx.seed_job(timeline_id)
+    renderer = FakeRenderer()
+
+    await _process(fx, renderer, job_id)
+
+    assert renderer.specs[0].audio_inputs == ()
+
+
+async def test_audio_inputs_are_ordered_deterministically() -> None:
+    # Multiple audio-track clips are ordered by (start_seconds, media_asset_id).
+    fx = _Fixture()
+    video_id = await fx.seed_video_asset("srcV")
+    late = await fx.seed_audio_asset("srcLate")
+    early = await fx.seed_audio_asset("srcEarly")
+    timeline_id = await fx.seed_timeline([video_id])
+    await fx.add_audio_track(timeline_id, late, start_seconds=5.0, z_index=1)
+    await fx.add_audio_track(timeline_id, early, start_seconds=1.0, z_index=2)
+    job_id = await fx.seed_job(timeline_id)
+    renderer = FakeRenderer()
+
+    await _process(fx, renderer, job_id)
+
+    starts = [a.start_seconds for a in renderer.specs[0].audio_inputs]
+    assert starts == [1.0, 5.0]

@@ -40,6 +40,7 @@ import structlog
 
 from app.application.interfaces.object_storage import IObjectStorage, ObjectStorageError
 from app.application.interfaces.renderer import (
+    AudioInput,
     IRenderer,
     RenderError,
     RenderInput,
@@ -73,6 +74,8 @@ class ProcessRenderJobResult:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedClip:
+    """A resolved video-track clip (contributes video + its own synced audio)."""
+
     media_asset_id: UUID
     storage_backend: str
     storage_bucket: str
@@ -80,6 +83,22 @@ class _ResolvedClip:
     source_start_seconds: float
     source_end_seconds: float
     start_seconds: float
+    volume: float  # α8.4e: clip audio gain
+    muted: bool  # α8.4e: owning track's mute flag
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAudio:
+    """A resolved audio-track clip (music / voiceover) overlaid on the composition (α8.4e)."""
+
+    media_asset_id: UUID
+    storage_backend: str
+    storage_bucket: str
+    storage_key: str
+    source_start_seconds: float
+    source_end_seconds: float
+    start_seconds: float
+    volume: float
 
 
 class ProcessRenderJob:
@@ -163,8 +182,8 @@ class ProcessRenderJob:
         tenant_id: UUID,
         owner_user_id: UUID,
     ) -> ProcessRenderJobResult:
-        # Phase 2a — resolve the Timeline into ordered, storage-addressable video clips.
-        resolved = await self._resolve_clips(
+        # Phase 2a — resolve the Timeline into ordered video clips + audio-track clips.
+        resolved, audio_resolved = await self._resolve_composition(
             timeline_id=timeline_id, tenant_id=tenant_id, owner_user_id=owner_user_id
         )
         if not resolved:
@@ -175,21 +194,27 @@ class ProcessRenderJob:
             tmp_path = Path(tmp)
             inputs: list[RenderInput] = []
             for i, clip in enumerate(resolved):
-                if clip.storage_backend != self._storage.backend or (
-                    clip.storage_bucket != self._storage.bucket
-                ):
-                    raise RenderError(
-                        "source media is not in the render storage location "
-                        f"({clip.storage_backend}/{clip.storage_bucket})"
-                    )
-                data = await self._storage.get(key=clip.storage_key)
-                src = tmp_path / f"in_{i:04d}"
-                await asyncio.to_thread(src.write_bytes, data)
+                src = await self._materialize(clip, tmp_path / f"in_{i:04d}")
                 inputs.append(
                     RenderInput(
-                        path=str(src),
+                        path=src,
                         source_start_seconds=clip.source_start_seconds,
                         source_end_seconds=clip.source_end_seconds,
+                        volume=clip.volume,
+                        muted=clip.muted,
+                    )
+                )
+
+            audio_inputs: list[AudioInput] = []
+            for k, aclip in enumerate(audio_resolved):
+                src = await self._materialize(aclip, tmp_path / f"aud_{k:04d}")
+                audio_inputs.append(
+                    AudioInput(
+                        path=src,
+                        source_start_seconds=aclip.source_start_seconds,
+                        source_end_seconds=aclip.source_end_seconds,
+                        start_seconds=aclip.start_seconds,
+                        volume=aclip.volume,
                     )
                 )
 
@@ -199,6 +224,7 @@ class ProcessRenderJob:
                     inputs=tuple(inputs),
                     output_path=str(out_path),
                     container=_OUTPUT_CONTAINER,
+                    audio_inputs=tuple(audio_inputs),
                 )
             )
             output_bytes = await asyncio.to_thread(Path(result.output_path).read_bytes)
@@ -258,41 +284,93 @@ class ProcessRenderJob:
             output_media_asset_id=output_media_asset_id,
         )
 
-    async def _resolve_clips(
+    async def _resolve_composition(
         self, *, timeline_id: UUID, tenant_id: UUID, owner_user_id: UUID
-    ) -> list[_ResolvedClip]:
-        """Read the Timeline and resolve its video clips to storage coordinates.
+    ) -> tuple[list[_ResolvedClip], list[_ResolvedAudio]]:
+        """Read the Timeline and resolve its video clips + audio-track clips.
 
-        α8.4b baseline (Fork E): the composition is the timeline's *video* clips in
-        chronological order. Clips with no ``media_asset_id``, an unresolved/foreign
-        asset, or a non-video asset kind are skipped (image/audio compositing is
-        α8.4c). Ordered by ``(start_seconds, media_asset_id)`` — a total order.
+        Video (α8.4b, unchanged): clips resolving to a *video* asset, in chronological
+        order ``(start_seconds, media_asset_id)`` — a total order (Fork D1: sequential
+        concat). Each carries ``clip.volume`` and its owning track's ``muted`` flag so
+        the clip's own audio can travel with its segment (α8.4e).
+
+        Audio (α8.4e): clips on **audio-kind** tracks that are **not muted**, resolving
+        to an audio- or video-bearing asset, overlaid at ``clip.start_seconds``. Ordered
+        by ``(start_seconds, media_asset_id)`` for a deterministic input order.
+
+        Clips with no ``media_asset_id`` or an unresolved/foreign asset are skipped.
         """
         async with self._uow:
+            tracks = await self._uow.timeline.list_tracks(timeline_id)
+            track_by_id = {t.id: t for t in tracks}
             clips_by_track = await self._uow.timeline.list_clips_for_timeline(timeline_id)
-            all_clips = [c for clips in clips_by_track.values() for c in clips]
+
             resolved: list[_ResolvedClip] = []
-            for clip in all_clips:
-                if clip.media_asset_id is None:
-                    continue
-                asset = await self._uow.media.get_owned(
-                    clip.media_asset_id, tenant_id, owner_user_id
-                )
-                if asset is None or asset.kind != "video":
-                    continue
-                resolved.append(
-                    _ResolvedClip(
-                        media_asset_id=asset.id,
-                        storage_backend=asset.storage_backend,
-                        storage_bucket=asset.storage_bucket,
-                        storage_key=asset.storage_key,
-                        source_start_seconds=clip.source_start_seconds,
-                        source_end_seconds=clip.source_end_seconds,
-                        start_seconds=clip.start_seconds,
+            audio_resolved: list[_ResolvedAudio] = []
+            for track_id, clips in clips_by_track.items():
+                track = track_by_id.get(track_id)
+                is_audio_track = track is not None and track.kind == "audio"
+                track_muted = track.muted if track is not None else False
+                for clip in clips:
+                    if clip.media_asset_id is None:
+                        continue
+                    asset = await self._uow.media.get_owned(
+                        clip.media_asset_id, tenant_id, owner_user_id
                     )
-                )
+                    if asset is None:
+                        continue
+                    if is_audio_track:
+                        # Muted audio track contributes nothing (neither video nor audio).
+                        if track_muted or asset.kind not in ("audio", "video"):
+                            continue
+                        audio_resolved.append(
+                            _ResolvedAudio(
+                                media_asset_id=asset.id,
+                                storage_backend=asset.storage_backend,
+                                storage_bucket=asset.storage_bucket,
+                                storage_key=asset.storage_key,
+                                source_start_seconds=clip.source_start_seconds,
+                                source_end_seconds=clip.source_end_seconds,
+                                start_seconds=clip.start_seconds,
+                                volume=clip.volume,
+                            )
+                        )
+                        continue
+                    if asset.kind != "video":
+                        continue
+                    resolved.append(
+                        _ResolvedClip(
+                            media_asset_id=asset.id,
+                            storage_backend=asset.storage_backend,
+                            storage_bucket=asset.storage_bucket,
+                            storage_key=asset.storage_key,
+                            source_start_seconds=clip.source_start_seconds,
+                            source_end_seconds=clip.source_end_seconds,
+                            start_seconds=clip.start_seconds,
+                            volume=clip.volume,
+                            muted=track_muted,
+                        )
+                    )
         resolved.sort(key=lambda c: (c.start_seconds, str(c.media_asset_id)))
-        return resolved
+        audio_resolved.sort(key=lambda a: (a.start_seconds, str(a.media_asset_id)))
+        return resolved, audio_resolved
+
+    async def _materialize(self, clip: _ResolvedClip | _ResolvedAudio, dest: Path) -> str:
+        """Fetch a resolved clip's bytes from storage into ``dest``; return its path.
+
+        Enforces that the source lives in the render storage location (W8.4b.2: only
+        ``MediaAsset`` coordinates are consumed, never provider URLs).
+        """
+        if clip.storage_backend != self._storage.backend or (
+            clip.storage_bucket != self._storage.bucket
+        ):
+            raise RenderError(
+                "source media is not in the render storage location "
+                f"({clip.storage_backend}/{clip.storage_bucket})"
+            )
+        data = await self._storage.get(key=clip.storage_key)
+        await asyncio.to_thread(dest.write_bytes, data)
+        return str(dest)
 
     async def _register_output(
         self,

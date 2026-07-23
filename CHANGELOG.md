@@ -6,6 +6,69 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.4e — Render Composition — audio mixing (2026-07-24)
+
+The **first render-composition slice** and the first feature implemented entirely under
+**ADR-0043** (render composition boundary, RC1–RC6) while staying completely outside the
+**ADR-0042** frozen orchestration surface. It extends rendering from *video-only
+composition* to **video + deterministic audio composition** using **already-authorable**
+Timeline state — audio-kind tracks, `clip.volume`, `track.muted` — so **zero migration**.
+The α8.4b renderer discarded all audio (`concat …:a=0`); α8.4e teaches the FFmpeg adapter
+to mix: each video clip's own audio travels with its segment (at `clip.volume`, silenced
+if its track is `muted`), and dedicated **audio-track** clips (music / voiceover) are
+trimmed, gained, delayed to their `start_seconds` (`adelay`), and combined with the video
+bed via a **pure** `amix` (`normalize=0` — no implicit gain staging). A timeline with no
+authored audio renders a silent video, exactly as α8.4b (Fork F). Transitions / crossfades
+/ color grading / effects / subtitle burn-in are deferred to **α8.4f** — they require the
+α6.4 Timeline **authoring** write paths (`transition_in_id` / `transition_out_id` /
+`effects` / subtitles), which remain intentionally deferred. Freeze guard green, **zero
+override markers**. Runtime capability change → version bump to `0.4.29-phase3-alpha8.4e`.
+
+#### Added
+- **Neutral render-contract extension (Fork C1 — extend the contract, never reach back
+  into the Timeline)** — `RenderInput` gains `volume` + `muted` (a video clip's own audio);
+  new `AudioInput` DTO (`path`, `source_start_seconds`, `source_end_seconds`,
+  `start_seconds`, `volume`) for dedicated audio-track clips; `RenderSpec` gains
+  `audio_inputs: tuple[AudioInput, ...]`. The renderer receives everything it needs as
+  immutable composition inputs (RC1/RC2/RC3).
+- **`FfmpegRenderer` audio graph** — per-clip audio *bed* concatenated in video order
+  (real audio where present at `volume`, silence-filled otherwise so the bed stays synced),
+  audio-track overlays via `atrim`/`volume`/`adelay`, combined with
+  `amix=…:duration=first:normalize=0`; audio-bearing streams normalized to a fixed format
+  (stereo / 44.1 kHz / fltp) for deterministic mixing. `ffprobe`-based audio-stream
+  detection decides whether a source contributes audio; **no** audio → `a=0` (α8.4b path).
+  Configuration-blind (W8.1.1 — reuses the α8.4b binary config).
+- **`ProcessRenderJob` composition resolve** — `_resolve_clips` → `_resolve_composition`,
+  now reading `list_tracks` for each track's `kind` + `muted`: video clips carry
+  `clip.volume` + owning-track `muted`; **audio-kind, non-muted** tracks contribute
+  `AudioInput`s (ordered by `(start_seconds, media_asset_id)`). Shared `_materialize`
+  helper fetches both from storage (W8.4b.2 — only `MediaAsset` coordinates).
+- **Tests** — video-only timeline → no audio inputs (silent, Fork F); `clip.volume` +
+  muted video track → `RenderInput.volume`/`muted`; audio-track clip → `AudioInput` at its
+  offset (materialized from storage); muted audio track skipped; deterministic audio
+  ordering; renderer audio-trim / negative-start validation (no binary); plus **opt-in**
+  real-FFmpeg **audio-mix** roundtrip (output has an audio stream) and **silent-timeline**
+  roundtrip (output has none), skipped without the binary.
+
+#### Invariants
+- **W8.4e.1 (new) — Audio composition is a pure function of Timeline audio state.** The
+  rendered audio is determined solely by the Timeline's audio state (tracks, clips, `muted`
+  flags, `volume` values) and the `RenderSpec`. The renderer introduces **no** implicit
+  gain staging, normalization, dynamic processing (ducking / side-chain / compression),
+  fades, or hidden audio sources — a deterministic weighted sum of the authored inputs.
+  (Reinforces RC3 + RC6; enforced concretely by `amix …:normalize=0`.)
+- **W8.4b.1 / W8.4b.2** — carry over unchanged: a pure Timeline → Media transform
+  consuming only `MediaAsset` ids + Timeline data; never provider outputs/URLs,
+  checkpoints, or orchestration state.
+
+#### Unchanged (freeze holds)
+- No migrations (audio tracks / `clip.volume` / `track.muted` already exist and are
+  authorable; the change is an FFmpeg filter-graph extension + additive Timeline reads +
+  additive neutral-DTO fields). No frozen orchestration path changed (ADR-0042 Gate 1).
+  Every change satisfies ADR-0043 RC1–RC6 (Gate 2). Freeze guard green, **zero override
+  markers**. Absolute-time placement (Fork D deferred) and transitions/effects/color
+  grading/subtitles deferred to α8.4f.
+
 ### Phase 3 Slice α8.4d — Derived-Preview Enrichment — preview clip + GIF + waveform (2026-07-24)
 
 Extends the α8.4c enrichment seam with the remaining **derived-preview** artifacts. The

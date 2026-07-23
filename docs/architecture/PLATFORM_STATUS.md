@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.28-phase3-alpha8.4d` |
-| **Latest runtime tag** | `v0.4.28-phase3-alpha8.4d` |
+| **Application version** | `0.4.29-phase3-alpha8.4e` |
+| **Latest runtime tag** | `v0.4.29-phase3-alpha8.4e` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c, α8.4d all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c, α8.4d, α8.4e all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -123,6 +123,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Render engine | ✅ | α8.4b | Timeline → FFmpeg → output `MediaAsset` |
 | Media enrichment (thumbnail + metadata) | ✅ | α8.4c | derived-media poll worker; pure function of the parent `MediaAsset` |
 | Derived previews (preview clip / GIF / waveform) | ✅ | α8.4d | enricher pipeline; versioned marker + backfill; derived media terminal |
+| Render composition — audio mixing | ✅ | α8.4e | first ADR-0043 slice; video + deterministic audio (`amix`, no DSP) |
 
 ### Invariant catalog
 
@@ -161,6 +162,11 @@ by review + tests, not the mechanical guard:
   as the source of further enrichment; enrichment operates exclusively on primary
   generated/rendered assets. Derived artifacts are observational outputs only (the
   derivation graph is a shallow tree, never a cycle).
+- **W8.4e.1** — audio composition is a pure function of Timeline audio state (tracks,
+  clips, `muted` flags, `volume` values) + `RenderSpec`. The renderer introduces no
+  implicit gain staging, normalization, dynamic processing (ducking/side-chain/
+  compression), fades, or hidden audio sources — a deterministic weighted sum of the
+  authored inputs (reinforces ADR-0043 RC3 + RC6; enforced by `amix …:normalize=0`).
 
 ---
 
@@ -198,7 +204,7 @@ the freeze was designed to preserve.
 
 | Slice | Scope |
 |---|---|
-| **α8.4e** | Render composition enhancements — audio mixing, transitions/effects, FFmpeg quality tuning (changes *what the render is*, not a transform of an existing asset) |
+| **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
 | **α8.5** | Export & publishing — `export_jobs`, storage providers, publishing/notifications, downstream integrations |
 
 All remaining work is **downstream of the frozen orchestration platform** — new

@@ -30,20 +30,52 @@ class RenderError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class RenderInput:
-    """One ordered source segment of the composition (a resolved, trimmed clip)."""
+    """One ordered source segment of the composition (a resolved, trimmed clip).
+
+    α8.4e adds the clip's **audio** attributes. The clip's own audio travels with its
+    video segment in the sequential concat (Fork D1): it is included at ``volume`` gain,
+    unless ``muted`` (the owning track's mute flag) — a video clip that contributes no
+    audio is silence-filled for its duration so the audio bed stays synced to the video.
+    """
 
     path: str  # local filesystem path to the materialized source media
     source_start_seconds: float  # trim window start into the source (>= 0)
     source_end_seconds: float  # trim window end (> start)
+    volume: float = 1.0  # video-clip audio gain (0..4); 0 => silent
+    muted: bool = False  # owning track muted => clip contributes no audio
+
+
+@dataclass(frozen=True, slots=True)
+class AudioInput:
+    """A dedicated audio-track clip (music / voiceover) overlaid on the composition (α8.4e).
+
+    Unlike a :class:`RenderInput` (whose audio travels with its video segment), an
+    audio-track clip is **mixed over** the composed video, positioned at ``start_seconds``
+    on the output timeline (``adelay``). Placement is inherent to overlaying audio and
+    does not alter the video's sequential-concat semantics (Fork D1).
+    """
+
+    path: str  # local filesystem path to the materialized audio-bearing media
+    source_start_seconds: float  # trim window start into the source (>= 0)
+    source_end_seconds: float  # trim window end (> start)
+    start_seconds: float  # placement offset on the output timeline (>= 0)
+    volume: float = 1.0  # audio gain (0..4); 0 => silent
 
 
 @dataclass(frozen=True, slots=True)
 class RenderSpec:
-    """The neutral render request: ordered inputs → one output file."""
+    """The neutral render request: ordered video inputs (+ optional audio) → one output.
+
+    ``inputs`` are the ordered video segments (concatenated, Fork D1). ``audio_inputs``
+    are dedicated audio-track clips mixed over the composition. The rendered audio is a
+    **deterministic weighted sum** of these authored inputs — no normalization, ducking,
+    or other implicit processing (invariant **W8.4e.1**).
+    """
 
     inputs: tuple[RenderInput, ...]
     output_path: str  # local filesystem path the engine must write
     container: str = "mp4"
+    audio_inputs: tuple[AudioInput, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
