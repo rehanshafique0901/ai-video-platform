@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.26-phase3-alpha8.4b` |
-| **Latest runtime tag** | `v0.4.26-phase3-alpha8.4b` |
+| **Application version** | `0.4.27-phase3-alpha8.4c` |
+| **Latest runtime tag** | `v0.4.27-phase3-alpha8.4c` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a, α8.4b, α8.4c all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -121,6 +121,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Webhook completion ingress | ✅ | α8.3b | thin second ingress → same `complete()` |
 | Generated media ingestion | ✅ | α8.4a | download / store / register `MediaAsset` |
 | Render engine | ✅ | α8.4b | Timeline → FFmpeg → output `MediaAsset` |
+| Media enrichment (thumbnail + metadata) | ✅ | α8.4c | derived-media poll worker; pure function of the parent `MediaAsset` |
 
 ### Invariant catalog
 
@@ -145,6 +146,16 @@ by review + tests, not the mechanical guard:
   status, or the completion lifecycle.
 - **W8.4b.2** — the renderer consumes only `MediaAsset` identifiers + Timeline data;
   never provider outputs, URLs, checkpoints, request IDs, provider job IDs, or webhooks.
+- **W8.4c.1** — media enrichment is observational and downstream; it may derive
+  artifacts + augment the owning `MediaAsset`'s `source_metadata`, but never mutates
+  orchestration state, checkpoints, provider state, workflow/render lifecycle,
+  Timeline definitions, or renderer inputs.
+- **W8.4c.2** — the enricher consumes only `MediaAsset` bytes + identifiers; never
+  provider outputs, URLs, checkpoints, request IDs, provider job IDs, webhooks, or
+  Timeline internals.
+- **W8.4c.3** — derived media is reproducible from its parent `MediaAsset` alone;
+  enrichment never depends on provider payloads, checkpoints, Timeline state, or
+  render-job history — `MediaAsset → Thumbnail` is a pure function of the parent.
 
 ---
 
@@ -174,7 +185,7 @@ the freeze was designed to preserve.
 
 | Slice | Scope |
 |---|---|
-| **α8.4c** | Render enhancements — thumbnails, previews, richer metadata (duration/dimensions/codec enrichment), waveform generation, audio mixing, transition/effect enhancements, FFmpeg quality improvements |
+| **α8.4d** | Media/render enhancements — previews, GIF previews, waveform generation, audio mixing, transition/effect enhancements, FFmpeg quality improvements |
 | **α8.5** | Export & publishing — `export_jobs`, storage providers, publishing/notifications, downstream integrations |
 
 All remaining work is **downstream of the frozen orchestration platform** — new

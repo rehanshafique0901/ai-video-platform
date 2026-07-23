@@ -1274,6 +1274,18 @@ class FakeMediaRepository(IMediaRepository):
                 return media
         return None
 
+    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAsset]:
+        candidates = [
+            m
+            for m in self._media.values()
+            if m.kind == "video"
+            and m.source == "generated"
+            and getattr(m, "deleted_at", None) is None
+            and not (isinstance(m.source_metadata, dict) and "enrichment" in m.source_metadata)
+        ]
+        candidates.sort(key=lambda m: (m.created_at, m.id))
+        return candidates[:limit]
+
     async def update_owned(
         self,
         media_id: UUID,

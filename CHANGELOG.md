@@ -6,6 +6,80 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.4c — Media Enrichment — generated video → thumbnail + probed metadata (2026-07-24)
+
+The platform's **first *derived-media* capability**. A new **poll worker** (mirroring the α8.3
+`CompletionEngine.poll_once` and the α8.4b `RenderWorker.run_once`) scans the **media table** for
+generated video `MediaAsset`s that have not yet been enriched, and for each one: claims it under a
+`media_enrichment:<id>` lease, **materializes** the source bytes from `IObjectStorage`, extracts one
+thumbnail frame + probes the source bitrate via a new neutral `IThumbnailer` port (FFmpeg adapter),
+stores the thumbnail under a **deterministic key**, registers a derived `MediaAsset(kind="image",
+source="generated")` cross-linked to the parent, and augments the parent's `source_metadata` with an
+`enrichment` marker (`{thumbnail_media_asset_id, bitrate, enriched_at}`) — which also removes it from
+the claim scan. Enrichment is **observational + downstream** and a **pure function of the parent
+`MediaAsset`** (new invariants **W8.4c.1** + **W8.4c.2** + **W8.4c.3**): it never reads or mutates
+orchestration state, checkpoints, provider state, workflow/render lifecycle, Timeline definitions, or
+render-job history. Per the sign-off it runs behind a **dedicated worker (Fork B → B2)**, never a relay
+subscriber — *PublisherPort subscribers orchestrate work; they do not perform media processing* — so
+FFmpeg never runs on the relay fan-out path. The freeze guard stayed green with **zero override
+markers**. Runtime capability change → version bump to `0.4.27-phase3-alpha8.4c`. Previews / GIF
+previews / waveform / audio mixing / transition improvements / FFmpeg quality tuning are deferred to
+α8.4d (Fork A scope split).
+
+#### Added
+- **`IThumbnailer` port + `Thumbnail` / `ThumbnailError`** (`app/application/interfaces/thumbnailer.py`)
+  — a backend-neutral "extract one still frame + probe scalars from a video" seam, kept **separate from
+  `IRenderer`** (Fork D): rendering is `Timeline → Video`, thumbnailing is `Video → Image`.
+- **`FfmpegThumbnailer`** (`app/infrastructure/render/ffmpeg_thumbnailer.py`) — shells out to `ffmpeg`
+  (`-ss … -frames:v 1`) + `ffprobe` (dimensions + `format.bit_rate`); **configuration-blind** (W8.1.1 —
+  reuses the α8.4b binary paths + timeout); any non-zero exit / timeout / missing output / launch failure
+  maps to a neutral `ThumbnailError`.
+- **`EnrichGeneratedMedia` use case** (`app/application/use_cases/media/enrich_generated_media.py`) — the
+  worker body for a single asset: lease → re-read the parent (must be a live, un-enriched generated
+  video) → materialize + thumbnail + probe **outside any DB transaction** → register the derived
+  thumbnail `MediaAsset` → augment the parent's `source_metadata`. Idempotent via a **deterministic**
+  thumbnail key in `(tenant, parent_media_asset_id)`: a re-run hits the `media_assets` storage-key
+  uniqueness → `ConflictError` → the existing thumbnail is recovered via `get_by_storage_coords`, never
+  duplicated. Transient FFmpeg/storage failures leave the parent un-enriched so a later scan retries.
+- **`MediaEnrichmentWorker.run_once()`** (`app/application/use_cases/media/media_enrichment_worker.py`) —
+  the enrichment poll ingress (Fork B → B2): one scan claims the oldest un-enriched generated videos
+  (FIFO, capped by `enrichment_batch_size`) and settles each independently under its own lease.
+- **`IMediaRepository.list_unenriched_generated_videos(*, limit)`** — additive, **non-frozen**,
+  owner-agnostic claim scan: `kind='video' AND source='generated' AND deleted_at IS NULL AND NOT
+  (source_metadata ? 'enrichment')`, oldest first, capped. The set **shrinks** as assets are marked
+  enriched — no new column, no new table.
+- **Config** — `enrichment_thumbnail_at_seconds` (default `1.0`), `enrichment_batch_size` (default `10`);
+  FFmpeg paths/timeout reused from α8.4b.
+- **Container wiring** — `FfmpegThumbnailer` built **lazily** on first use (cleared on `shutdown`/`reset`);
+  `get_enrich_generated_media_use_case()` + `get_media_enrichment_worker()` factories (fresh UoW per call);
+  object storage reused from α8.4a.
+- **Tests** — unit coverage for `EnrichGeneratedMedia` (happy path: derived thumbnail + parent metadata
+  augmented; enriched asset drops out of the claim scan; idempotent re-run recovers the thumbnail;
+  already-enriched / non-video / unsupported-storage no-ops; locked skip; thumbnail failure leaves the
+  asset un-enriched), `MediaEnrichmentWorker.run_once` (drain / batch cap / empty scan), and the
+  `FfmpegThumbnailer` (validation + launch-failure mapping, plus an **opt-in** real-ffmpeg frame/probe
+  roundtrip skipped when the binary is absent).
+
+#### Invariants
+- **W8.4c.1 (strengthened)** — media enrichment is **observational and downstream**. It may derive
+  additional media artifacts and augment the owning `MediaAsset`'s `source_metadata`, but it **never**
+  mutates orchestration state, checkpoints, provider state, workflow/render lifecycle, Timeline
+  definitions, or renderer inputs. (Prevents enrichment from becoming "smart rendering.")
+- **W8.4c.2** — the enricher consumes **only** `MediaAsset` bytes + identifiers. Never provider outputs,
+  URLs, checkpoints, request IDs, provider job IDs, webhook payloads, or Timeline internals. (Mirror of
+  W8.4b.2.)
+- **W8.4c.3** — derived media is **reproducible from its parent `MediaAsset` alone**. Enrichment never
+  depends on provider payloads, workflow checkpoints, Timeline state, or render-job history once the
+  parent exists — `MediaAsset → Thumbnail` is a **pure function** of the parent, so thumbnails can be
+  regenerated years later (e.g. after an FFmpeg upgrade) without the workflow that produced the video.
+
+#### Unchanged (freeze holds)
+- No migrations (thumbnails are ordinary `media_assets` rows; enrichment scalars + the marker are JSONB
+  `source_metadata`; the new repository method is additive). No frozen orchestration path changed
+  (`AdvanceWorkflowRun`, `ResumeWorkflowRun`, `CompletionEngine`, dispatcher, provider ports, usage
+  recorder, lock manager, workflow registry). No `_paused` / checkpoint contract change. Freeze guard
+  green, **zero override markers** (α8.4c gating criterion).
+
 ### Phase 3 Slice α8.4b — Render Engine — Timeline → FFmpeg → output MediaAsset (2026-07-23)
 
 The platform's **first media-*transforming* capability**. A new **poll worker** (mirroring the α8.3

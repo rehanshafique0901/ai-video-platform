@@ -9,5 +9,6 @@ use-case change.
 from __future__ import annotations
 
 from app.infrastructure.render.ffmpeg_renderer import FfmpegRenderer
+from app.infrastructure.render.ffmpeg_thumbnailer import FfmpegThumbnailer
 
-__all__ = ["FfmpegRenderer"]
+__all__ = ["FfmpegRenderer", "FfmpegThumbnailer"]

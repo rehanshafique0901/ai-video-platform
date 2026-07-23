@@ -197,6 +197,20 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Media enrichment (α8.4c) ---------------------------------------------
+    # The enrichment worker derives a thumbnail + scalar metadata for generated
+    # videos via IThumbnailer (FFmpeg adapter, reusing the render binary config).
+    enrichment_thumbnail_at_seconds: float = Field(
+        default=1.0,
+        description="Timestamp (seconds) the thumbnail frame is extracted from.",
+        ge=0,
+    )
+    enrichment_batch_size: int = Field(
+        default=10,
+        description="Max generated videos a single MediaEnrichmentWorker.run_once() claims.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

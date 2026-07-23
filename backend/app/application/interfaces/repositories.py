@@ -821,6 +821,20 @@ class IMediaRepository(ABC):
         ...
 
     @abstractmethod
+    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAsset]:
+        """Return live generated **video** assets not yet enriched, oldest first (α8.4c).
+
+        The media-enrichment poll ingress (mirrors ``list_paused`` / ``list_claimable``):
+        ``kind='video' AND source='generated' AND deleted_at IS NULL AND NOT
+        (source_metadata ? 'enrichment')``, ordered ``created_at ASC, id ASC``, capped
+        at ``limit``. Owner-agnostic (server-side worker). The ``enrichment`` marker
+        key is written onto the parent's ``source_metadata`` when enrichment settles,
+        so an asset **drops out** of this set once processed — the claimable set is
+        bounded and shrinking. Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
     async def get_by_storage_coords(
         self,
         *,

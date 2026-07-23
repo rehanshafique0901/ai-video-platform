@@ -154,6 +154,23 @@ class MediaRepository(IMediaRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    async def list_unenriched_generated_videos(self, *, limit: int) -> list[MediaAssetEntity]:
+        # α8.4c enrichment claim scan: live generated videos without the
+        # ``enrichment`` marker in source_metadata (the JSONB ``?`` key test), oldest
+        # first. Owner-agnostic (server-side worker); the set shrinks as assets are
+        # marked enriched. Total order (created_at, id) ASC.
+        stmt = (
+            select(MediaAssetRow)
+            .where(MediaAssetRow.kind == "video")
+            .where(MediaAssetRow.source == "generated")
+            .where(MediaAssetRow.deleted_at.is_(None))
+            .where(~MediaAssetRow.source_metadata.has_key("enrichment"))
+            .order_by(MediaAssetRow.created_at.asc(), MediaAssetRow.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_row_to_entity(r) for r in rows]
+
     async def get_by_storage_coords(
         self,
         *,

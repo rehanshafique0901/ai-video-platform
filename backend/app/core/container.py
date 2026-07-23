@@ -40,6 +40,7 @@ from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
+from app.application.interfaces.thumbnailer import IThumbnailer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.interfaces.webhook_verifier import IWebhookVerifier
 from app.application.use_cases.auth.login_user import LoginUser
@@ -47,12 +48,14 @@ from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
 from app.application.use_cases.media.delete_media import DeleteMedia
+from app.application.use_cases.media.enrich_generated_media import EnrichGeneratedMedia
 from app.application.use_cases.media.generated_media_subscriber import (
     GeneratedMediaIngestionSubscriber,
 )
 from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.ingest_generated_media import IngestGeneratedMedia
 from app.application.use_cases.media.list_media import ListMedia
+from app.application.use_cases.media.media_enrichment_worker import MediaEnrichmentWorker
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
 from app.application.use_cases.projects.create_project import CreateProject
@@ -122,7 +125,7 @@ from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
-from app.infrastructure.render import FfmpegRenderer
+from app.infrastructure.render import FfmpegRenderer, FfmpegThumbnailer
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -155,6 +158,7 @@ _fal_webhook_client: httpx.AsyncClient | None = None
 _object_storage: IObjectStorage | None = None
 _media_downloader: IMediaDownloader | None = None
 _renderer: IRenderer | None = None
+_thumbnailer: IThumbnailer | None = None
 _media_download_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
@@ -280,7 +284,7 @@ async def shutdown() -> None:
     """Dispose the engine + the shared provider clients. Called by the lifespan handler."""
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
-    global _object_storage, _media_downloader, _media_download_client, _renderer
+    global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -302,6 +306,7 @@ async def shutdown() -> None:
     _media_downloader = None
     _media_download_client = None
     _renderer = None
+    _thumbnailer = None
     _settings = None
 
 
@@ -311,7 +316,7 @@ def reset() -> None:
     global _token_issuer, _dummy_password_hash, _clock, _publisher
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
-    global _object_storage, _media_downloader, _media_download_client, _renderer
+    global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     _settings = None
     _engine = None
     _session_factory = None
@@ -333,6 +338,7 @@ def reset() -> None:
     _media_downloader = None
     _media_download_client = None
     _renderer = None
+    _thumbnailer = None
 
 
 def _require_init() -> None:
@@ -955,4 +961,51 @@ def get_render_worker() -> RenderWorker:
         uow=get_unit_of_work(),
         process=get_process_render_job_use_case(),
         batch_size=settings.render_batch_size,
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.4c — Media enrichment)
+# ---------------------------------------------------------------------
+
+
+def _get_thumbnailer() -> IThumbnailer:
+    """Lazily build + memoise the FFmpeg thumbnailer (configuration-blind, W8.1.1)."""
+    global _thumbnailer
+    _require_init()
+    if _thumbnailer is None:
+        settings = _get_settings()
+        _thumbnailer = FfmpegThumbnailer(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _thumbnailer
+
+
+def get_enrich_generated_media_use_case() -> EnrichGeneratedMedia:
+    """Factory: the α8.4c single-asset enrichment use case (fresh UoW per call)."""
+    settings = _get_settings()
+    return EnrichGeneratedMedia(
+        get_unit_of_work(),
+        _get_object_storage(),
+        _get_thumbnailer(),
+        thumbnail_at_seconds=settings.enrichment_thumbnail_at_seconds,
+        workspace_dir=settings.render_workspace_dir,
+        lease=timedelta(seconds=settings.render_timeout_seconds),
+    )
+
+
+def get_media_enrichment_worker() -> MediaEnrichmentWorker:
+    """Factory: the α8.4c enrichment poll ingress (``run_once`` enriches videos).
+
+    Symmetric with ``get_render_worker`` — a dedicated poller (Fork B → B2) so FFmpeg
+    never runs on the relay path. Pure function of the parent MediaAsset; never reads
+    orchestration/render-job history (W8.4c.1 / W8.4c.2 / W8.4c.3).
+    """
+    settings = _get_settings()
+    return MediaEnrichmentWorker(
+        uow=get_unit_of_work(),
+        enrich=get_enrich_generated_media_use_case(),
+        batch_size=settings.enrichment_batch_size,
     )
