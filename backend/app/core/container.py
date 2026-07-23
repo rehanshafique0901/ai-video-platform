@@ -37,6 +37,7 @@ from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
+from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
@@ -69,6 +70,8 @@ from app.application.use_cases.render.cancel_render_job import CancelRenderJob
 from app.application.use_cases.render.create_render_job import CreateRenderJob
 from app.application.use_cases.render.get_render_job import GetRenderJob
 from app.application.use_cases.render.list_render_jobs import ListRenderJobs
+from app.application.use_cases.render.process_render_job import ProcessRenderJob
+from app.application.use_cases.render.render_worker import RenderWorker
 from app.application.use_cases.scenes.create_scene import CreateScene
 from app.application.use_cases.scenes.delete_scene import DeleteScene
 from app.application.use_cases.scenes.get_scene import GetScene
@@ -119,6 +122,7 @@ from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
+from app.infrastructure.render import FfmpegRenderer
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -150,6 +154,7 @@ _fal_webhook_client: httpx.AsyncClient | None = None
 # is registered on the in-process publisher at init.
 _object_storage: IObjectStorage | None = None
 _media_downloader: IMediaDownloader | None = None
+_renderer: IRenderer | None = None
 _media_download_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
@@ -275,7 +280,7 @@ async def shutdown() -> None:
     """Dispose the engine + the shared provider clients. Called by the lifespan handler."""
     global _engine, _session_factory, _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
-    global _object_storage, _media_downloader, _media_download_client
+    global _object_storage, _media_downloader, _media_download_client, _renderer
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -296,6 +301,7 @@ async def shutdown() -> None:
     _object_storage = None
     _media_downloader = None
     _media_download_client = None
+    _renderer = None
     _settings = None
 
 
@@ -305,7 +311,7 @@ def reset() -> None:
     global _token_issuer, _dummy_password_hash, _clock, _publisher
     global _provider_registry, _openai_client, _fal_client, _settings
     global _fal_webhook_verifier, _fal_webhook_client
-    global _object_storage, _media_downloader, _media_download_client
+    global _object_storage, _media_downloader, _media_download_client, _renderer
     _settings = None
     _engine = None
     _session_factory = None
@@ -326,6 +332,7 @@ def reset() -> None:
     _object_storage = None
     _media_downloader = None
     _media_download_client = None
+    _renderer = None
 
 
 def _require_init() -> None:
@@ -902,4 +909,50 @@ def get_ingest_generated_media_use_case() -> IngestGeneratedMedia:
         uow=get_unit_of_work(),
         storage=_get_object_storage(),
         downloader=_get_media_downloader(),
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.4b — Render engine)
+# ---------------------------------------------------------------------
+
+
+def _get_renderer() -> IRenderer:
+    """Lazily build + memoise the FFmpeg renderer (configuration-blind, W8.1.1)."""
+    global _renderer
+    _require_init()
+    if _renderer is None:
+        settings = _get_settings()
+        _renderer = FfmpegRenderer(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            ffprobe_path=settings.render_ffprobe_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _renderer
+
+
+def get_process_render_job_use_case() -> ProcessRenderJob:
+    """Factory: the α8.4b single-job render use case (fresh UoW per call)."""
+    settings = _get_settings()
+    return ProcessRenderJob(
+        uow=get_unit_of_work(),
+        storage=_get_object_storage(),
+        renderer=_get_renderer(),
+        workspace_dir=settings.render_workspace_dir,
+        lease=timedelta(seconds=settings.render_timeout_seconds),
+    )
+
+
+def get_render_worker() -> RenderWorker:
+    """Factory: the α8.4b render poll ingress (``run_once`` drains queued jobs).
+
+    Mirrors ``CompletionEngine`` wiring — the worker is the render-side poller. It
+    is a pure Timeline → Media transform and never touches the frozen orchestration
+    core (W8.4b.1 / W8.4b.2).
+    """
+    settings = _get_settings()
+    return RenderWorker(
+        uow=get_unit_of_work(),
+        process=get_process_render_job_use_case(),
+        batch_size=settings.render_batch_size,
     )

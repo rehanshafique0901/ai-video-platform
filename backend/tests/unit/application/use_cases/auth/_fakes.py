@@ -1258,6 +1258,22 @@ class FakeMediaRepository(IMediaRepository):
             return None
         return media
 
+    async def get_by_storage_coords(
+        self,
+        *,
+        storage_backend: str,
+        storage_bucket: str,
+        storage_key: str,
+    ) -> MediaAsset | None:
+        for media in self._media.values():
+            if (
+                media.storage_backend == storage_backend
+                and media.storage_bucket == storage_bucket
+                and media.storage_key == storage_key
+            ):
+                return media
+        return None
+
     async def update_owned(
         self,
         media_id: UUID,
@@ -1653,6 +1669,70 @@ class FakeRenderJobRepository(IRenderJobRepository):
         updated = replace(
             job,
             status=RenderStatus.CANCELED.value,
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[render_job_id] = updated
+        return updated
+
+    # ---- worker-facing lifecycle transitions (α8.4b) -------------------
+
+    async def list_claimable(self, *, limit: int) -> list[RenderJob]:
+        rows = [j for j in self._jobs.values() if j.status == RenderStatus.QUEUED.value]
+        # FIFO: insertion ordinal ASC mirrors (created_at, id) ASC.
+        rows.sort(key=lambda j: self._order.get(j.id, 0))
+        return rows[:limit]
+
+    async def mark_running(self, render_job_id: UUID) -> RenderJob | None:
+        job = self._jobs.get(render_job_id)
+        if job is None or job.status != RenderStatus.QUEUED.value:
+            return None
+        updated = replace(
+            job,
+            status=RenderStatus.RUNNING.value,
+            started_at=datetime.now(UTC),
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[render_job_id] = updated
+        return updated
+
+    async def mark_succeeded(
+        self,
+        render_job_id: UUID,
+        *,
+        output_media_asset_id: UUID,
+        progress: str = "100.00",
+    ) -> RenderJob | None:
+        job = self._jobs.get(render_job_id)
+        if job is None or job.status != RenderStatus.RUNNING.value:
+            return None
+        updated = replace(
+            job,
+            status=RenderStatus.SUCCEEDED.value,
+            finished_at=datetime.now(UTC),
+            output_media_asset_id=output_media_asset_id,
+            progress=progress,
+            version=job.version + 1,
+            updated_at=datetime.now(UTC),
+        )
+        self._jobs[render_job_id] = updated
+        return updated
+
+    async def mark_failed(
+        self,
+        render_job_id: UUID,
+        *,
+        error: dict[str, object],
+    ) -> RenderJob | None:
+        job = self._jobs.get(render_job_id)
+        if job is None or job.status != RenderStatus.RUNNING.value:
+            return None
+        updated = replace(
+            job,
+            status=RenderStatus.FAILED.value,
+            finished_at=datetime.now(UTC),
+            error=dict(error),
             version=job.version + 1,
             updated_at=datetime.now(UTC),
         )

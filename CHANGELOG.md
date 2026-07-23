@@ -6,6 +6,74 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.4b — Render Engine — Timeline → FFmpeg → output MediaAsset (2026-07-23)
+
+The platform's **first media-*transforming* capability**. A new **poll worker** (mirroring the α8.3
+`CompletionEngine`) drains `queued` `RenderJob`s: for each it claims the job (`queued → running` CAS
+under a `render_job:<id>` lease), resolves the project's Timeline into an ordered list of video
+`MediaAsset`s, **materializes** those source bytes from `IObjectStorage`, composes them via a new
+neutral `IRenderer` port (FFmpeg adapter), stores the output under a **deterministic key**, registers
+a `MediaAsset(kind="video", source="generated")`, and settles the job `succeeded`
+(`output_media_asset_id`) — or `failed`. This completes the dependency graph
+`Provider → Completion → GeneratedMediaIngestion → MediaAsset → Timeline → Renderer → output MediaAsset`.
+The render path is a **pure Timeline → Media transform** (new invariants **W8.4b.1** + **W8.4b.2**);
+the freeze guard stayed green with **zero override markers**. Runtime capability change → version bump
+to `0.4.26-phase3-alpha8.4b`. Thumbnails / waveforms / audio mixing / richer metadata / previews are
+deferred to α8.4c (Fork E scope split).
+
+#### Added
+- **`IRenderer` port + `RenderSpec` / `RenderInput` / `RenderResult` / `RenderError`**
+  (`app/application/interfaces/renderer.py`) — a backend-neutral "compose ordered, trimmed source
+  segments into one output video" seam, kept **separate from the frozen provider ports** (Fork B). A
+  different engine could replace FFmpeg with no use-case change.
+- **`FfmpegRenderer`** (`app/infrastructure/render/ffmpeg_renderer.py`) — shells out to `ffmpeg`
+  (`filter_complex` trim + concat) then probes with `ffprobe`; **configuration-blind** (W8.1.1 — binary
+  paths + timeout injected); any non-zero exit / timeout / missing output / launch failure maps to a
+  neutral `RenderError`. Video-concat baseline (audio mixing / transitions → α8.4c).
+- **`ProcessRenderJob` use case** (`app/application/use_cases/render/process_render_job.py`) — the
+  worker body for a single job: lease → `queued → running` CAS → resolve Timeline video clips → download
+  sources + render + store output **outside any DB transaction** → register output `MediaAsset` →
+  `mark_succeeded`. Idempotent via a **deterministic** output key in `(tenant, project, render_job)`:
+  a re-render hits the `media_assets` storage-key uniqueness → `ConflictError` → the existing asset is
+  recovered via `get_by_storage_coords`, never duplicated.
+- **`RenderWorker.run_once()`** (`app/application/use_cases/render/render_worker.py`) — the render poll
+  ingress (Fork A): one scan claims the oldest `queued` jobs (FIFO, capped by `render_batch_size`) and
+  settles each independently under its own lease, so one slow render never blocks the others. Rendering
+  runs behind a poller, **not** the relay fan-out (the relay stays fast for lightweight subscribers).
+- **`IRenderJobRepository` worker transitions** — `list_claimable`, `mark_running`, `mark_succeeded`,
+  `mark_failed`: additive, **non-frozen**, keyed by `render_job_id`, each a race-safe status-predicated
+  CAS with hand-set `version = version + 1` (mirroring the α7.1 `cancel` CAS).
+- **`IMediaRepository.get_by_storage_coords(...)`** — additive owner-agnostic idempotent-recovery lookup
+  (immutable, unique physical-object columns) so the worker recovers an already-registered output.
+- **`RenderJobSucceeded` / `RenderJobFailed` outbox events** (`_events.py`) — emitted by the worker
+  inside the settle UoW; carry orchestration identity + `output_media_asset_id` (or a neutral `error`)
+  only — no rendered bytes, provider, or timeline-edit state (W8.4b.2).
+- **Config** — `render_ffmpeg_path`, `render_ffprobe_path`, `render_timeout_seconds`,
+  `render_workspace_dir`, `render_batch_size`.
+- **Container wiring** — `FfmpegRenderer` built **lazily** on first render (cleared on `shutdown`/`reset`);
+  `get_process_render_job_use_case()` + `get_render_worker()` factories (fresh UoW per call); object
+  storage reused from α8.4a.
+- **Tests** — unit coverage for `ProcessRenderJob` (happy path + probed metadata + deterministic key,
+  clip ordering, idempotent re-render, render failure → `failed` + event, empty timeline → `failed`,
+  non-queued no-op, locked skip), `RenderWorker.run_once` (drain / batch cap / empty scan), and the
+  `FfmpegRenderer` (validation + launch-failure mapping, plus an **opt-in** real-ffmpeg concat/probe
+  roundtrip skipped when the binary is absent).
+
+#### Invariants
+- **W8.4b.1** — the render worker is a **pure Timeline → Media transform**. It neither reads nor mutates
+  orchestration state, checkpoints, provider state, workflow status, or the completion lifecycle. It
+  touches only `render_jobs` lifecycle fields, the Timeline (read), `MediaAsset`s (read sources / create
+  output), storage, and render events.
+- **W8.4b.2** — the renderer consumes **only** `MediaAsset` identifiers + Timeline data. It never
+  consumes provider-specific outputs, URLs, checkpoints, request IDs, provider job IDs, or webhook
+  payloads — making it completely provider-agnostic.
+
+#### Unchanged (freeze holds)
+- No migrations (all additive repository methods on the existing `render_jobs` / `media_assets` tables).
+  No frozen orchestration path changed (`AdvanceWorkflowRun`, `ResumeWorkflowRun`, `CompletionEngine`,
+  dispatcher, provider ports, usage recorder, lock manager, workflow registry). No `_paused` / checkpoint
+  contract change. Freeze guard green, **zero override markers** (α8.4b gating criterion).
+
 ### Phase 3 Slice α8.4a — Generated Media Ingestion — download / store / register (2026-07-22)
 
 The platform's **first *producing* capability** and its **first real outbox consumer**. When a run

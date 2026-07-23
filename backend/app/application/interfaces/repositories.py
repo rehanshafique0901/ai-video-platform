@@ -821,6 +821,28 @@ class IMediaRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_by_storage_coords(
+        self,
+        *,
+        storage_backend: str,
+        storage_bucket: str,
+        storage_key: str,
+    ) -> MediaAsset | None:
+        """Return the live media asset at these physical storage coordinates, or ``None``.
+
+        Additive read introduced by α8.4b (α8.4a for generated ingestion could get
+        away without it; the render worker needs it). The physical-object columns
+        (``storage_backend`` / ``storage_bucket`` / ``storage_key``) are immutable
+        and, for deterministic-key producers (ingestion, render), unique per
+        artifact — so this is the idempotent-recovery lookup: after ``add`` raises
+        ``ConflictError`` (the artifact was already registered on a prior attempt),
+        the worker re-reads the existing asset by its deterministic coords to obtain
+        its ``id``. Owner-agnostic on purpose (server-side worker context, like
+        ``get_ownership`` on projects). Side-effect-free; soft-deleted rows excluded.
+        """
+        ...
+
+    @abstractmethod
     async def update_owned(
         self,
         media_id: UUID,
@@ -1477,6 +1499,71 @@ class IRenderJobRepository(ABC):
         DB (a worker finishing the job between the use case's read and this CAS
         cannot be silently overwritten). ``version`` is hand-set ``+1`` (net +1
         over the guarded trigger); ``updated_at`` is co-set to ``now()``.
+        """
+        ...
+
+    # --- Worker-facing lifecycle transitions (α8.4b) ----------------------------
+    #
+    # These serve the render worker (``RenderWorker.run_once`` → ``ProcessRenderJob``),
+    # NOT owner-facing HTTP. They are keyed by ``render_job_id`` alone (the worker
+    # already holds the scanned job) and each is a race-safe CAS with a status
+    # predicate + hand-set ``version = version + 1`` — mirroring :meth:`cancel`.
+    # Additive and outside the ADR-0042 frozen orchestration core (the render path
+    # is a downstream Timeline→media transform; invariants W8.4b.1 / W8.4b.2).
+
+    @abstractmethod
+    async def list_claimable(self, *, limit: int) -> list[RenderJob]:
+        """Return ``queued`` jobs across all projects, oldest first, capped at ``limit``.
+
+        The α8.4b poll ingress (mirrors ``IWorkflowRunRepository.list_paused``):
+        ordered ``created_at ASC, id ASC`` (a total order — FIFO, no skip/dup under
+        ties). NOT project-scoped — the worker is a server-side consumer that then
+        settles each job under its own ``render_job:<id>`` lease. Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_running(self, render_job_id: UUID) -> RenderJob | None:
+        """Version-fenced claim: ``queued`` → ``running`` (sets ``started_at``).
+
+        Atomic CAS: ``UPDATE … SET status='running', started_at=now(),
+        version=version+1 WHERE id=:id AND status='queued'``. Returns the running
+        job, or ``None`` when no row matched (already claimed/terminal/canceled) —
+        the worker treats ``None`` as "another worker owns it" and skips.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_succeeded(
+        self,
+        render_job_id: UUID,
+        *,
+        output_media_asset_id: UUID,
+        progress: str = "100.00",
+    ) -> RenderJob | None:
+        """Version-fenced finish: ``running`` → ``succeeded`` with the output asset.
+
+        Atomic CAS: ``… SET status='succeeded', finished_at=now(),
+        output_media_asset_id=:asset, progress=:progress, version=version+1
+        WHERE id=:id AND status='running'``. Returns the settled job, or ``None``
+        when no row matched (e.g. canceled mid-render). ``output_media_asset_id`` is
+        the registered render-output ``MediaAsset``.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_failed(
+        self,
+        render_job_id: UUID,
+        *,
+        error: dict[str, object],
+    ) -> RenderJob | None:
+        """Version-fenced finish: ``running`` → ``failed`` with a structured error.
+
+        Atomic CAS: ``… SET status='failed', finished_at=now(), error=:error,
+        version=version+1 WHERE id=:id AND status='running'``. Returns the settled
+        job, or ``None`` when no row matched. ``error`` is a neutral dict (no
+        provider/orchestration detail; W8.4b.2).
         """
         ...
 

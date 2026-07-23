@@ -154,6 +154,26 @@ class MediaRepository(IMediaRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    async def get_by_storage_coords(
+        self,
+        *,
+        storage_backend: str,
+        storage_bucket: str,
+        storage_key: str,
+    ) -> MediaAssetEntity | None:
+        # Owner-agnostic idempotent-recovery lookup (α8.4b): the physical-object
+        # columns are immutable and unique per deterministic-key artifact, so this
+        # returns the single live asset a deterministic producer registered there.
+        stmt = (
+            select(MediaAssetRow)
+            .where(MediaAssetRow.storage_backend == storage_backend)
+            .where(MediaAssetRow.storage_bucket == storage_bucket)
+            .where(MediaAssetRow.storage_key == storage_key)
+            .where(MediaAssetRow.deleted_at.is_(None))
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
     # ---- mutations -----------------------------------------------------
 
     async def update_owned(

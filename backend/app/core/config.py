@@ -168,6 +168,35 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Render engine (α8.4b) ------------------------------------------------
+    # The render worker composes a project's Timeline into an output video via the
+    # neutral ``IRenderer`` port (FFmpeg adapter in prod). Configuration-blind
+    # (W8.1.1): binary paths + a timeout are injected, never fetched.
+    render_ffmpeg_path: str = Field(
+        default="ffmpeg",
+        description="Path to the ffmpeg binary for the FFmpeg renderer (α8.4b).",
+        min_length=1,
+    )
+    render_ffprobe_path: str = Field(
+        default="ffprobe",
+        description="Path to the ffprobe binary used to probe render output (α8.4b).",
+        min_length=1,
+    )
+    render_timeout_seconds: float = Field(
+        default=900.0,
+        description="Hard timeout for a single ffmpeg/ffprobe invocation (seconds).",
+        gt=0,
+    )
+    render_workspace_dir: str | None = Field(
+        default=None,
+        description="Parent dir for per-job render temp workspaces (None = system tmp).",
+    )
+    render_batch_size: int = Field(
+        default=10,
+        description="Max queued render jobs a single RenderWorker.run_once() claims.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

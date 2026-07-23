@@ -151,6 +151,89 @@ class RenderJobRepository(IRenderJobRepository):
         row = (await self._session.execute(upd)).scalar_one_or_none()
         return _row_to_entity(row) if row is not None else None
 
+    # ---- worker-facing lifecycle transitions (α8.4b) -------------------
+
+    async def list_claimable(self, *, limit: int) -> list[RenderJobEntity]:
+        # FIFO claim scan across all projects (mirrors list_paused): oldest
+        # queued first, total order (created_at, id) ASC. Not project-scoped —
+        # the render worker is a server-side consumer.
+        stmt = (
+            select(RenderJobRow)
+            .where(RenderJobRow.status == RenderStatus.QUEUED.value)
+            .order_by(RenderJobRow.created_at.asc(), RenderJobRow.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_row_to_entity(r) for r in rows]
+
+    async def mark_running(self, render_job_id: UUID) -> RenderJobEntity | None:
+        # Version-fenced claim CAS: queued → running. The ``status='queued'``
+        # predicate makes the claim race-safe (a second worker's CAS matches no
+        # row → None → it skips). ``version = version + 1`` hand-set (net +1).
+        upd = (
+            update(RenderJobRow)
+            .where(RenderJobRow.id == render_job_id)
+            .where(RenderJobRow.status == RenderStatus.QUEUED.value)
+            .values(
+                status=RenderStatus.RUNNING.value,
+                started_at=func.now(),
+                version=RenderJobRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(RenderJobRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
+    async def mark_succeeded(
+        self,
+        render_job_id: UUID,
+        *,
+        output_media_asset_id: UUID,
+        progress: str = "100.00",
+    ) -> RenderJobEntity | None:
+        # Version-fenced finish CAS: running → succeeded. The ``status='running'``
+        # predicate ensures a job canceled mid-render is not overwritten.
+        upd = (
+            update(RenderJobRow)
+            .where(RenderJobRow.id == render_job_id)
+            .where(RenderJobRow.status == RenderStatus.RUNNING.value)
+            .values(
+                status=RenderStatus.SUCCEEDED.value,
+                finished_at=func.now(),
+                output_media_asset_id=output_media_asset_id,
+                progress=progress,
+                version=RenderJobRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(RenderJobRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
+    async def mark_failed(
+        self,
+        render_job_id: UUID,
+        *,
+        error: dict[str, object],
+    ) -> RenderJobEntity | None:
+        # Version-fenced finish CAS: running → failed.
+        upd = (
+            update(RenderJobRow)
+            .where(RenderJobRow.id == render_job_id)
+            .where(RenderJobRow.status == RenderStatus.RUNNING.value)
+            .values(
+                status=RenderStatus.FAILED.value,
+                finished_at=func.now(),
+                error=error,
+                version=RenderJobRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(RenderJobRow)
+        )
+        row = (await self._session.execute(upd)).scalar_one_or_none()
+        return _row_to_entity(row) if row is not None else None
+
 
 def _row_to_entity(row: RenderJobRow) -> RenderJobEntity:
     return RenderJobEntity(
