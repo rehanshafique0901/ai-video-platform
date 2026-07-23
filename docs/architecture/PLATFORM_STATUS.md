@@ -169,9 +169,10 @@ by review + tests, not the mechanical guard:
 > The **render composition layer** is unfrozen but **bounded** by
 > [`ADR-0043`](../decisions/ADR-0043-render-composition-boundary.md): it may grow
 > (audio mixing, transitions, effects, quality tuning) provided composition stays a
-> pure `Timeline + MediaAssets + configuration → video` transform (RC1–RC5) — never
-> reading orchestration/provider state, never doing enrichment, and never mutating
-> rendered media in place. A design boundary, not a freeze (no guard).
+> pure, reproducible `Timeline + MediaAssets + configuration → video` transform
+> (RC1–RC6, incl. renderer purity) — never reading orchestration/provider state, never
+> doing enrichment, and never mutating rendered media in place. A design boundary, not
+> a freeze (no guard).
 
 Everything **not** in the frozen list above is the intentional growth surface that
 new slices plug into — additive by construction:

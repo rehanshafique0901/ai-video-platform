@@ -77,7 +77,7 @@ The composition domain is exactly these components (they are the growth surface 
 audio tracks, transition/effect descriptors, quality knobs) and to read more of the
 Timeline. That is allowed and anticipated — the render layer is not frozen.
 
-### D2 — The composition boundary principles (RC1–RC5)
+### D2 — The composition boundary principles (RC1–RC6)
 
 These are the invariants α8.4e (and every later render change) must preserve. They
 generalize the α8.4b/α8.4c/α8.4d invariants into one domain contract.
@@ -104,13 +104,23 @@ generalize the α8.4b/α8.4c/α8.4d invariants into one domain contract.
   **read** an output `MediaAsset`; they never re-encode, re-compose, or overwrite it.
   A new composition is a new render job producing a new output `MediaAsset`, never an
   in-place edit of an existing one.
+- **RC6 — Renderer purity.** Given identical Timeline, referenced `MediaAsset`s,
+  `RenderSpec`, **renderer version**, and configuration, the renderer shall produce
+  **functionally equivalent** output. This does *not* require bit-for-bit identical
+  encoding (different FFmpeg/codec builds may vary slightly) — it makes reproducibility
+  an explicit architectural **goal**, not just an implication of RC3. It is what makes
+  retries safe, output caching sound, distributed rendering valid, and a future GPU (or
+  otherwise substituted) renderer a drop-in with no orchestration change. Any behaviour
+  that would break functional equivalence for the same inputs+version (hidden global
+  state, wall-clock/random branching that changes the visible result, machine-specific
+  output) is outside the boundary.
 
 ### D3 — What α8.4e may change vs must not
 
 **May change (inside the boundary):** `RenderSpec` / `RenderInput` / `RenderResult`
 shapes, the `IRenderer` contract, the FFmpeg adapter's filter graph (audio mixing,
 transitions, effects, quality/bitrate tuning), and how `ProcessRenderJob` reads the
-Timeline (e.g. audio tracks, per-clip effects) — provided RC1–RC5 hold.
+Timeline (e.g. audio tracks, per-clip effects) — provided RC1–RC6 hold.
 
 **Must not change:** anything in the ADR-0042 frozen orchestration surface (the freeze
 guard still runs and must stay green with zero overrides); the `MediaAsset` canonical
@@ -122,7 +132,7 @@ ADR-0042 signal — stop and revisit, exactly as α8.4a–d did.
 
 Unlike ADR-0042's `check_frozen_platform.py`, this ADR ships **no guard**. The render
 layer is under active development; a tripwire now would fight the α8.4e work it is
-meant to guide. Enforcement is by **pre-flight review against RC1–RC5** and by the
+meant to guide. Enforcement is by **pre-flight review against RC1–RC6** and by the
 still-active orchestration freeze guard at the render/orchestration boundary. Should
 the render layer later reach feature-completeness (analogous to α8.3 for
 orchestration), a *future* ADR may freeze it and add a guard — this ADR is the design
@@ -139,24 +149,29 @@ frozen). It does not pre-judge α8.4e's design forks — it only bounds them.
 ## Consequences
 
 **Positive.** α8.4e can be evaluated by a single question — "does this stay within
-RC1–RC5, and clear of the ADR-0042 frozen surface?" Composition can grow richer
+RC1–RC6, and clear of the ADR-0042 frozen surface?" Composition can grow richer
 (audio, transitions, effects) while the `MediaAsset` boundary, enrichment/export
 separation, and deterministic reproducibility stay intact. The render layer gets the
 architectural clarity of ADR-0042 without the friction of a freeze it isn't ready for.
 
-**Negative / cost.** RC1–RC5 are review-enforced, not machine-enforced, so they rely on
+**Negative / cost.** RC1–RC6 are review-enforced, not machine-enforced, so they rely on
 the pre-flight discipline already established. A genuinely cross-cutting composition
 need (e.g. rendering that must consult non-Timeline state) would require revisiting this
 ADR rather than quietly widening the input.
 
 **Neutral.** This ADR consolidates W8.4b/W8.4c/W8.4d into a named domain boundary; those
-per-slice invariants remain valid and are now framed as instances of RC1–RC5.
+per-slice invariants remain valid and are now framed as instances of RC1–RC6.
 
 ---
 
 ## Change log
 
+- **2026-07-24 — RC6 (renderer purity) added.** Made reproducibility an explicit
+  architectural goal — same Timeline + `MediaAsset`s + `RenderSpec` + renderer version +
+  configuration ⇒ *functionally equivalent* output (not bit-identical). Enables safe
+  retries, output caching, distributed rendering, and drop-in GPU/alternate renderers.
+  Folded in before the α8.4e pre-flight; no code/behaviour/schema change.
 - **2026-07-24 — Accepted.** Render composition boundary defined immediately after
   `v0.4.28-phase3-alpha8.4d`, before the α8.4e pre-flight. Defines the composition
-  domain (D1), boundary principles RC1–RC5 (D2), the α8.4e change envelope (D3), the
+  domain (D1), boundary principles RC1–RC6 (D2), the α8.4e change envelope (D3), the
   deliberate absence of a guard (D4), and scope (D5). No code/behaviour/schema change.
