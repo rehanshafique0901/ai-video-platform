@@ -1,0 +1,33 @@
+# Device profiles (Phase 3 α8.5d) — DESIGN-TIME curated reference data. OPTIONAL
+# manifest. The runtime NEVER reads this file (W8.5c.2); α8.5d seeds it into the
+# `device_profiles` table. Runtime hardware *detection* + matching a live machine
+# to a profile is α8.5x-exec (AR9/AR10), NOT this slice (W8.5d.7).
+#
+#   backend         ∈ metal | cuda | rocm | cpu
+#   preferred_mode  ∈ quick | balanced | quality | ultra   (AR11 generation modes)
+#   unified_memory  — Apple-Silicon-style shared CPU/GPU memory.
+#
+# The resolver later computes: current device → compatible adapters (by
+# runtime.hardware) → best score → execute — with nothing hardcoded about
+# "Intel Mac" or "M1".
+
+device_profiles:
+  - id: intel_macbook_2019
+    ram_gb: 16
+    gpu: amd
+    backend: metal
+    unified_memory: false
+    preferred_mode: balanced
+
+  - id: macbook_m1
+    ram_gb: 16
+    gpu: apple
+    backend: metal
+    unified_memory: true
+    preferred_mode: quality
+
+  - id: windows_cuda
+    ram_gb: 32
+    gpu: nvidia
+    backend: cuda
+    preferred_mode: quality

@@ -26,14 +26,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from provider_manifest import (  # noqa: E402
     _DURATION_KINDS,
+    _FEATURE_KINDS,
     _RESOLUTION_KINDS,
+    _VIDEO_ONLY_FEATURES,
     FREE_PRICING,
     KINDS,
+    OUTPUT_FORMATS,
+    Adapter,
     Catalogue,
+    DevicesDoc,
     Provider,
     ProvidersDoc,
     RoutingDoc,
     load_catalogue,
+    load_devices,
     load_providers,
     load_routing,
 )
@@ -75,7 +81,7 @@ def _dups(values: list[str]) -> list[str]:
     return sorted(dups)
 
 
-def _adapters(pdoc: ProvidersDoc) -> list[tuple[Provider, object]]:
+def _adapters(pdoc: ProvidersDoc) -> list[tuple[Provider, Adapter]]:
     return [(p, a) for p in pdoc.providers for a in p.adapters]
 
 
@@ -335,14 +341,133 @@ def _find_cycle(edges: dict[str, list[str]]) -> list[str] | None:
     return None
 
 
-def validate(cat: Catalogue, pdoc: ProvidersDoc, rdoc: RoutingDoc) -> Report:
+def _rule_capability_dependencies(cat: Catalogue, r: Report) -> None:
+    cat_ids = {c.id for c in cat.capabilities}
+    dep_edges: dict[str, list[str]] = {}
+    for c in cat.capabilities:
+        req, opt = c.dependencies.requires, c.dependencies.optional
+        for label, deps in (("requires", req), ("optional", opt)):
+            for dup in _dups(deps):
+                r.error(
+                    "dependencies", f"capability {c.id!r} lists {label} dependency {dup!r} twice"
+                )
+            for d in deps:
+                if d == c.id:
+                    r.error("dependencies", f"capability {c.id!r} depends on itself ({label})")
+                elif d not in cat_ids:
+                    r.error(
+                        "dependencies",
+                        f"capability {c.id!r} {label} unknown capability {d!r}",
+                    )
+        for d in sorted(set(req) & set(opt)):
+            r.error(
+                "dependencies",
+                f"capability {c.id!r} dependency {d!r} is both required and optional",
+            )
+        dep_edges[c.id] = [d for d in req if d in cat_ids]
+    cycle = _find_cycle(dep_edges)
+    if cycle:
+        r.error("dependencies", f"capability requires-cycle detected: {' -> '.join(cycle)}")
+
+
+def _rule_features(cat: Catalogue, pdoc: ProvidersDoc, r: Report) -> None:
+    kind_by_cap = {c.id: c.kind for c in cat.capabilities}
+    for _, a in _adapters(pdoc):
+        kind = str(kind_by_cap.get(a.capability, ""))
+        for dup in _dups([str(f) for f in a.features]):
+            r.error("features", f"adapter {a.id!r} lists feature {dup!r} twice")
+        if a.features and kind not in _FEATURE_KINDS:
+            r.warn("features", f"adapter {a.id!r} declares features on a {kind!r} capability")
+        for f in a.features:
+            if str(f) in _VIDEO_ONLY_FEATURES and kind != "video":
+                r.warn(
+                    "features",
+                    f"adapter {a.id!r} sets video-only feature {str(f)!r} on a {kind!r} capability",
+                )
+
+
+def _rule_output_formats(cat: Catalogue, pdoc: ProvidersDoc, r: Report) -> None:
+    outputs_by_cap = {c.id: {str(o) for o in c.outputs} for c in cat.capabilities}
+    for _, a in _adapters(pdoc):
+        cap_outputs = outputs_by_cap.get(a.capability, set())
+        for io_type, formats in a.outputs.items():
+            if io_type not in OUTPUT_FORMATS:
+                r.error("outputs", f"adapter {a.id!r} declares unknown output io-type {io_type!r}")
+                continue
+            if io_type not in cap_outputs:
+                r.error(
+                    "outputs",
+                    f"adapter {a.id!r} declares {io_type!r} outputs but capability "
+                    f"{a.capability!r} does not output {io_type!r}",
+                )
+            if not formats:
+                r.error("outputs", f"adapter {a.id!r} declares an empty {io_type!r} format list")
+            for dup in _dups(list(formats)):
+                r.error("outputs", f"adapter {a.id!r} lists {io_type} format {dup!r} twice")
+            for fmt in formats:
+                if fmt not in OUTPUT_FORMATS[io_type]:
+                    r.error(
+                        "outputs",
+                        f"adapter {a.id!r} {io_type} format {fmt!r} not in the {io_type} vocabulary",
+                    )
+
+
+def _rule_resource_estimation(pdoc: ProvidersDoc, r: Report) -> None:
+    for _, a in _adapters(pdoc):
+        hw = a.runtime.hardware
+        if (
+            hw.minimum_ram_gb is not None
+            and hw.recommended_ram_gb is not None
+            and hw.recommended_ram_gb < hw.minimum_ram_gb
+        ):
+            r.error(
+                "runtime",
+                f"adapter {a.id!r} recommended_ram_gb ({hw.recommended_ram_gb}) "
+                f"< minimum_ram_gb ({hw.minimum_ram_gb})",
+            )
+        ex = a.runtime.execution
+        any_gpu = hw.gpu.metal or hw.gpu.cuda or hw.gpu.rocm or hw.gpu.cpu
+        if ex.local and not any_gpu:
+            r.warn("runtime", f"local adapter {a.id!r} declares no gpu/cpu backend")
+        if (hw.minimum_ram_gb or any_gpu) and not (ex.local or ex.cloud):
+            r.warn("runtime", f"adapter {a.id!r} declares hardware but no execution target")
+
+
+def _rule_cost(pdoc: ProvidersDoc, r: Report) -> None:
+    for p, a in _adapters(pdoc):
+        if a.cost is not None and str(p.pricing) == "free" and a.cost.amount > 0:
+            r.warn(
+                "cost",
+                f"adapter {a.id!r} on free provider {p.id!r} declares non-zero cost "
+                f"({a.cost.amount})",
+            )
+
+
+def _rule_devices(devices: DevicesDoc | None, r: Report) -> None:
+    if devices is None:
+        return
+    for dup in _dups([d.id for d in devices.device_profiles]):
+        r.error("devices", f"duplicate device profile id: {dup!r}")
+
+
+def validate(
+    cat: Catalogue,
+    pdoc: ProvidersDoc,
+    rdoc: RoutingDoc,
+    devices: DevicesDoc | None = None,
+) -> Report:
     r = Report()
     _rule_uniqueness(cat, pdoc, r)
     _rule_capability_metadata(cat, r)
+    _rule_capability_dependencies(cat, r)
     _rule_catalogue_integrity(cat, pdoc, r)
     _rule_unique_provider_capability(pdoc, r)
     _rule_adapter_integrity(cat, pdoc, r)
     _rule_adapter_constraints(cat, pdoc, r)
+    _rule_features(cat, pdoc, r)
+    _rule_output_formats(cat, pdoc, r)
+    _rule_resource_estimation(pdoc, r)
+    _rule_cost(pdoc, r)
     _rule_fallback_graph(pdoc, r)
     _rule_families(pdoc, r)
     _rule_pricing(pdoc, r)
@@ -350,6 +475,7 @@ def validate(cat: Catalogue, pdoc: ProvidersDoc, rdoc: RoutingDoc) -> Report:
     _rule_config_keys(pdoc, r)
     _rule_anti_drift(cat, r)
     _rule_free_provider_sanity(pdoc, rdoc, r)
+    _rule_devices(devices, r)
     return r
 
 
@@ -387,17 +513,19 @@ def main(argv: list[str]) -> int:
         print(f"[FAIL] incomplete provider manifest — missing {missing}")
         return 1
 
+    devices_file = providers_dir / "devices.yaml"
     try:
         cat = load_catalogue(cap_file)
         pdoc = load_providers(prov_file)
         rdoc = load_routing(routing_file)
+        devices = load_devices(devices_file) if devices_file.exists() else None
     except Exception as exc:  # schema/parse errors become the report
         report = {"ok": False, "errors": [{"rule": "schema", "message": str(exc)}], "warnings": []}
         out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"[FAIL] provider manifest schema invalid:\n{exc}")
         return 1
 
-    r = validate(cat, pdoc, rdoc)
+    r = validate(cat, pdoc, rdoc, devices)
     report = {"ok": r.ok, "errors": r.errors, "warnings": r.warnings}
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -409,9 +537,11 @@ def main(argv: list[str]) -> int:
     for e in r.errors:
         print(f"  ERROR [{e['rule']}] {e['message']}")
     if r.ok:
+        n_devices = len(devices.device_profiles) if devices else 0
         print(
             f"[ OK ] provider manifest valid — {len(cat.capabilities)} capabilities, "
-            f"{len(pdoc.providers)} providers, {len(r.warnings)} warning(s)"
+            f"{len(pdoc.providers)} providers, {n_devices} device profile(s), "
+            f"{len(r.warnings)} warning(s)"
         )
         return 0
     print(f"[FAIL] provider manifest invalid — {len(r.errors)} error(s)")

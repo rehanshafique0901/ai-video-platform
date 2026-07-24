@@ -130,8 +130,8 @@ def _routing(strategy: str = "free_first", by_capability: dict | None = None) ->
     )
 
 
-def _validate(cat=None, pdoc=None, rdoc=None) -> vp.Report:
-    return vp.validate(cat or _catalogue(), pdoc or _providers(), rdoc or _routing())
+def _validate(cat=None, pdoc=None, rdoc=None, devices=None) -> vp.Report:
+    return vp.validate(cat or _catalogue(), pdoc or _providers(), rdoc or _routing(), devices)
 
 
 def _err_rules(report: vp.Report) -> set[str]:
@@ -156,7 +156,8 @@ def test_committed_manifest_validates_clean() -> None:
     cat = pm.load_catalogue(pm.PROVIDERS_DIR / pm.CAPABILITIES_FILE)
     pdoc = pm.load_providers(pm.PROVIDERS_DIR / pm.PROVIDERS_FILE)
     rdoc = pm.load_routing(pm.PROVIDERS_DIR / pm.ROUTING_FILE)
-    report = vp.validate(cat, pdoc, rdoc)
+    dev = pm.load_devices(pm.PROVIDERS_DIR / pm.DEVICES_FILE)
+    report = vp.validate(cat, pdoc, rdoc, dev)
     assert report.ok, report.errors
 
 
@@ -539,3 +540,179 @@ def test_non_free_strategy_skips_sanity() -> None:
     prov = _provider(pricing="paid", quota=_quota(daily=100), commercial=True)
     report = _validate(pdoc=_providers([prov]), rdoc=_routing("highest_quality"))
     assert "free_provider_sanity" not in _err_rules(report)
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — capability dependencies (capability → capability)
+# --------------------------------------------------------------------------- #
+
+
+def _cat_with_video_deps(**kw) -> pm.Catalogue:
+    cat = _catalogue()
+    cat.capabilities[2].dependencies = pm.CapabilityDependencies(**kw)  # video_generation
+    return cat
+
+
+def test_dependency_unknown_capability() -> None:
+    assert "dependencies" in _err_rules(_validate(cat=_cat_with_video_deps(requires=["ghost"])))
+
+
+def test_dependency_self_reference() -> None:
+    cat = _cat_with_video_deps(requires=["video_generation"])
+    assert "dependencies" in _err_rules(_validate(cat=cat))
+
+
+def test_dependency_required_and_optional_overlap() -> None:
+    cat = _cat_with_video_deps(requires=["image_generation"], optional=["image_generation"])
+    assert "dependencies" in _err_rules(_validate(cat=cat))
+
+
+def test_dependency_cycle() -> None:
+    cat = _catalogue()
+    cat.capabilities[0].dependencies = pm.CapabilityDependencies(requires=["video_generation"])
+    cat.capabilities[2].dependencies = pm.CapabilityDependencies(requires=["image_generation"])
+    assert "dependencies" in _err_rules(_validate(cat=cat))
+
+
+def test_dependency_valid_graph_is_clean() -> None:
+    cat = _cat_with_video_deps(requires=["image_generation"], optional=["text_to_speech"])
+    report = _validate(cat=cat)
+    assert "dependencies" not in _err_rules(report)
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — feature matrix
+# --------------------------------------------------------------------------- #
+
+
+def test_video_only_feature_on_image_warns() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", features=["motion_control"])]
+    )
+    assert "features" in _warn_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_features_on_non_media_capability_warn() -> None:
+    prov = _provider(adapters=[_adapter("alpha.text", "text_generation", features=["txt2img"])])
+    assert "features" in _warn_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_unknown_feature_rejected_by_schema() -> None:
+    with pytest.raises(ValidationError):
+        pm.Adapter(id="alpha.image", capability="image_generation", features=["upscale8k"])
+
+
+def test_valid_image_features_clean() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", features=["txt2img", "img2img"])]
+    )
+    report = _validate(pdoc=_providers([prov]))
+    assert "features" not in _err_rules(report) and "features" not in _warn_rules(report)
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — output characteristics
+# --------------------------------------------------------------------------- #
+
+
+def test_output_unknown_io_type_error() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", outputs={"hologram": ["x"]})]
+    )
+    assert "outputs" in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_output_io_type_not_in_capability_outputs() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", outputs={"video": ["mp4"]})]
+    )
+    assert "outputs" in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_output_bad_format_token() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", outputs={"image": ["tiff"]})]
+    )
+    assert "outputs" in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_output_empty_format_list() -> None:
+    prov = _provider(adapters=[_adapter("alpha.image", "image_generation", outputs={"image": []})])
+    assert "outputs" in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_output_valid_is_clean() -> None:
+    prov = _provider(
+        adapters=[_adapter("alpha.image", "image_generation", outputs={"image": ["png", "jpg"]})]
+    )
+    assert "outputs" not in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — resource estimation
+# --------------------------------------------------------------------------- #
+
+
+def test_recommended_ram_below_minimum_error() -> None:
+    rt = pm.AdapterRuntime(hardware=pm.Hardware(minimum_ram_gb=32, recommended_ram_gb=16))
+    prov = _provider(adapters=[_adapter("alpha.image", "image_generation", runtime=rt)])
+    assert "runtime" in _err_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_local_adapter_without_gpu_backend_warns() -> None:
+    rt = pm.AdapterRuntime(execution=pm.Execution(local=True))
+    prov = _provider(adapters=[_adapter("alpha.image", "image_generation", runtime=rt)])
+    assert "runtime" in _warn_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_negative_estimate_rejected_by_schema() -> None:
+    with pytest.raises(ValidationError):
+        pm.Estimated(image_seconds=-1)
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — cost hints (estimation-only)
+# --------------------------------------------------------------------------- #
+
+
+def test_free_provider_nonzero_cost_warns() -> None:
+    cost = pm.AdapterCost(unit="image", amount=5.0, currency="GBP")
+    prov = _provider(
+        pricing="free", adapters=[_adapter("alpha.image", "image_generation", cost=cost)]
+    )
+    assert "cost" in _warn_rules(_validate(pdoc=_providers([prov])))
+
+
+def test_bad_cost_unit_rejected_by_schema() -> None:
+    with pytest.raises(ValidationError):
+        pm.AdapterCost(unit="banana", amount=1.0, currency="GBP")
+
+
+def test_bad_currency_length_rejected_by_schema() -> None:
+    with pytest.raises(ValidationError):
+        pm.AdapterCost(unit="image", amount=1.0, currency="POUND")
+
+
+# --------------------------------------------------------------------------- #
+# α8.5d — device profiles (optional manifest)
+# --------------------------------------------------------------------------- #
+
+
+def test_duplicate_device_profile_id() -> None:
+    devices = pm.DevicesDoc(
+        device_profiles=[
+            pm.DeviceProfile(id="dev", backend="cpu"),
+            pm.DeviceProfile(id="dev", backend="metal"),
+        ]
+    )
+    assert "devices" in _err_rules(_validate(devices=devices))
+
+
+def test_bad_device_backend_rejected_by_schema() -> None:
+    with pytest.raises(ValidationError):
+        pm.DeviceProfile(id="dev", backend="tpu")
+
+
+def test_committed_devices_manifest_is_valid() -> None:
+    dev = pm.load_devices(pm.PROVIDERS_DIR / pm.DEVICES_FILE)
+    assert "devices" not in _err_rules(_validate(devices=dev))

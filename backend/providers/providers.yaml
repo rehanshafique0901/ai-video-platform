@@ -1,5 +1,5 @@
-# AI providers (Phase 3 α8.5c) — DESIGN-TIME spec. The runtime NEVER reads this
-# file (W8.5c.2); it is seeded into the DB by α8.5d.
+# AI providers (Phase 3 α8.5c, enriched α8.5d) — DESIGN-TIME spec. The runtime
+# NEVER reads this file (W8.5c.2); it is seeded into the DB by α8.5d.
 #
 # STATIC metadata only (W8.5c.3): operational state (health, latency, quota
 # *remaining*, success rate, 429 frequency) lives in the database, never here.
@@ -9,8 +9,17 @@
 #   quota    — declared design-time ceilings (daily/monthly); int | "unlimited".
 #   scores   — static declared vector (0–100). NO integer priority (R3).
 #   adapters — the first-class, runtime-loadable unit (provider.suffix). Each
-#              adapter serves exactly one capability and may declare capability-
-#              specific `supports` constraints the resolver can match against.
+#              adapter serves exactly one capability and may declare:
+#     supports  — capability-specific constraints the resolver matches against.
+#     features  — fine feature-matrix flags (α8.5d, controlled vocabulary; not
+#                 capabilities). image/video only; motion_control is video-only.
+#     outputs   — concrete output formats per io type (α8.5d Output Characteristics);
+#                 io-type keys must be a subset of the capability's outputs.
+#     runtime   — α8.5d: execution (local/cloud) + hardware + estimated resources.
+#     cost      — α8.5d: declared per-unit cost HINT (estimation-only, never
+#                 billing — W8.5d.8). free provider ⇒ amount 0.
+#     fallback  — ordered alternative adapter ids (same capability); a join table
+#                 at seed time (α8.5d D-A2).
 
 providers:
   - id: pollinations
@@ -29,10 +38,20 @@ providers:
         capability: image_generation
         status: planned
         supports: { commercial: true, nsfw: false, watermark: false, max_resolution: "1024x1024" }
+        features: [txt2img, negative_prompt, seed_control]
+        outputs: { image: [jpg, png] }
+        runtime:
+          execution: { local: false, cloud: true }
+          estimated: { warm_start_seconds: 0, image_seconds: 4 }
+        cost: { unit: image, amount: 0.0, currency: GBP, source: declared }
       - id: pollinations.text
         capability: text_generation
         status: planned
         supports: { commercial: true }
+        runtime:
+          execution: { local: false, cloud: true }
+          estimated: { warm_start_seconds: 0 }
+        cost: { unit: request, amount: 0.0, currency: GBP, source: declared }
 
   - id: huggingface
     name: Hugging Face Inference
@@ -51,6 +70,12 @@ providers:
         status: planned
         fallback: [pollinations.image]
         supports: { commercial: true, watermark: false }
+        features: [txt2img, img2img, negative_prompt, seed_control, lora]
+        outputs: { image: [png, jpg] }
+        runtime:
+          execution: { local: false, cloud: true }
+          estimated: { image_seconds: 8 }
+        cost: { unit: image, amount: 0.0, currency: GBP, source: derived }
       - id: huggingface.embedding
         capability: embedding
         status: planned
@@ -75,6 +100,12 @@ providers:
         status: planned
         fallback: [huggingface.image, pollinations.image]
         supports: { commercial: true, watermark: false, max_resolution: "2048x2048" }
+        features: [txt2img, img2img, reference_image, seed_control, inpainting, outpainting, lora, consistent_character]
+        outputs: { image: [png, jpg, webp] }
+        runtime:
+          execution: { local: false, cloud: true }
+          estimated: { image_seconds: 6 }
+        cost: { unit: image, amount: 0.02, currency: GBP, source: declared }
       - id: fal.video
         capability: video_generation
         status: planned
@@ -87,6 +118,12 @@ providers:
           async: true
           polling: true
           webhook: true
+        features: [txt2img, reference_image, motion_control]
+        outputs: { video: [mp4] }
+        runtime:
+          execution: { local: false, cloud: true }
+          estimated: { video_seconds: 90 }
+        cost: { unit: second, amount: 0.05, currency: GBP, source: declared }
 
   - id: kokoro
     name: Kokoro TTS
@@ -104,6 +141,69 @@ providers:
         capability: text_to_speech
         status: planned
         supports: { commercial: true, watermark: false }
+        outputs: { audio: [wav, mp3] }
+        runtime:
+          execution: { local: true, cloud: false }
+          hardware:
+            minimum_ram_gb: 4
+            recommended_ram_gb: 8
+            gpu: { metal: true, cuda: true, rocm: false, cpu: true }
+          estimated: { cold_start_seconds: 3, warm_start_seconds: 1, audio_seconds: 2, peak_ram_gb: 2, disk_gb: 1 }
+        cost: { unit: minute, amount: 0.0, currency: GBP, source: declared }
+
+  # --- local-first providers (α8.5d — local models are ordinary providers) -----
+  - id: ollama
+    name: Ollama
+    homepage: https://ollama.com
+    license: open
+    commercial: true
+    authentication: none
+    requires_login: false
+    pricing: free
+    quota: { daily: unlimited, monthly: unlimited }
+    config_keys: []
+    scores: { quality: 72, cost: 100, speed: 70, reliability: 80 }
+    adapters:
+      - id: ollama.text
+        capability: text_generation
+        status: planned
+        supports: { commercial: true }
+        runtime:
+          execution: { local: true, cloud: false }
+          hardware:
+            minimum_ram_gb: 8
+            recommended_ram_gb: 16
+            gpu: { metal: true, cuda: true, rocm: true, cpu: true }
+          estimated: { cold_start_seconds: 5, warm_start_seconds: 1, peak_ram_gb: 6, disk_gb: 5 }
+        cost: { unit: request, amount: 0.0, currency: GBP, source: declared }
+
+  - id: comfyui
+    name: ComfyUI
+    homepage: https://github.com/comfyanonymous/ComfyUI
+    license: open
+    commercial: true
+    authentication: none
+    requires_login: false
+    pricing: free
+    quota: { daily: unlimited, monthly: unlimited }
+    config_keys: []
+    scores: { quality: 85, cost: 100, speed: 55, reliability: 75 }
+    adapters:
+      - id: comfyui.flux_schnell
+        capability: image_generation
+        status: planned
+        fallback: [pollinations.image]
+        supports: { commercial: true, nsfw: true, watermark: false, max_resolution: "1024x1024" }
+        features: [txt2img, img2img, negative_prompt, seed_control, lora, inpainting, outpainting, reference_image, consistent_character]
+        outputs: { image: [png, webp] }
+        runtime:
+          execution: { local: true, cloud: false }
+          hardware:
+            minimum_ram_gb: 16
+            recommended_ram_gb: 32
+            gpu: { metal: true, cuda: true, rocm: false, cpu: true }
+          estimated: { cold_start_seconds: 8, warm_start_seconds: 2, image_seconds: 6, peak_ram_gb: 12, peak_vram_gb: 8, disk_gb: 20 }
+        cost: { unit: image, amount: 0.0, currency: GBP, source: declared }
 
 families:
   - id: flux

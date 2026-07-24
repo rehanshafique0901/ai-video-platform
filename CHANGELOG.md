@@ -6,6 +6,40 @@
 
 ## [Unreleased]
 
+### Design lock + tooling — α8.5d Capability-registry seed pre-flight & manifest enrichment (2026-07-25)
+
+**Governance + design-time tooling only — no runtime change, no migration, no version bump yet** (the
+runtime seed + additive migration land with the `0.4.35-phase3-alpha8.5d-dev` bump once implemented).
+Signs off the α8.5d pre-flight (`docs/engineering/PHASE3_ALPHA8_5d_PREFLIGHT.md`) and — since `main`
+is held unpushed — **amends the α8.5c manifests/schema/validator in place** (cleaner than a follow-up
+governance commit) so the catalogue is rich enough for the α8.5e resolver and the MRC planner without
+future schema churn.
+
+#### Added (design-time, all additive to α8.5c)
+- **Capability dependencies** (`capabilities.yaml`) — a `dependencies` block (`requires`/`optional`
+  *capabilities*, distinct from param-level requires/optional; requires-graph validated acyclic) so
+  the planner can build capability graphs (e.g. `video_generation` requires `image_generation`).
+- **Feature matrix** (adapter, `providers.yaml`) — controlled `features` vocabulary
+  (`txt2img/img2img/negative_prompt/seed_control/reference_image/consistent_character/lora/
+  inpainting/outpainting/motion_control/face_reference/depth_control/pose_control`) so provider
+  capabilities aren't fragmented into dozens of tiny capabilities.
+- **Resource estimation** (adapter `runtime.estimated`) — `cold_start_seconds`/`warm_start_seconds`/
+  `image_seconds`/`video_seconds`/`audio_seconds`/`peak_ram_gb`/`peak_vram_gb`/`disk_gb` for
+  scheduling, local execution, batching, progress estimates, device selection.
+- **Output characteristics** (adapter `outputs`) — concrete formats per io type (validated against a
+  vocabulary and against the capability's declared outputs) so downstream planning needs no
+  adapter-specific logic.
+- **Runtime requirements** (adapter `runtime.execution` + `runtime.hardware`) + **cost hints** (adapter
+  `cost`, estimation-only — never a billing source) + **device profiles**
+  (`backend/providers/devices.yaml`, optional manifest) — the execution/hardware/mode metadata folded
+  into the provider/runtime schema per ADR-0044 X-G.
+- **Local providers** — Ollama (`ollama.text`) and ComfyUI (`comfyui.flux_schnell`) seeded as ordinary
+  free/local adapters (`execution.local=true`), proving local models are just providers.
+- **Validator rules** — capability-dependency integrity + cycle check, feature vocabulary/applicability,
+  output-format vocabulary + capability-output subset check, resource-estimation sanity, free-provider
+  cost sanity, device-profile uniqueness; the offline validator now also loads the optional
+  `devices.yaml`. Unit tests grew to 66 (all green); full offline gate (stages 0–4) PASS.
+
 ### Tooling / CI — α8.5c Capability Catalogue & Provider Registry (design-time spec, 2026-07-25)
 
 **Tooling + design-time spec only — no application or runtime change, no version bump, no new

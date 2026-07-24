@@ -10,6 +10,10 @@
 #   * outputs  — the modalities it produces.
 #   * requires — mandatory request parameter names.
 #   * optional — optional request parameter names (disjoint from `requires`).
+#   * dependencies — prerequisite CAPABILITIES (α8.5d, not params): a block with
+#                    `requires` (mandatory; the requires-graph MUST be acyclic) and
+#                    `optional` (nice-to-have). Distinct from the param-level
+#                    requires/optional above; both default to empty.
 #
 # io types (inputs/outputs vocabulary): text | image | video | audio | subtitle | embedding
 #
@@ -113,6 +117,9 @@ capabilities:
     outputs: [video]
     requires: [prompt]
     optional: [reference_image, duration_seconds, resolution, fps, seed]
+    dependencies:
+      requires: [image_generation]
+      optional: [music_generation, text_to_speech, subtitle_generation]
   - id: video_upscale
     kind: video
     inputs: [video]
@@ -131,6 +138,9 @@ capabilities:
     outputs: [video]
     requires: [video, audio]
     optional: []
+    dependencies:
+      requires: [video_generation, text_to_speech]
+      optional: []
   - id: video_edit
     kind: video
     inputs: [video, text]
@@ -149,6 +159,9 @@ capabilities:
     outputs: [subtitle]
     requires: [video]
     optional: [language]
+    dependencies:
+      requires: []
+      optional: [translation]
 
   # --- kind: voice ---------------------------------------------------------
   - id: text_to_speech
