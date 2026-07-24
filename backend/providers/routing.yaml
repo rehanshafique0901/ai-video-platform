@@ -1,0 +1,26 @@
+# Routing policy (Phase 3 α8.5c) — DESIGN-TIME spec. The runtime NEVER reads this
+# file (W8.5c.2); it is seeded into the DB by α8.5d and the resolver (a later
+# slice) reads the DB.
+#
+# Selection is score + strategy driven — there is NO integer priority (R3). The
+# resolver (deferred) computes a final score per candidate provider from its
+# static score vector under the active strategy; dynamic health/latency factors
+# are explicitly NOT modelled yet (static routing is enough for now).
+#
+#   strategy  ∈ free_first | lowest_cost | highest_quality | fastest | balanced |
+#               offline_only | privacy_first | commercial_only | free_only
+#   fallback  ∈ automatic | none
+#   selection ∈ best_available | first_available
+#
+# `by_capability` keys MUST be catalogue capability ids and override `defaults`.
+
+defaults:
+  strategy: free_first
+  fallback: automatic
+  selection: best_available
+
+by_capability:
+  video_generation:
+    strategy: highest_quality
+  text_to_speech:
+    strategy: lowest_cost

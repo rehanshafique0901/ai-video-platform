@@ -14,33 +14,46 @@ human-reviewable YAML spec of the capability→provider graph plus an offline CI
 **runtime never reads the YAML** (W8.5c.2) — the database stays the runtime source of truth; a later
 slice (α8.5d) seeds the DB from this validated spec (`YAML → validator → seeder → DB → runtime`).
 
+Structured as **three focused manifests** (post-ship design review, R2): `capabilities.yaml`
+(vocabulary), `providers.yaml` (providers/adapters/families), `routing.yaml` (policy).
+
 #### Added
 - **Capability catalogue** (`backend/providers/capabilities.yaml`) — 27 fine-grained capabilities,
   each grouped under a coarse `kind` (`llm|image|video|voice`) that mirrors `plugin_kind_enum` / the
-  code `Capability` enum. `publishing` is deliberately excluded (separate bounded context, α8.6).
-- **AI provider registry** (`backend/providers/registry.yaml`) — a free-first seed set
-  (Pollinations, Hugging Face, fal, Kokoro) modelled *capability → providers*. Selection is
-  **score + routing-strategy** driven (`quality/cost/speed/reliability`, 0–100) — **no integer
-  priority anywhere**. Static-only: operational state (health, latency, quota, success rate) lives in
-  the DB, never in Git (W8.5c.3). Adapter IDs are first-class (`pollinations.image`); families carry
-  variants with acyclic inheritance.
-- **Pydantic v2 schema/loader** (`backend/scripts/provider_manifest.py`) — strict (`extra="forbid"`,
+  code `Capability` enum, and **enriched** with typed `inputs`/`outputs`
+  (`text|image|video|audio|subtitle|embedding`) + `requires`/`optional` request params — the data a
+  future planner needs to compose capability graphs and a UI needs to auto-generate request forms.
+  `publishing` is deliberately excluded (separate bounded context, α8.6).
+- **AI providers** (`backend/providers/providers.yaml`) — a free-first seed set (Pollinations,
+  Hugging Face, fal, Kokoro) modelled *capability → providers*. Selection is **score +
+  routing-strategy** driven (`quality/cost/speed/reliability`, 0–100) — **no integer priority
+  anywhere**. Richer free-tier model: `pricing` (`free|freemium|paid`) + `quota` (daily/monthly) +
+  `authentication` + `requires_login`. Adapters are first-class (`pollinations.image`) and carry
+  capability-specific `supports` constraints (`commercial/nsfw/watermark/max_duration_seconds/
+  max_resolution/queue/async/polling/webhook`) the future resolver can match on. Static-only:
+  operational state (health, latency, quota-remaining, success rate, 429 frequency) lives in the DB,
+  never in Git (W8.5c.3). Families carry variants with acyclic inheritance.
+- **Routing policy** (`backend/providers/routing.yaml`) — per-capability strategy overrides over a
+  default; static routing only (dynamic health/latency scoring is explicitly deferred to the future
+  resolver).
+- **Pydantic v2 schema/loaders** (`backend/scripts/provider_manifest.py`) — strict (`extra="forbid"`,
   so a stray `priority:` fails loudly); lives under `scripts/` (not `app/`) so the runtime cannot
   import it.
 - **Offline validator** (`backend/scripts/validate_providers.py`) — deterministic, **no network / no
-  DB** (W8.5c.5); 12 rule families (uniqueness, catalogue integrity, unique provider+capability,
-  adapter shape/interface, fallback graph acyclicity, family inheritance acyclicity, free-tier
-  consistency, routing enums, config-keys-are-names-not-values, anti-drift vs the code vocabulary,
-  free-provider sanity). Writes `.validation/provider_validation_report.json`; fails closed.
+  DB** (W8.5c.5); 14 rule families (uniqueness, capability-metadata integrity, catalogue integrity,
+  unique provider+capability, adapter shape/interface, adapter-constraint applicability, fallback
+  graph acyclicity, family inheritance acyclicity, pricing/quota sanity, routing enums,
+  config-keys-are-names-not-values, anti-drift vs the code vocabulary, free-provider sanity). Writes
+  `.validation/provider_validation_report.json`; fails closed.
 - **CI gate Stage 0.** A fast, no-DB pre-flight that runs before every other stage (so a manifest
   regression fails cheaply before the DB round-trip). Numbered `0` on purpose — the 1–10 map stays
   stable so the restoration guard's "stage 6 = downgrade" / live-DB range 5–9 keying is untouched.
-  Skips cleanly (exit 0) when the manifest is absent.
+  Skips cleanly (exit 0) when the manifest is absent; fails closed on an incomplete (partial) trio.
 
 #### Verified
-- New offline stage green; committed manifest validates clean (27 capabilities, 4 providers).
-  33 new unit tests (red + green fixture per validator rule, plus schema strictness) pass. Fast gate
-  (Stage 0–4) + freeze guard green. No migration, no runtime version bump.
+- New offline stage green; the three committed manifests validate clean (27 capabilities, 4
+  providers). 43 unit tests (red + green fixture per validator rule, plus schema strictness) pass.
+  Fast gate (Stage 0–4) + freeze guard green. No migration, no runtime version bump.
 
 #### Docs
 - New pre-flight `docs/engineering/PHASE3_ALPHA8_5c_PREFLIGHT.md` (SIGNED OFF); ADR-0041 addendum

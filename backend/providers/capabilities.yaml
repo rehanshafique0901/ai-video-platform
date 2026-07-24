@@ -1,50 +1,189 @@
-# Canonical AI capability catalogue (Phase 3 α8.5c).
+# Canonical AI capability catalogue (Phase 3 α8.5c) — DESIGN-TIME source of truth.
 #
-# This is the DESIGN-TIME source of truth for the platform's capability language.
-# The runtime NEVER reads this file (W8.5c.2) — a later slice (α8.5d) seeds the
-# database from the validated spec, and the runtime reads the database.
+# The runtime NEVER reads this file (W8.5c.2); a later slice (α8.5d) seeds the DB
+# from the validated spec and the runtime reads the DB.
 #
-# Two levels (W8.5c / R2):
-#   * kind        — the coarse routing bucket; MUST be one of {llm, image, video,
-#                   voice}, mirroring plugin_kind_enum / the code Capability enum.
-#   * capability  — the fine-grained action; stored at runtime in the open
-#                   `capabilities text[]` columns (ai_models / provider_plugin_registrations).
+# Each capability declares:
+#   * kind     — coarse routing bucket ∈ {llm, image, video, voice}, mirroring
+#                plugin_kind_enum / the code Capability enum.
+#   * inputs   — the modalities the capability consumes  (io types below).
+#   * outputs  — the modalities it produces.
+#   * requires — mandatory request parameter names.
+#   * optional — optional request parameter names (disjoint from `requires`).
 #
-# `publishing` is intentionally ABSENT — publishing destinations are a separate
-# bounded context with their own registry (W8.5c.4), authored in α8.6.
+# io types (inputs/outputs vocabulary): text | image | video | audio | subtitle | embedding
+#
+# This metadata is what lets a future planner compose capability graphs and a UI
+# auto-generate request forms — without hardcoding any provider knowledge.
+# `publishing` is intentionally ABSENT (separate bounded context, α8.6).
 
 capabilities:
   # --- kind: llm -----------------------------------------------------------
-  - { id: text_generation, kind: llm }
-  - { id: embedding, kind: llm }
-  - { id: moderation, kind: llm }
-  - { id: translation, kind: llm }
-  - { id: ocr, kind: llm }
+  - id: text_generation
+    kind: llm
+    inputs: [text]
+    outputs: [text]
+    requires: [prompt]
+    optional: [system, temperature, max_tokens, stop]
+  - id: embedding
+    kind: llm
+    inputs: [text]
+    outputs: [embedding]
+    requires: [input]
+    optional: [model]
+  - id: moderation
+    kind: llm
+    inputs: [text]
+    outputs: [text]
+    requires: [input]
+    optional: []
+  - id: translation
+    kind: llm
+    inputs: [text]
+    outputs: [text]
+    requires: [text, target_language]
+    optional: [source_language]
+  - id: ocr
+    kind: llm
+    inputs: [image]
+    outputs: [text]
+    requires: [image]
+    optional: [language]
 
   # --- kind: image ---------------------------------------------------------
-  - { id: image_generation, kind: image }
-  - { id: image_edit, kind: image }
-  - { id: image_upscale, kind: image }
-  - { id: background_removal, kind: image }
-  - { id: inpainting, kind: image }
-  - { id: outpainting, kind: image }
-  - { id: object_removal, kind: image }
-  - { id: face_swap, kind: image }
-  - { id: caption_generation, kind: image }
+  - id: image_generation
+    kind: image
+    inputs: [text]
+    outputs: [image]
+    requires: [prompt]
+    optional: [negative_prompt, reference_image, seed, steps, width, height]
+  - id: image_edit
+    kind: image
+    inputs: [image, text]
+    outputs: [image]
+    requires: [image, prompt]
+    optional: [mask, strength, seed]
+  - id: image_upscale
+    kind: image
+    inputs: [image]
+    outputs: [image]
+    requires: [image]
+    optional: [scale]
+  - id: background_removal
+    kind: image
+    inputs: [image]
+    outputs: [image]
+    requires: [image]
+    optional: []
+  - id: inpainting
+    kind: image
+    inputs: [image, text]
+    outputs: [image]
+    requires: [image, mask, prompt]
+    optional: [seed]
+  - id: outpainting
+    kind: image
+    inputs: [image, text]
+    outputs: [image]
+    requires: [image, prompt]
+    optional: [direction, seed]
+  - id: object_removal
+    kind: image
+    inputs: [image]
+    outputs: [image]
+    requires: [image, mask]
+    optional: []
+  - id: face_swap
+    kind: image
+    inputs: [image]
+    outputs: [image]
+    requires: [source_image, target_image]
+    optional: []
+  - id: caption_generation
+    kind: image
+    inputs: [image]
+    outputs: [text]
+    requires: [image]
+    optional: [max_length]
 
   # --- kind: video ---------------------------------------------------------
-  - { id: video_generation, kind: video }
-  - { id: video_upscale, kind: video }
-  - { id: video_interpolation, kind: video }
-  - { id: lip_sync, kind: video }
-  - { id: video_edit, kind: video }
-  - { id: frame_extraction, kind: video }
-  - { id: subtitle_generation, kind: video }
+  - id: video_generation
+    kind: video
+    inputs: [text]
+    outputs: [video]
+    requires: [prompt]
+    optional: [reference_image, duration_seconds, resolution, fps, seed]
+  - id: video_upscale
+    kind: video
+    inputs: [video]
+    outputs: [video]
+    requires: [video]
+    optional: [scale]
+  - id: video_interpolation
+    kind: video
+    inputs: [video]
+    outputs: [video]
+    requires: [video]
+    optional: [target_fps]
+  - id: lip_sync
+    kind: video
+    inputs: [video, audio]
+    outputs: [video]
+    requires: [video, audio]
+    optional: []
+  - id: video_edit
+    kind: video
+    inputs: [video, text]
+    outputs: [video]
+    requires: [video, prompt]
+    optional: []
+  - id: frame_extraction
+    kind: video
+    inputs: [video]
+    outputs: [image]
+    requires: [video]
+    optional: [timestamp_seconds, fps]
+  - id: subtitle_generation
+    kind: video
+    inputs: [video]
+    outputs: [subtitle]
+    requires: [video]
+    optional: [language]
 
   # --- kind: voice ---------------------------------------------------------
-  - { id: text_to_speech, kind: voice }
-  - { id: speech_to_text, kind: voice }
-  - { id: voice_clone, kind: voice }
-  - { id: voice_conversion, kind: voice }
-  - { id: music_generation, kind: voice }
-  - { id: sound_effect_generation, kind: voice }
+  - id: text_to_speech
+    kind: voice
+    inputs: [text]
+    outputs: [audio]
+    requires: [text]
+    optional: [voice, language, speed]
+  - id: speech_to_text
+    kind: voice
+    inputs: [audio]
+    outputs: [text]
+    requires: [audio]
+    optional: [language]
+  - id: voice_clone
+    kind: voice
+    inputs: [audio, text]
+    outputs: [audio]
+    requires: [reference_audio, text]
+    optional: [language]
+  - id: voice_conversion
+    kind: voice
+    inputs: [audio]
+    outputs: [audio]
+    requires: [audio, target_voice]
+    optional: []
+  - id: music_generation
+    kind: voice
+    inputs: [text]
+    outputs: [audio]
+    requires: [prompt]
+    optional: [duration_seconds, genre]
+  - id: sound_effect_generation
+    kind: voice
+    inputs: [text]
+    outputs: [audio]
+    requires: [prompt]
+    optional: [duration_seconds]

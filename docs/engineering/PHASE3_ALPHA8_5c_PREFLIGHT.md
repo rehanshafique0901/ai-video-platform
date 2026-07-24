@@ -14,6 +14,16 @@
 > Pydantic) · **S-E** (invariants **W8.5c.1–6**) · catalogue (§4) & validator (§5) accepted ·
 > **capability-first inversion**, **two-level `kind`+`capability`**, **no integer priority**,
 > **family inheritance (acyclic)**, **adapter-id primacy**, **free-provider sanity** all adopted.
+>
+> **Revision R2 (post-ship design review):** the single `registry.yaml` is split into **three
+> focused manifests** — `capabilities.yaml` (vocabulary), `providers.yaml` (providers + adapters +
+> families), `routing.yaml` (policy). The catalogue is **enriched** with typed I/O
+> (`inputs`/`outputs`) + `requires`/`optional` params; providers carry a richer **`pricing`
+> (`free`/`freemium`/`paid`) + `quota` + `requires_login`** model (replacing the flat `free` block);
+> adapters carry capability-specific **`supports` constraints** (`commercial`/`nsfw`/`watermark`/
+> `max_duration_seconds`/`max_resolution`/`queue`/`async`/`polling`/`webhook`). **Dynamic health/
+> latency scoring stays out** (static routing only). New validator rules: capability-metadata
+> integrity, constraint applicability, pricing/quota sanity. Still tooling-only, no version bump.
 
 ---
 
@@ -93,66 +103,69 @@ zero-runtime**.
 
 ---
 
-## 3. Manifest schema (design-time spec) — `backend/providers/`
+## 3. Manifest schema (design-time spec) — `backend/providers/` (three files, R2)
 
-Two YAML files, validated by a Pydantic v2 schema in `scripts/provider_manifest.py` (tooling module —
-**not** under `app/`, so runtime can't import it; enforces W8.5c.2).
+**Three focused manifests**, validated by a Pydantic v2 schema in `scripts/provider_manifest.py`
+(tooling module — **not** under `app/`, so runtime can't import it; enforces W8.5c.2).
 
 ```yaml
-# backend/providers/capabilities.yaml — canonical catalogue (see §4)
+# backend/providers/capabilities.yaml — the vocabulary (see §4)
 capabilities:
   - id: image_generation
-    kind: image            # kind ∈ {llm, image, video, voice}
-  - id: text_to_speech
-    kind: voice
-  # … full catalogue …
+    kind: image                       # kind ∈ {llm, image, video, voice}
+    inputs: [text]                    # io types: text|image|video|audio|subtitle|embedding
+    outputs: [image]
+    requires: [prompt]                # snake_case param names; disjoint from `optional`
+    optional: [negative_prompt, reference_image, seed, steps]
 ```
 
 ```yaml
-# backend/providers/registry.yaml — AI capability → provider graph
+# backend/providers/providers.yaml — providers, adapters, families
 providers:
   - id: pollinations
     name: Pollinations
     homepage: https://pollinations.ai
     license: open
     commercial: true
-    authentication: none              # none | api_key | oauth | token
-    free:
-      available: true
-      signup_required: false
-      api_key_required: false
-      daily_limit: unlimited          # int | "unlimited"
-      monthly_limit: unlimited
-      watermark: false
+    authentication: none              # none | api_key | oauth | token (credential source of truth)
+    requires_login: false             # portal signup needed even if no per-call key
+    pricing: free                     # free | freemium | paid (free+freemium = "free-capable")
+    quota: { daily: unlimited, monthly: unlimited }   # int | "unlimited" | null
     config_keys: []                   # KEY NAMES only, never secret values
     scores: { quality: 70, cost: 100, speed: 90, reliability: 75 }   # static, 0–100; NO priority
     adapters:
-      - id: pollinations.image
+      - id: pollinations.image        # first-class, runtime-loadable unit: <provider>.<suffix>
         capability: image_generation
-        status: planned               # planned | implemented
-        # import_path: "pkg.mod:Class"   # required iff status == implemented
+        status: planned               # planned | implemented (implemented ⇒ import_path exists)
         fallback: []                  # adapter ids, same capability, acyclic, no self
+        supports:                     # capability-specific constraints the resolver matches on
+          commercial: true            # commercial|nsfw|watermark|queue|async|polling|webhook (bool)
+          watermark: false
+          max_resolution: "1024x1024" # only meaningful for image/video kinds
+          # max_duration_seconds: 30  # only meaningful for video/voice kinds (int > 0)
 
 families:
   - id: flux
     parent: null                      # optional; inheritance must be acyclic
     variants:
       - { id: flux.dev, provider: fal }
-      - { id: flux.schnell, provider: fal }
-
-routing:
-  defaults:
-    strategy: free_first              # free_first | lowest_cost | highest_quality | fastest |
-                                      # balanced | offline_only | privacy_first | commercial_only | free_only
-    fallback: automatic               # automatic | none
-    selection: best_available         # best_available | first_available
-  by_capability:
-    video_generation: { strategy: highest_quality }
-# operational state (health/latency/success_rate/quota/last_error/consecutive_failures) is ABSENT — DB only
 ```
 
-Publishing destinations get a **parallel** schema + file (`backend/publishing/destinations.yaml`),
-validated by the **same** tooling but a **separate** registry (R7) — designed here, authored in α8.6.
+```yaml
+# backend/providers/routing.yaml — the policy (score + strategy; NO integer priority)
+defaults:
+  strategy: free_first                # free_first | lowest_cost | highest_quality | fastest |
+                                      # balanced | offline_only | privacy_first | commercial_only | free_only
+  fallback: automatic                 # automatic | none
+  selection: best_available           # best_available | first_available
+by_capability:
+  video_generation: { strategy: highest_quality }
+  text_to_speech: { strategy: lowest_cost }
+# operational state (health/latency/success_rate/quota-remaining/429-freq) is ABSENT — DB only
+```
+
+Publishing destinations get a **parallel** trio (`backend/publishing/*.yaml`), validated by the
+**same** tooling but a **separate** registry (R7) — designed here, authored in α8.6.
 
 ---
 
@@ -172,6 +185,12 @@ validated by the **same** tooling but a **separate** registry (R7) — designed 
 > cleanly onto `plugin_kind_enum` / `Capability`. (`ocr`/`caption`/`subtitle` are grouped by the
 > pipeline stage that produces them; assignments are data and can be re-grouped without code change.)
 
+**R2 enrichment:** each catalogue entry now also declares typed `inputs`/`outputs` (from
+`text|image|video|audio|subtitle|embedding`) and `requires`/`optional` request-param names. This is
+what lets a future planner **compose capability graphs** (prompt → LLM → image → upscale → video →
+music → voice → subtitles → render → export, each node asking only for a *capability*) and lets a UI
+auto-generate/validate request forms — with zero provider knowledge in either.
+
 ---
 
 ## 5. Validator (`scripts/validate_providers.py`) — offline, deterministic
@@ -180,33 +199,38 @@ Fails closed; writes `.validation/provider_validation_report.json`; non-zero exi
 Warnings do not fail the gate.
 
 1. **Uniqueness:** unique provider ids · adapter ids · variant/model ids · capability ids.
-2. **Catalogue integrity:** catalogue capability ids unique, each `kind ∈ {llm,image,video,voice}`;
-   every adapter `capability ∈ catalogue` (**error**); catalogue capability served by no adapter =
-   **warning** (orphan).
-3. **Unique (provider, capability):** a provider serves a given capability at most once (**error**).
-4. **Adapter integrity:** id shape `^[a-z0-9_]+\.[a-z0-9_]+$`; `implemented` ⇒ `import_path` present,
+2. **Capability metadata (R2):** non-empty `inputs`/`outputs` (∈ io-type vocab, enforced by schema);
+   `requires`/`optional` are unique, snake_case, and **disjoint**.
+3. **Catalogue integrity:** every adapter `capability ∈ catalogue` (**error**); catalogue capability
+   served by no adapter = **warning** (orphan).
+4. **Unique (provider, capability):** a provider serves a given capability at most once (**error**).
+5. **Adapter integrity:** id shape `^[a-z0-9_]+\.[a-z0-9_]+$`; `implemented` ⇒ `import_path` present,
    importable, a class, and **structurally implements** the `kind`'s protocol
-   (`metadata` + `health` + kind verbs: image→`generate_image`, video→`submit`&`resolve`,
-   llm→`generate_text`, voice→`synthesize_voice`); `planned` ⇒ shape + capability only.
-5. **Fallback graph:** every edge targets an existing adapter of the **same capability**; **no
+   (`health` + kind verbs: image→`generate_image`, video→`submit`&`resolve`, llm→`generate_text`,
+   voice→`synthesize_voice`); `planned` ⇒ shape + capability only.
+6. **Adapter constraints (R2):** `max_duration_seconds` only meaningful for `video`/`voice` kinds,
+   `max_resolution` only for `image`/`video` (**warning** otherwise); `max_duration_seconds > 0`
+   (schema).
+7. **Fallback graph:** every edge targets an existing adapter of the **same capability**; **no
    self-fallback**; **acyclic**.
-6. **Families:** variant ids unique; every `variant.provider` exists; `family.parent` exists if set;
+8. **Families:** variant ids unique; every `variant.provider` exists; `family.parent` exists if set;
    **family inheritance acyclic** (reject circular inheritance).
-7. **Free-tier consistency:** `api_key_required: true` ⇒ `authentication != none`;
-   `available: false` ⇒ no positive free limits; limits are `int | "unlimited"`.
-8. **Auth & routing enums:** `authentication`, `routing.strategy/fallback/selection` ∈ recognised
-   sets; every `routing.by_capability` key ∈ catalogue.
-9. **Scores:** `quality/cost/speed/reliability` present, integer, `0..100`; **no `priority` key**
-   permitted (**error** if present).
-10. **Config keys:** KEY NAMES only — an entry containing `=` or a value-looking token is an
-    **error** (guards against secrets in Git).
-11. **Anti-drift:** every code `Capability` value maps to a catalogue `kind`; catalogue does not
-    contradict the seeded `plugin_kind` vocabulary.
-12. **Free-provider sanity:** for every capability whose **effective** strategy is `free_first` or
-    `free_only`, at least one serving provider has `free.available == true` (**error** otherwise).
+9. **Pricing/quota (R2):** `pricing ∈ {free,freemium,paid}` (schema); numeric quota limits `> 0`
+   (**error**); a `free`/`freemium` provider with no declared quota = **warning**.
+10. **Auth & routing enums:** `authentication`, `routing.strategy/fallback/selection` ∈ recognised
+    sets (schema); every `routing.by_capability` key ∈ catalogue.
+11. **Scores:** `quality/cost/speed/reliability` present, integer, `0..100`; **no `priority` key**
+    permitted (schema `extra=forbid`).
+12. **Config keys:** KEY NAMES only — an entry containing `=`/whitespace is an **error** (guards
+    against secrets in Git); non-`UPPER_SNAKE` = **warning**.
+13. **Anti-drift:** every code `Capability` value maps to a catalogue `kind`; `plugin_kind_enum`
+    matches the coarse vocabulary.
+14. **Free-provider sanity:** for every capability whose **effective** strategy is `free_first` or
+    `free_only`, at least one serving provider has `pricing ∈ {free,freemium}` (**error** otherwise).
 
 **No network** in the standard gate; a future `--probe` (default off) would exercise health
-endpoints — out of scope to implement in α8.5c.
+endpoints — out of scope to implement in α8.5c. **Dynamic health/latency scoring is explicitly not
+modelled** (static routing only; `final = score × health × latency × cost` is a later resolver).
 
 ---
 

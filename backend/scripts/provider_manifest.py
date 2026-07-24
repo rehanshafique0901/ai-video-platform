@@ -1,13 +1,17 @@
-"""Pydantic schema + loader for the α8.5c capability/provider design-time spec.
+"""Pydantic schema + loaders for the α8.5c capability/provider design-time spec.
 
-This module lives under ``scripts/`` — **not** under ``app/`` — on purpose: the
-runtime must never read the YAML manifest (invariant **W8.5c.2**; the database is
-the runtime source of truth). Only the offline tooling (the CI validator now, the
-α8.5d seeder later) imports this.
+Three focused manifests under ``backend/providers/`` (design-time only; the
+runtime never reads them — W8.5c.2, the DB is the runtime source of truth):
 
-The schema is intentionally strict (``extra="forbid"`` everywhere) so a typo — or
-a stray ``priority:`` key (R3 forbids integer priority) — fails loudly at load
-time rather than silently changing behaviour.
+  * ``capabilities.yaml`` — the capability *vocabulary* (kind + typed I/O + params).
+  * ``providers.yaml``    — providers, their adapters (the runtime-loadable unit)
+                            with capability-specific ``supports`` constraints, and
+                            model families.
+  * ``routing.yaml``      — the routing *policy* (strategy per capability).
+
+This module lives under ``scripts/`` — **not** under ``app/`` — so the runtime
+cannot import it. The schema is strict (``extra="forbid"``) so a typo — or a
+stray ``priority:`` key (R3 forbids integer priority) — fails loudly at load.
 """
 
 from __future__ import annotations
@@ -19,10 +23,14 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-# The coarse routing buckets — MUST mirror ``plugin_kind_enum`` / the code
+# Coarse routing buckets — MUST mirror ``plugin_kind_enum`` / the code
 # ``Capability`` enum. Extending this is a deliberate, migration-bearing act
 # (deferred); the fine capability vocabulary is open by contrast.
 KINDS: frozenset[str] = frozenset({"llm", "image", "video", "voice"})
+
+# kinds for which a duration / resolution constraint is meaningful.
+_DURATION_KINDS: frozenset[str] = frozenset({"video", "voice"})
+_RESOLUTION_KINDS: frozenset[str] = frozenset({"image", "video"})
 
 
 class Kind(StrEnum):
@@ -32,11 +40,26 @@ class Kind(StrEnum):
     VOICE = "voice"
 
 
+class IOType(StrEnum):
+    TEXT = "text"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    SUBTITLE = "subtitle"
+    EMBEDDING = "embedding"
+
+
 class Authentication(StrEnum):
     NONE = "none"
     API_KEY = "api_key"
     OAUTH = "oauth"
     TOKEN = "token"
+
+
+class Pricing(StrEnum):
+    FREE = "free"
+    FREEMIUM = "freemium"
+    PAID = "paid"
 
 
 class AdapterStatus(StrEnum):
@@ -66,6 +89,9 @@ class Selection(StrEnum):
     FIRST_AVAILABLE = "first_available"
 
 
+# pricing tiers a free-first / free-only strategy can draw on.
+FREE_PRICING: frozenset[str] = frozenset({Pricing.FREE, Pricing.FREEMIUM})
+
 Score = Annotated[int, Field(ge=0, le=100)]
 Limit = int | Literal["unlimited"]
 
@@ -75,13 +101,17 @@ class _Strict(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Catalogue
+# capabilities.yaml
 # --------------------------------------------------------------------------- #
 
 
 class CapabilityEntry(_Strict):
     id: str
     kind: Kind
+    inputs: list[IOType]
+    outputs: list[IOType]
+    requires: list[str] = Field(default_factory=list)
+    optional: list[str] = Field(default_factory=list)
 
 
 class Catalogue(_Strict):
@@ -89,17 +119,13 @@ class Catalogue(_Strict):
 
 
 # --------------------------------------------------------------------------- #
-# Registry
+# providers.yaml
 # --------------------------------------------------------------------------- #
 
 
-class FreeTier(_Strict):
-    available: bool
-    signup_required: bool = False
-    api_key_required: bool = False
-    daily_limit: Limit = "unlimited"
-    monthly_limit: Limit = "unlimited"
-    watermark: bool = False
+class Quota(_Strict):
+    daily: Limit | None = None
+    monthly: Limit | None = None
 
 
 class Scores(_Strict):
@@ -109,12 +135,32 @@ class Scores(_Strict):
     reliability: Score
 
 
+class AdapterSupports(_Strict):
+    """Capability-specific constraints the resolver can match against.
+
+    All optional: an absent field means "unspecified", not "false".
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    commercial: bool | None = None
+    nsfw: bool | None = None
+    watermark: bool | None = None
+    queue: bool | None = None
+    asynchronous: bool | None = Field(default=None, alias="async")
+    polling: bool | None = None
+    webhook: bool | None = None
+    max_duration_seconds: int | None = Field(default=None, gt=0)
+    max_resolution: str | None = None
+
+
 class Adapter(_Strict):
     id: str
     capability: str
     status: AdapterStatus = AdapterStatus.PLANNED
     import_path: str | None = None
     fallback: list[str] = Field(default_factory=list)
+    supports: AdapterSupports = Field(default_factory=AdapterSupports)
 
 
 class Provider(_Strict):
@@ -125,7 +171,9 @@ class Provider(_Strict):
     license: str | None = None
     commercial: bool = False
     authentication: Authentication = Authentication.NONE
-    free: FreeTier
+    requires_login: bool = False
+    pricing: Pricing
+    quota: Quota = Field(default_factory=Quota)
     config_keys: list[str] = Field(default_factory=list)
     scores: Scores
     adapters: list[Adapter]
@@ -142,6 +190,16 @@ class Family(_Strict):
     variants: list[Variant] = Field(default_factory=list)
 
 
+class ProvidersDoc(_Strict):
+    providers: list[Provider]
+    families: list[Family] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# routing.yaml
+# --------------------------------------------------------------------------- #
+
+
 class RoutingDefaults(_Strict):
     strategy: RoutingStrategy
     fallback: FallbackMode
@@ -154,15 +212,9 @@ class RoutingPolicy(_Strict):
     selection: Selection | None = None
 
 
-class RoutingConfig(_Strict):
+class RoutingDoc(_Strict):
     defaults: RoutingDefaults
     by_capability: dict[str, RoutingPolicy] = Field(default_factory=dict)
-
-
-class Registry(_Strict):
-    providers: list[Provider]
-    families: list[Family] = Field(default_factory=list)
-    routing: RoutingConfig
 
 
 # --------------------------------------------------------------------------- #
@@ -171,7 +223,9 @@ class Registry(_Strict):
 
 PROVIDERS_DIR = Path(__file__).resolve().parent.parent / "providers"
 CAPABILITIES_FILE = "capabilities.yaml"
-REGISTRY_FILE = "registry.yaml"
+PROVIDERS_FILE = "providers.yaml"
+ROUTING_FILE = "routing.yaml"
+MANIFEST_FILES = (CAPABILITIES_FILE, PROVIDERS_FILE, ROUTING_FILE)
 
 
 def _read_yaml(path: Path) -> dict:
@@ -186,9 +240,13 @@ def load_catalogue(path: Path) -> Catalogue:
     return Catalogue.model_validate(_read_yaml(path))
 
 
-def load_registry(path: Path) -> Registry:
-    return Registry.model_validate(_read_yaml(path))
+def load_providers(path: Path) -> ProvidersDoc:
+    return ProvidersDoc.model_validate(_read_yaml(path))
 
 
-def manifest_present(providers_dir: Path = PROVIDERS_DIR) -> bool:
-    return (providers_dir / CAPABILITIES_FILE).exists() and (providers_dir / REGISTRY_FILE).exists()
+def load_routing(path: Path) -> RoutingDoc:
+    return RoutingDoc.model_validate(_read_yaml(path))
+
+
+def manifest_files_present(providers_dir: Path = PROVIDERS_DIR) -> list[bool]:
+    return [(providers_dir / name).exists() for name in MANIFEST_FILES]
