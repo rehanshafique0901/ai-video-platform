@@ -20,6 +20,7 @@ A red gate blocks merge. There are no opt-outs.
 
 | #  | Stage                                | Tool                   | Live DB? | Budget   |
 |----|--------------------------------------|------------------------|----------|----------|
+| 0  | Provider manifest (capability registry) | `scripts/validate_providers.py` | no  | <  2 s   |
 | 1  | Lint                                 | `ruff check`           | no       | <  3 s   |
 | 2  | Format                               | `black --check`        | no       | <  3 s   |
 | 3  | Static analysis                      | `mypy` + import-linter | no       | < 15 s   |
@@ -34,7 +35,13 @@ A red gate blocks merge. There are no opt-outs.
 Total wall-clock budget: **≤ 6 min** in CI; observed Phase 2C run on a warm runner ≈ **3 m 40 s**.
 
 Stages execute strictly in order and fail-fast: a non-zero exit at any
-stage aborts the pipeline. Stages 5–9 require a reachable PostgreSQL
+stage aborts the pipeline. **Stage 0** (α8.5c) is a fast, no-DB pre-flight that
+validates the capability catalogue + provider manifest under `backend/providers/`
+offline (`scripts/validate_providers.py`); it runs *before* every other stage so
+a manifest regression fails cheaply, and skips (exit 0) when the manifest is
+absent. It is numbered `0` — rather than renumbering 1–10 — so the restoration
+guard's "stage 6 = downgrade" / live-DB range 5–9 keying stays exact. Stages 5–9
+require a reachable PostgreSQL
 with `pgvector` (in CI: a `pgvector/pgvector:pg16` service container; in
 local dev: `backend/.env.validation` pointing at Supabase, Neon, or a
 local Docker container).

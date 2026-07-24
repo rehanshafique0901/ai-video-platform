@@ -6,6 +6,46 @@
 
 ## [Unreleased]
 
+### Tooling / CI — α8.5c Capability Catalogue & Provider Registry (design-time spec, 2026-07-25)
+
+**Tooling + design-time spec only — no application or runtime change, no version bump, no new
+migration.** Lays the *capability-first* ground truth for the future AI orchestrator: a curated,
+human-reviewable YAML spec of the capability→provider graph plus an offline CI validator. The
+**runtime never reads the YAML** (W8.5c.2) — the database stays the runtime source of truth; a later
+slice (α8.5d) seeds the DB from this validated spec (`YAML → validator → seeder → DB → runtime`).
+
+#### Added
+- **Capability catalogue** (`backend/providers/capabilities.yaml`) — 27 fine-grained capabilities,
+  each grouped under a coarse `kind` (`llm|image|video|voice`) that mirrors `plugin_kind_enum` / the
+  code `Capability` enum. `publishing` is deliberately excluded (separate bounded context, α8.6).
+- **AI provider registry** (`backend/providers/registry.yaml`) — a free-first seed set
+  (Pollinations, Hugging Face, fal, Kokoro) modelled *capability → providers*. Selection is
+  **score + routing-strategy** driven (`quality/cost/speed/reliability`, 0–100) — **no integer
+  priority anywhere**. Static-only: operational state (health, latency, quota, success rate) lives in
+  the DB, never in Git (W8.5c.3). Adapter IDs are first-class (`pollinations.image`); families carry
+  variants with acyclic inheritance.
+- **Pydantic v2 schema/loader** (`backend/scripts/provider_manifest.py`) — strict (`extra="forbid"`,
+  so a stray `priority:` fails loudly); lives under `scripts/` (not `app/`) so the runtime cannot
+  import it.
+- **Offline validator** (`backend/scripts/validate_providers.py`) — deterministic, **no network / no
+  DB** (W8.5c.5); 12 rule families (uniqueness, catalogue integrity, unique provider+capability,
+  adapter shape/interface, fallback graph acyclicity, family inheritance acyclicity, free-tier
+  consistency, routing enums, config-keys-are-names-not-values, anti-drift vs the code vocabulary,
+  free-provider sanity). Writes `.validation/provider_validation_report.json`; fails closed.
+- **CI gate Stage 0.** A fast, no-DB pre-flight that runs before every other stage (so a manifest
+  regression fails cheaply before the DB round-trip). Numbered `0` on purpose — the 1–10 map stays
+  stable so the restoration guard's "stage 6 = downgrade" / live-DB range 5–9 keying is untouched.
+  Skips cleanly (exit 0) when the manifest is absent.
+
+#### Verified
+- New offline stage green; committed manifest validates clean (27 capabilities, 4 providers).
+  33 new unit tests (red + green fixture per validator rule, plus schema strictness) pass. Fast gate
+  (Stage 0–4) + freeze guard green. No migration, no runtime version bump.
+
+#### Docs
+- New pre-flight `docs/engineering/PHASE3_ALPHA8_5c_PREFLIGHT.md` (SIGNED OFF); ADR-0041 addendum
+  (capability-first registry direction); `CI_QUALITY_GATE.md` + `docs/CI_QUALITY_GATE.md` Stage 0.
+
 ### Tooling / CI — validation-DB isolation & self-healing restoration guard (2026-07-24)
 
 **Infrastructure/tooling only — no application or runtime change, no version bump, no new

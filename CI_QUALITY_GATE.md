@@ -6,10 +6,11 @@
 
 ## 1. What runs, in what order
 
-Ten stages, **fail-fast** — the first failure stops the run.
+Eleven stages (**0–10**), **fail-fast** — the first failure stops the run.
 
 | # | Stage                                              | Tool                                              | Needs DB? | Typical runtime |
 |---|----------------------------------------------------|---------------------------------------------------|-----------|-----------------|
+| 0 | Provider manifest (capability registry, α8.5c)     | `scripts/validate_providers.py`                   | no        | < 2 s           |
 | 1 | Lint                                               | `ruff check app tests scripts`                    | no        | < 1 s           |
 | 2 | Format                                             | `black --check app tests scripts`                 | no        | < 2 s           |
 | 3 | Static analysis (types + architecture)             | `mypy --strict` + `lint-imports`                  | no        | 2–10 s          |
@@ -52,6 +53,8 @@ python scripts/ci_gate.py
 ```
 
 Live-DB stages 5–9 require either `DATABASE_URL` exported in the shell or `backend/.env.validation` present (git-ignored, format: `DATABASE_URL=postgresql+psycopg://…`).
+
+**Stage 0 — provider manifest pre-flight (α8.5c, tooling).** A fast, offline (no network, no DB) validation of the capability catalogue + provider registry under `backend/providers/` (`scripts/validate_providers.py`). It is capability-first (the runtime never reads the YAML — the DB is the runtime source of truth), enforces the α8.5c rule set (uniqueness, catalogue integrity, unique provider+capability, adapter shape/interface, acyclic fallback & family inheritance, free-tier consistency, routing enums, config-keys-not-values, anti-drift vs the code vocabulary, free-provider sanity), and writes `.validation/provider_validation_report.json`. Numbered `0` deliberately: it runs before every other stage (so a manifest regression fails cheaply, before the DB round-trip) while keeping the 1–10 map — and therefore the restoration guard's stage-6/live-range keying — stable. Skips (exit 0) when the manifest is absent. Run it alone with `python scripts/ci_gate.py --stages 0`.
 
 **Destructive-stage isolation & self-healing (tooling).** Stage 6 (`alembic downgrade base`) empties the target schema, so a transient failure before the stage-7 re-upgrade could once leave a *shared* validation DB at `base`. Two guards remove this: (1) **isolation** — target a throwaway DB via `--ephemeral-db` / `CI_GATE_EPHEMERAL_DB=1` (a `pgvector/pgvector:pg16` container created + destroyed by the runner) or a dedicated `VALIDATION_DATABASE_URL`, in that precedence over `DATABASE_URL`; and (2) **self-healing** — whenever a downgrade may have run against a *persistent* DB, the runner does a bounded-retry `alembic upgrade head` on every exit path (including Ctrl-C) and verifies `current == heads`, refusing to report `PASSED` until the DB is confirmed at head. Recommended local invocation for migration work: `python scripts/ci_gate.py --stages 5-9 --ephemeral-db`.
 

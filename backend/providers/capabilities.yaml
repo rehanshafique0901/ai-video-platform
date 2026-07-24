@@ -1,0 +1,50 @@
+# Canonical AI capability catalogue (Phase 3 α8.5c).
+#
+# This is the DESIGN-TIME source of truth for the platform's capability language.
+# The runtime NEVER reads this file (W8.5c.2) — a later slice (α8.5d) seeds the
+# database from the validated spec, and the runtime reads the database.
+#
+# Two levels (W8.5c / R2):
+#   * kind        — the coarse routing bucket; MUST be one of {llm, image, video,
+#                   voice}, mirroring plugin_kind_enum / the code Capability enum.
+#   * capability  — the fine-grained action; stored at runtime in the open
+#                   `capabilities text[]` columns (ai_models / provider_plugin_registrations).
+#
+# `publishing` is intentionally ABSENT — publishing destinations are a separate
+# bounded context with their own registry (W8.5c.4), authored in α8.6.
+
+capabilities:
+  # --- kind: llm -----------------------------------------------------------
+  - { id: text_generation, kind: llm }
+  - { id: embedding, kind: llm }
+  - { id: moderation, kind: llm }
+  - { id: translation, kind: llm }
+  - { id: ocr, kind: llm }
+
+  # --- kind: image ---------------------------------------------------------
+  - { id: image_generation, kind: image }
+  - { id: image_edit, kind: image }
+  - { id: image_upscale, kind: image }
+  - { id: background_removal, kind: image }
+  - { id: inpainting, kind: image }
+  - { id: outpainting, kind: image }
+  - { id: object_removal, kind: image }
+  - { id: face_swap, kind: image }
+  - { id: caption_generation, kind: image }
+
+  # --- kind: video ---------------------------------------------------------
+  - { id: video_generation, kind: video }
+  - { id: video_upscale, kind: video }
+  - { id: video_interpolation, kind: video }
+  - { id: lip_sync, kind: video }
+  - { id: video_edit, kind: video }
+  - { id: frame_extraction, kind: video }
+  - { id: subtitle_generation, kind: video }
+
+  # --- kind: voice ---------------------------------------------------------
+  - { id: text_to_speech, kind: voice }
+  - { id: speech_to_text, kind: voice }
+  - { id: voice_clone, kind: voice }
+  - { id: voice_conversion, kind: voice }
+  - { id: music_generation, kind: voice }
+  - { id: sound_effect_generation, kind: voice }

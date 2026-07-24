@@ -1,7 +1,9 @@
 """Cross-platform CI quality gate runner.
 
-Executes — in order, fail-fast — the ten stages mandated by ADR-0028:
+Executes — in order, fail-fast — the stages mandated by ADR-0028 (+ the α8.5c
+provider pre-flight):
 
+    0. validate_providers        (capability/provider manifest — offline, no DB)
     1. ruff check                (lint)
     2. black --check             (format)
     3. mypy + lint-imports       (static analysis)
@@ -12,6 +14,12 @@ Executes — in order, fail-fast — the ten stages mandated by ADR-0028:
     8. validate_schema           (live structural checks)
     9. compare_erd               (generated vs design ERD)
    10. coverage                  (threshold enforcement)
+
+Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
+manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
+rather than renumbering 1-10 — precisely so the destructive-stage restoration
+guard, which keys on "stage 6 = downgrade" and the live-DB range 5-9, stays
+correct.
 
 Stages 1–4 and 10 are cheap and run on every PR. Stages 5–9 require a
 live PostgreSQL with pgvector reachable via ``DATABASE_URL`` (in CI this
@@ -393,6 +401,15 @@ def _stages() -> list[Stage]:
     py = sys.executable
     return [
         Stage(
+            number=0,
+            title="provider manifest (capability registry)",
+            cmd=[
+                py,
+                "scripts/validate_providers.py",
+                ".validation/provider_validation_report.json",
+            ],
+        ),
+        Stage(
             number=1,
             title="ruff check (lint)",
             cmd=[py, "-m", "ruff", "check", "app", "tests", "scripts"],
@@ -474,9 +491,9 @@ def _stages() -> list[Stage]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_stage_range(arg: str | None, total: int) -> set[int]:
+def _parse_stage_range(arg: str | None, valid: set[int]) -> set[int]:
     if not arg:
-        return set(range(1, total + 1))
+        return set(valid)
     selected: set[int] = set()
     for chunk in arg.split(","):
         chunk = chunk.strip()
@@ -488,7 +505,7 @@ def _parse_stage_range(arg: str | None, total: int) -> set[int]:
             selected.add(int(chunk))
         else:
             raise SystemExit(f"invalid stage selector: {chunk!r}")
-    return selected & set(range(1, total + 1))
+    return selected & valid
 
 
 def main(argv: list[str]) -> int:
@@ -526,7 +543,7 @@ def main(argv: list[str]) -> int:
 
     stages = _stages()
     total = len(stages)
-    selected = _parse_stage_range(args.stages, total)
+    selected = _parse_stage_range(args.stages, {s.number for s in stages})
 
     # --- Resolve the target database for the live-DB stages (5-9) ----------
     # Precedence: --ephemeral-db  >  VALIDATION_DATABASE_URL  >  DATABASE_URL /
