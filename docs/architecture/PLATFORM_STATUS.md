@@ -282,9 +282,10 @@ exist. See [`ADR-0041` §Event projection pattern](../decisions/ADR-0041-provide
 | **α8.5b.3r** | ✅ Notifications read API — `GET /notifications` (keyset feed), `GET /notifications/unread-count`, `POST /notifications/{id}/read` + `/read-all` (action verbs); owner-scoped read-model completion on the α8.5b.3 projection (W8.5b.8/9/10); zero migration; archive/inbox features out; shipped `v0.4.34` |
 | **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
 | **α8.5c** | Capability Catalogue & Provider Registry (tooling) — three design-time manifests + offline validator + CI Stage 0; *capability → providers*, score+strategy, static-only; runtime never reads the YAML (W8.5c.2). No runtime/migration/version bump |
-| **α8.5x** | **AI Runtime & Generation Architecture (governance, ADR-0044)** — verify-driven, capability-first, local-first pipeline (Plan → Generate → Verify → Repair); requirements AR1–AR15 + invariants W8.5x.1–W8.5x.15; local execution/hardware abstraction. Governs α8.5d→α8.6. Docs-only |
-| **α8.5d** | Seed — YAML → DB seeder + additive migration (makes the DB the populated runtime source of truth; α8.5x) |
-| **α8.5e** | Capability resolver — local-first / free-first selection (ADR-0041 D2 realised; α8.5x) |
+| **α8.5x** | **AI Runtime & Generation Architecture (governance, ADR-0044 — Accepted)** — verify-driven, capability-first, local-first pipeline (Plan → Generate → Verify → Repair); requirements AR1–AR18 + invariants W8.5x.1–W8.5x.18; local execution/hardware abstraction. Carves out the **Minimum Runtime Contract MRC-1…MRC-8** as the Phase-1 MVP scope (the only runtime α8.5d/α8.5e + the first generation slice must ship); Phase 2 defers the AR depth. Governs α8.5d→α8.6. Docs-only |
+| **α8.5d** | Seed — YAML → DB seeder + additive migration (DB = populated runtime source of truth; carries execution/hardware/mode metadata per ADR-0044 X-G; α8.5x) |
+| **α8.5e** | Capability resolver — local-first / free-first selection (MRC-2/-3; ADR-0041 D2 realised; α8.5x) |
+| **α8.5x-mrc** | MRC — the MVP: planner → character memory → scene-by-scene → generate → threshold verification → resume → asset cache → render → export, capturing AR18 provenance (α8.5x) |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers; its own parallel registry, shared α8.5c tooling; after the AR runtime) |
 
 All remaining work is **downstream of / additive to the frozen orchestration

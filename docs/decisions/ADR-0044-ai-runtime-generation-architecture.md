@@ -1,10 +1,20 @@
 # ADR-0044 — α8.5x AI Runtime & Generation Architecture: Plan → Generate → Verify → Repair, Capability-First and Local-First
 
-**Status:** Proposed (**DRAFT — awaiting sign-off**). A **governance / design-lock**
-decision — **docs-only. No application code, no schema migration, no runtime
-behaviour change, no app version bump.** Mirrors the ADR-0041 / ADR-0042 /
-ADR-0043 docs-only precedent. Every α8.5x slice (α8.5d onward) is evaluated
-against it, exactly as α8.4e/α8.5a were evaluated against ADR-0043.
+**Status:** **Accepted** (rulings signed off 2026-07-25 — forks X-A…X-G decided;
+AR16–AR18 added; a **Minimum Runtime Contract (MRC)** carved out as the Phase-1
+production scope). A **governance / design-lock** decision — **docs-only. No
+application code, no schema migration, no runtime behaviour change, no app version
+bump.** Mirrors the ADR-0041 / ADR-0042 / ADR-0043 docs-only precedent. Every
+α8.5x slice (α8.5d onward) is evaluated against it, exactly as α8.4e/α8.5a were
+evaluated against ADR-0043.
+
+**Scope split (the load-bearing ruling).** The goal is a platform *a
+non-technical user can actually use in 1–2 days*. So AR1–AR18 are the **long-term
+architecture**, and the **Minimum Runtime Contract (MRC-1…MRC-8)** in **D7** is
+the **only** thing α8.5d/α8.5e + the first runtime slice must implement now.
+Phase 2 (D8) lands the remaining AR depth incrementally. The MRC is a *subset*,
+not a compromise: every MRC piece is a thin, correct realisation of its AR that
+Phase 2 deepens without redesign.
 
 **A boundary + a contract, not a freeze.** ADR-0042 *froze* the orchestration
 core; ADR-0043 drew the *render composition* boundary. This ADR does the same for
@@ -113,7 +123,7 @@ stage does two jobs (AR12). The DAG is *data* (a plan), not hardcoded control
 flow — which is what makes long-video decomposition (AR13), resume (AR14), and
 mode selection (AR11) fall out naturally.
 
-### D3 — Architecture Requirements (AR1–AR15) and their invariants
+### D3 — Architecture Requirements (AR1–AR18) and their invariants
 
 Each AR is **normative**; each has a matching enforceable invariant **W8.5x.N**
 and an **owning slice**. "Builds on" names the existing construct so the slice is
@@ -136,6 +146,9 @@ additive.
 | **AR13** | **Long-video strategy.** Generate + verify scene-by-scene, *then* render — so crashes are recoverable. | Plan decomposes into independently-verifiable scenes; render consumes accepted scenes (ADR-0039/0043). | **W8.5x.13** — long outputs are decomposed into per-scene generate+verify units before render. | α8.5x-scene |
 | **AR14** | **Resume capability.** On failure, resume from the last **verified** scene, not scene 1. | Reuses the WorkflowRun pause → checkpoint → resume machinery (ADR-0040 / α8.3) at scene granularity. | **W8.5x.14** — a failed run resumes from the last accepted scene; accepted scenes are never regenerated. | α8.5x-scene |
 | **AR15** | **Cost optimizer.** Planner estimates: local-feasible? → free? → paid; the user pays only when necessary. | Plan carries a feasibility/cost estimate driving the AR7 order. | **W8.5x.15** — the plan carries a cost/feasibility estimate; paid providers are used only when local + free cannot satisfy the plan under the active mode. | α8.5x-plan |
+| **AR16** | **Project memory.** Every project has persistent memory — characters, locations, props, music, voices, generated assets, provider history, costs, failures, seeds, prompts, reference images, verification scores — so *"continue yesterday's project"* reloads everything, losing nothing. | New `Project` memory aggregate/read-model over existing `MediaAsset` (ADR-0037), `usage_records`, and the α8.5x plan/identity/scene state; additive tables. | **W8.5x.16** — a project's state is fully reconstructable from persisted memory; resuming a project loses no character/asset/seed/prompt/cost/score information. | α8.5x-memory *(MRC-4/-8: partial — Phase 1)* |
+| **AR17** | **Workflow checkpoints (first-class for generation).** Make the platform's checkpoint machinery first-class per generation stage: Planning ✓ · Characters ✓ · Scene 1..N ✓ · Render · Publish — resume from the first incomplete stage after a crash. | Reuses the WorkflowRun pause → checkpoint → resume machinery (ADR-0040 / α8.3) at *generation-stage* granularity; additive stage-status projection. | **W8.5x.17** — every generation stage is individually checkpointed; a crash resumes from the first incomplete stage, never from the start. | α8.5x-scene *(MRC-7: Phase 1)* |
+| **AR18** | **Provider transparency.** For every project, store the full provider ledger — planner / images / voice / music / renderer / exporter / publisher — for debugging, reproducibility, cost analysis, provider comparison, and support. | Derived from the α8.5e resolver decisions + `usage_records` (ADR-0033); an additive per-project provenance read-model. | **W8.5x.18** — every generated artifact records which adapter produced it and at what cost; the full provider/cost ledger is queryable per project. | α8.5x-memory *(MRC: capture from day one)* |
 
 ### D4 — Local-first execution & hardware abstraction (AR7 / AR9 / AR10)
 
@@ -188,33 +201,68 @@ Every α8.5x slice's pre-flight answers both, exactly as α8.4e→α8.5b.3r did:
   Generation/verification/identity are **not** composition; render still consumes
   only Timeline + accepted `MediaAsset`s (RC1–RC6 intact).
 
+### D7 — The Minimum Runtime Contract (MRC): Phase-1 production scope
+
+The MRC is the **only** runtime α8.5d/α8.5e + the first generation slice must
+ship for a usable MVP. Each MRC item is a **thin, correct** realisation of its
+AR(s) — Phase 2 (D8) deepens it without redesign.
+
+| MRC | Phase-1 deliverable | Realises (thin) | Deliberately deferred to Phase 2 |
+| --- | --- | --- | --- |
+| **MRC-1 — Planner** | Prompt → a **structured `Project`**: title, target platform, duration, scenes, characters, assets required, music, narration, subtitles. | AR1, AR11 (single default mode) | Multiple planners, quality modes, cost estimator (AR15) |
+| **MRC-2 — Capability resolver** | `capability → resolver → best provider → execute`. This *is* α8.5d + α8.5e. | AR8 | Adaptive/operational-health routing |
+| **MRC-3 — Local-first** | `need X → can local? → local, else free cloud, else paid`. | AR7 | GPU orchestration, hardware auto-tuning depth (AR9/AR10 stay basic) |
+| **MRC-4 — Character memory** | `Project → CharacterSheet → seed + reference images + style + voice`; every generation references it. Eliminates most face drift. | AR2 (+ AR16 partial) | Full scene-state inheritance (AR3) |
+| **MRC-5 — Scene-by-scene** | Never generate the whole video at once; generate per scene. | AR13 | — |
+| **MRC-6 — Basic verification** | **Threshold-based** CLIP / face / prompt similarity → below threshold ⇒ regenerate. No AI critics. | AR4 (thin) | Multi-agent verification, AR5 bounded *repair-strategy* loop (Phase-1 is regenerate-only) |
+| **MRC-7 — Resume** | If scene 7 fails, resume scene 7 — never restart. Mandatory. | AR14, AR17 | Cross-machine/distributed resume |
+| **MRC-8 — Asset cache** | Reuse existing background / voice / music instead of regenerating. | AR6 (+ AR16 partial) | Content-addressed dedup across projects |
+
+**Captured from day one (cheap now, invaluable later):** **AR18 provider
+transparency** — every artifact records which adapter produced it and its cost.
+This is a write, not a framework, so it ships with the MRC.
+
+### D8 — Phase 2 (deferred, non-blocking)
+
+Valuable but **not** shippable-MVP blockers, landed incrementally after the MRC:
+advanced/bounded **repair strategies** (AR5 beyond regenerate), **multiple
+planners**, **quality modes** (AR11 full), **multi-agent verification** (AR4
+depth), **GPU orchestration** + Apple-Silicon tuning (AR9/AR10 depth), **adaptive
+routing** (operational health), **distributed rendering**, and the full **project
+memory** aggregate (AR16) beyond the MRC-4/-8 slice.
+
 ---
 
 ## Sequencing (refines CONTENT_GENERATION_PIPELINE §13)
 
-α8.5x is a **program**, delivered as additive slices in dependency order:
+α8.5x is a **program** delivered **MRC-first** (X-F), in dependency order. The
+merge order that lands governance/tooling before runtime behaviour (X-B/X-F):
 
-1. **α8.5d — Seed.** YAML (α8.5c) → validator → **seeder + additive migration** →
-   DB. Makes the DB the *populated* runtime source of truth. *(migration: additive)*
-2. **α8.5e — Resolver.** Capability + strategy → provider, **local-first / free-first**
-   (AR7/AR8), reading static + operational state from the DB. Realises ADR-0041 D2.
-3. **α8.5x-plan / -identity / -scene.** `GenerationPlan` + `CharacterSheet` +
-   `Scene` aggregates (AR1/AR2/AR3/AR11/AR13/AR15).
-4. **α8.5x-verify / -repair.** Verifier capability + bounded repair loop
-   (AR4/AR5); asset-reuse index (AR6).
-5. **α8.5x-exec.** Hardware detection + local execution adapters, Intel-first;
-   Apple-Silicon later (AR9/AR10).
-6. **α8.6 — Publishing.** `PublishJob` + `SocialAccount` + destination OAuth — a
+1. **CI hardening chore → main** (tooling; already committed).
+2. **α8.5c Provider Registry → main** (tooling; already committed).
+3. **ADR-0044 → main** (governance-only, **no version bump**).
+4. **α8.5d — Seed.** YAML (α8.5c) → validator → **seeder + additive migration** →
+   DB (the DB becomes the *populated* runtime source of truth). Carries the
+   **execution/mode/hardware metadata** in the provider/runtime schema (X-G).
+   *(migration: additive)*
+5. **α8.5e — Resolver.** Capability + strategy → provider, **local-first /
+   free-first** (AR7/AR8), from the DB. Realises ADR-0041 D2. *(= MRC-2/-3)*
+6. **α8.5x-mrc — MRC implementation (the MVP).** The Phase-1 slice(s): MRC-1
+   planner → MRC-4 character memory → MRC-5 scene-by-scene → generate → MRC-6
+   threshold verification → MRC-7 resume → MRC-8 asset cache → render → export,
+   capturing AR18 provenance throughout. This is the *usable-in-1–2-days* goal.
+7. **α8.6 — Publishing.** `PublishJob` + `SocialAccount` + destination OAuth — a
    separate bounded context with its **own** (parallel) registry + shared α8.5c
-   tooling. Sequenced **after** the AR runtime per the product goal.
-7. **UI + end-to-end.** Wire the studio surface; polish.
+   tooling. **After** the runtime (X-C): the runtime must reliably *produce*
+   assets before we publish them.
+8. **Phase 2 (D8) + UI/end-to-end.** Deepen the AR set incrementally; wire and
+   polish the studio surface.
 
-> **MVP realism (flag).** AR1–AR15 in full is a multi-slice program, not a
-> 1–2-day build at this project's quality bar (each slice carries a pre-flight,
-> two gates, tests, and the CI gate). The pragmatic first cut is a **thin vertical
-> slice**: α8.5d + α8.5e (local/free-first) + a *minimal* planner + one generate
-> → verify → bounded-repair → render → export path — then broaden AR coverage
-> incrementally. See Fork **X-F**.
+> **MVP realism (resolved via the MRC).** A full AR1–AR18 build is a multi-slice
+> program, not a 1–2-day effort at this project's quality bar (each slice carries
+> a pre-flight, two gates, tests, and the CI gate). The **MRC (D7)** is the
+> answer: it is the *only* runtime α8.5d/α8.5e + the first generation slice must
+> ship now; Phase 2 (D8) broadens coverage without redesign.
 
 ---
 
@@ -235,39 +283,38 @@ requirement is realised by its own additive slice with its own pre-flight.
 
 ---
 
-## Forks needing a ruling (before implementation)
+## Rulings (signed off 2026-07-25)
 
-- **X-A — Artifact.** ADR-0044 governs the α8.5x initiative (recommended) vs a
-  lighter non-ADR charter. *Rec: ADR (this doc).*
-- **X-B — New bounded contexts.** Introduce Planning (`GenerationPlan`), Character
-  Identity (`CharacterSheet`), Scene State, Verification/Repair, Execution/Hardware
-  as distinct additive contexts (recommended), phased per Sequencing.
-- **X-C — Sequencing.** α8.5d → α8.5e → plan/identity/scene → verify/repair/reuse
-  → exec → **α8.6 publishing** → UI (matches your "Before Shipping" order). Confirm
-  publishing lands **after** the AR runtime.
-- **X-D — Freeze posture.** α8.5x is entirely additive (Gate 1 = No): planner
-  upstream, verify/repair downstream, resolver = the designed `resolve()` seam,
-  execution = new adapters. **Zero freeze overrides.** Confirm.
-- **X-E — Invariant numbering.** Adopt **W8.5x.1–W8.5x.15** (1:1 with AR1–AR15).
-- **X-F — MVP scope.** Accept the **thin vertical slice** as the first milestone
-  (α8.5d + α8.5e local/free-first + minimal planner + one generate→verify→repair→
-  render→export), with full AR coverage landing incrementally — rather than
-  "AR1–AR15 in 1–2 days."
-- **X-G — α8.5c metadata extension.** Add additive manifest metadata now
-  (`execution: local\|cloud`, hardware hints, generation `modes`) as a small
-  α8.5c-follow-up (tooling), or fold into α8.5d. *Rec: fold into α8.5d's schema.*
+- **X-A — Artifact.** ✅ **Approved as an ADR** (governance artifact).
+- **X-B — New bounded contexts.** ✅ **Approved** — introduce planner/runtime as
+  separate additive bounded contexts (Planning, Character Identity, Scene,
+  Verify/Repair, Execution, Project-Memory), phased per Sequencing.
+- **X-C — Sequencing.** ✅ **Publishing (α8.6) stays after the runtime** — the
+  runtime must reliably produce assets before publishing them.
+- **X-D — Freeze posture.** ✅ **Keep it additive** — no changes to the ADR-0042
+  frozen orchestration surface; **zero freeze overrides**.
+- **X-E — Invariant numbering.** ✅ **Approved** — now **W8.5x.1–W8.5x.18**
+  (AR16–AR18 added).
+- **X-F — Scope / staging.** ✅ **Stage the work** — deliver the **MRC (D7)**
+  first, then implement the remaining AR requirements incrementally (D8).
+- **X-G — Execution/hardware metadata.** ✅ **Store in the provider/runtime schema
+  introduced with α8.5d** (execution preferences + hardware metadata + generation
+  modes), not scattered across slices.
+- Also accepted: **AR16 Project Memory**, **AR17 Workflow Checkpoints**, **AR18
+  Provider Transparency** (D3); AR1–AR18 as the α8.5x requirement set; the local
+  model strategy (D5) as non-binding defaults.
 
 ## Sign-off checklist
 
-- [ ] **X-A** artifact = ADR-0044
-- [ ] **X-B** new bounded contexts accepted (phased)
-- [ ] **X-C** sequencing (publishing after AR runtime) confirmed
-- [ ] **X-D** additive freeze posture (zero overrides) confirmed
-- [ ] **X-E** invariants W8.5x.1–W8.5x.15 accepted
-- [ ] **X-F** thin-vertical-slice MVP accepted
-- [ ] **X-G** execution/mode metadata placement chosen
-- [ ] AR1–AR15 (D3) accepted as the α8.5x requirement set
-- [ ] Local model strategy (D5) accepted as non-binding defaults
+- [x] **X-A** artifact = ADR-0044
+- [x] **X-B** new bounded contexts accepted (phased)
+- [x] **X-C** sequencing (publishing after the runtime) confirmed
+- [x] **X-D** additive freeze posture (zero overrides) confirmed
+- [x] **X-E** invariants W8.5x.1–W8.5x.18 accepted
+- [x] **X-F** MRC-first staging accepted (MRC then Phase 2)
+- [x] **X-G** execution/mode/hardware metadata → α8.5d provider/runtime schema
+- [x] AR1–AR18 (D3) accepted as the α8.5x requirement set
+- [x] Local model strategy (D5) accepted as non-binding defaults
 
 ---
 
@@ -286,3 +333,4 @@ requirement is realised by its own additive slice with its own pre-flight.
 | Date | Change |
 |---|---|
 | 2026-07-25 | Initial authoring — **DRAFT** governance/design-lock of the **α8.5x AI Runtime & Generation Architecture** (docs-only; no code/migration/version bump). Locks the verify-driven, capability-first, local-first generation pipeline (D1/D2), the requirement set **AR1–AR15** with invariants **W8.5x.1–W8.5x.15** (D3), the local execution/hardware abstraction (D4) and recommended local model defaults (D5), and freeze/boundary compliance via the two gates (D6). Sequences the program α8.5d (seed) → α8.5e (resolver) → plan/identity/scene → verify/repair/reuse → exec → α8.6 publishing → UI, with a thin-vertical-slice MVP. Forks **X-A…X-G** raised for sign-off. Builds on ADR-0037/0038/0039/0040/0041/0042/0043 and α8.5c. |
+| 2026-07-25 | **Accepted** — rulings signed off (X-A…X-G all approved; publishing stays after the runtime; additive/zero-override freeze posture; execution/hardware/mode metadata folded into the α8.5d provider/runtime schema). Added **AR16 Project Memory**, **AR17 Workflow Checkpoints**, **AR18 Provider Transparency** (invariants extended to **W8.5x.1–W8.5x.18**). Carved out the **Minimum Runtime Contract MRC-1…MRC-8** (D7) as the Phase-1 production scope — the *only* runtime α8.5d/α8.5e + the first generation slice must ship (MRC = thin, correct realisations of AR1/AR2/AR4/AR6/AR7/AR8/AR11/AR13/AR14/AR16/AR17/AR18; AR18 provenance captured from day one) — and **Phase 2** (D8) for the deferred depth (advanced repair, multiple planners, quality modes, multi-agent verification, GPU orchestration, adaptive routing, distributed rendering, full project memory). Refined the sequencing to the MRC-first merge order (chore → α8.5c → ADR-0044 → α8.5d → α8.5e → α8.5x-mrc → α8.6 → Phase 2/UI). |
