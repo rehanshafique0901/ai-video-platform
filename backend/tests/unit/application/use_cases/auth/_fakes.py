@@ -29,6 +29,7 @@ from app.application.interfaces.repositories import (
     IExportJobRepository,
     IMediaRepository,
     IModelPricingRepository,
+    INotificationRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -63,6 +64,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.media.media_asset import MediaAsset
+from app.domain.notifications.notification import Notification
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.render.render_job import RenderJob
@@ -1947,6 +1949,55 @@ class FakeExportJobRepository(IExportJobRepository):
         return updated
 
 
+# ---- Notification repository (α8.5b.3) --------------------------------
+
+
+@dataclass
+class FakeNotificationRepository(INotificationRepository):
+    """In-memory ``INotificationRepository`` for the α8.5b.3 projection unit tests.
+
+    Models the real adapter's observable contract: the partial-unique
+    ``(user_id, source_event_id)`` dedupe key (``add`` raises ``ConflictError`` on a
+    duplicate where ``source_event_id`` is not None), and stamps ``delivered_in_app_at``
+    at insert. Multiple ``source_event_id IS NULL`` rows are permitted (partial index).
+    """
+
+    _rows: dict[UUID, Notification] = field(default_factory=dict)
+
+    async def add(
+        self,
+        *,
+        user_id: UUID,
+        kind: str,
+        title: str,
+        body: str | None,
+        payload: dict[str, Any],
+        source_event_id: UUID | None,
+    ) -> Notification:
+        if source_event_id is not None:
+            for existing in self._rows.values():
+                if existing.user_id == user_id and existing.source_event_id == source_event_id:
+                    raise ConflictError(
+                        "notification already exists for this recipient + source event",
+                        details={"constraint": "uq_notifications_user_id_source_event_id"},
+                    )
+        now = datetime.now(UTC)
+        notification = Notification(
+            id=uuid4(),
+            user_id=user_id,
+            kind=kind,
+            title=title,
+            body=body,
+            payload=dict(payload),
+            source_event_id=source_event_id,
+            delivered_in_app_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        self._rows[notification.id] = notification
+        return notification
+
+
 # ---- Event outbox repository ------------------------------------------
 
 
@@ -2564,6 +2615,7 @@ class FakeUnitOfWork(IUnitOfWork):
         timeline: FakeTimelineRepository | None = None,
         render_jobs: FakeRenderJobRepository | None = None,
         export_jobs: FakeExportJobRepository | None = None,
+        notifications: FakeNotificationRepository | None = None,
         outbox: FakeEventOutboxRepository | None = None,
         workflow_runs: FakeWorkflowRunRepository | None = None,
         locks: FakeDistributedLockManager | None = None,
@@ -2592,6 +2644,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self._fake_export_jobs = export_jobs or FakeExportJobRepository(
             _render_jobs=self._fake_render_jobs
         )
+        self._fake_notifications = notifications or FakeNotificationRepository()
         self._fake_outbox = outbox or FakeEventOutboxRepository()
         self._fake_workflow_runs = workflow_runs or FakeWorkflowRunRepository()
         self._fake_locks = locks or FakeDistributedLockManager()
@@ -2614,6 +2667,7 @@ class FakeUnitOfWork(IUnitOfWork):
         self.timeline = self._fake_timeline
         self.render_jobs = self._fake_render_jobs
         self.export_jobs = self._fake_export_jobs
+        self.notifications = self._fake_notifications
         self.outbox = self._fake_outbox
         self.workflow_runs = self._fake_workflow_runs
         self.locks = self._fake_locks

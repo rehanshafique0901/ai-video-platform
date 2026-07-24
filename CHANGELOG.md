@@ -6,6 +6,77 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.5b.3 — Notifications — project export terminal events into in-app notifications (2026-07-24)
+
+The **third and final distribution-stage slice** — it closes the loop opened by α8.5a/α8.5b.1–2:
+the export artifact now *exists* (α8.5a), is *obtainable* (α8.5b.1), from *any backend* (α8.5b.2),
+and — with this slice — the requester is *told* when it's ready or failed. The entire runtime
+addition is **one downstream projection**: a new `EventHandler` on the existing in-process
+`PublisherPort` reacts to `ExportJobSucceeded` / `ExportJobFailed` and writes exactly one in-app
+`Notification` per recipient. This is the platform's **fan-out seam** in action — a second, fully
+independent consumer attaches to the same event stream the runner emits, and the runner knows
+nothing about it (kin to α8.4a ingestion). **Exactly-once = at-least-once relay + a DB uniqueness
+invariant**: the relay may redeliver; the database refuses the second write; the projection treats
+the refusal as an already-notified no-op. Additive **consumer**, so entirely outside the
+**ADR-0042** frozen surface (Gate 1) and far below the **ADR-0043** render boundary (Gate 2).
+**One small additive migration** (a nullable column + a partial unique index that *encodes* the
+exactly-once invariant, not a new capability). Freeze guard green, **zero override markers**.
+Runtime capability → version bump to `0.4.33-phase3-alpha8.5b3`. **Read side (list / unread /
+mark-read / archive) is deferred to α8.5b.3r**; **email deferred to α8.5b.4**.
+
+#### Added
+- **`NotificationProjection` (Ruling C — relay subscriber; named a *projection*, not a service).**
+  A new `EventHandler` registered on the existing `InProcessPublisher`, reacting to
+  `ExportJobSucceeded` + `ExportJobFailed` **only** (Ruling B); every other event is a clean no-op.
+  It maps the event → notification content and delegates the write to a fresh `CreateNotification`
+  (own UoW per event). The name reflects the architectural intent: it *derives read state from
+  immutable events* and never orchestrates. Recipient is read straight from the event's
+  `requested_by_user_id` (no ownership lookup). Error posture mirrors ingestion: malformed payload
+  → log + clean return (never parks the relay); genuine DB failure → raise (relay retries).
+- **`CreateNotification` use case (idempotent write half).** Persists one `notifications` row in
+  its own UoW, stamping `delivered_in_app_at = now()` (in-app "delivery" = the committed row);
+  catches the repository's `ConflictError` and returns a `duplicate` no-op. Exactly-once is owned
+  by the database, never an application-level pre-check.
+- **`INotificationRepository` port + `NotificationRepository` adapter.** `add(...)` inserts and
+  maps the partial-unique `uq_notifications_user_id_source_event_id` violation → `ConflictError`
+  (same shape as `MediaRepository.add`). Wired onto the UoW alongside the other repositories.
+  Write path only — the read/query surface is deferred to α8.5b.3r.
+- **`Notification` domain entity.** A slim frozen projection of the `notifications` row (the repo
+  return type), keeping the ORM out of the application/domain layers.
+- **Migration `0009` (Ruling D — DB-enforced idempotency).** `ADD COLUMN notifications.source_event_id
+  uuid NULL` (the outbox `event.id`; **nullable**, **no FK** to `event_outbox` — transport state vs
+  product state) + partial `CREATE UNIQUE INDEX … (user_id, source_event_id) WHERE source_event_id
+  IS NOT NULL`. `(user_id, source_event_id)` (not `source_event_id` alone) future-proofs fan-out
+  while keeping today's single-recipient semantics unchanged. Additive + safe (empty table);
+  `downgrade` drops both.
+- **Tests** — `NotificationProjection` (success/failure mapping incl. `source_event_id = event.id`,
+  neutral failure body, ignore-other-types, malformed-payload no-op, redelivery `duplicate`
+  swallowed, genuine-DB-error propagation); `CreateNotification` (create + commit, duplicate
+  no-op with a single persisted row, same-event/different-recipient both persist, null
+  `source_event_id` un-deduped); `NotificationRepository` integration (insert + `delivered_in_app_at`,
+  duplicate → `ConflictError`, per-recipient uniqueness, multiple NULL-source rows coexist).
+
+#### Invariants
+- **W8.5b.6 (new) — Notification creation is a pure projection of immutable events.** The
+  projection + use case only **read** a terminal, already-committed event and **write** notification
+  state. They never mutate export/render/orchestration state, never re-drive the export, never
+  dispatch provider/render work, never call back into the frozen pipeline (kin to W8.4.2 / W8.5b.1).
+- **W8.5b.7 (new) — A notification is projected exactly once per recipient per source event. This
+  invariant is enforced by the persistence layer, not by subscriber control flow.** The relay may
+  deliver more than once; the projection may execute more than once; the database guarantees the
+  projection exists **at most once** (partial `UNIQUE (user_id, source_event_id)`), and the use
+  case treats the refused duplicate as a successful no-op. Correctness never depends on
+  application-level control flow — resilient even if the projection implementation changes later.
+
+#### Unchanged (freeze holds)
+- **Additive consumer only** — no frozen contract modified: `PublisherPort`, `InProcessPublisher`,
+  the relay, the export event emitters, and the outbox schema/semantics are untouched (ADR-0042
+  Gate 1; registering a second handler in the composition root is a growth-surface change). Nothing
+  near composition/render (ADR-0043 Gate 2). `DownloadExport`, the download endpoint, and all
+  export/render/orchestration contracts are byte-for-byte unchanged. Freeze guard green, **zero
+  override markers**. **Deferred:** read/query API → α8.5b.3r; email/push/websocket → α8.5b.4+;
+  publishing → α8.6.
+
 ### Phase 3 Slice α8.5b.2 — Storage Backends & Signed-URL Delivery — where artifacts live and how they're delivered (2026-07-24)
 
 The **second distribution-stage slice** — it completes the α8.5b.1 delivery seam by making

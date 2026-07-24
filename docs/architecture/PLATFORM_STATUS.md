@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.32-phase3-alpha8.5b2` |
-| **Latest runtime tag** | `v0.4.32-phase3-alpha8.5b2` |
+| **Application version** | `0.4.33-phase3-alpha8.5b3` |
+| **Latest runtime tag** | `v0.4.33-phase3-alpha8.5b3` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–2 all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3 all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -127,6 +127,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Export engine (delivery encodings) | ✅ | α8.5a | delivery transform (RC5/RC6): master → `(format, quality)` delivery `MediaAsset`, same-orientation; poll worker + discrete `IExporter` |
 | Download serving (deliver artifact bytes) | ✅ | α8.5b.1 | owner-scoped `GET …/exports/{id}/download`; neutral `IDownloadDelivery` seam (`LocalStreamDelivery` now, redirect-ready); best-effort accounting |
 | Storage backends & signed-URL delivery (S3/R2) | ✅ | α8.5b.2 | `StorageResolver` + `DeliveryResolver` registries; write-active/read-persisted (E2); `S3ObjectStorage` (S3+R2) + fixed-TTL offline-presigned `302` redirects; cloud SDK import-linter-isolated; endpoint unchanged |
+| Notifications (in-app projection) | ✅ | α8.5b.3 | `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced via partial `UNIQUE (user_id, source_event_id)`; write path only (read API → α8.5b.3r, email → α8.5b.4) |
 
 ### Invariant catalog
 
@@ -200,6 +201,15 @@ by review + tests, not the mechanical guard:
   the location or interpretation of existing ones — each stays readable/deliverable from its own
   `(storage_backend, storage_bucket, storage_key)`. Backend changes are operational, not migratory
   (no backfill).
+- **W8.5b.6** — notification creation is a pure projection of immutable events: the projection +
+  use case only **read** a terminal, already-committed event and **write** notification state. They
+  never mutate export/render/orchestration state, re-drive the export, dispatch provider/render
+  work, or call back into the frozen pipeline (kin to W8.4.2 / W8.5b.1).
+- **W8.5b.7** — a notification is projected exactly once per recipient per source event, and this
+  invariant is enforced by the persistence layer, not by subscriber control flow. The relay may
+  deliver more than once and the projection may execute more than once; the partial `UNIQUE
+  (user_id, source_event_id)` guarantees the row exists at most once, and the use case treats the
+  refused duplicate as a successful no-op.
 
 ---
 
@@ -245,7 +255,9 @@ the freeze was designed to preserve.
 | **α8.5a** | ✅ Export engine — delivery encodings (`ExportWorker` / `ProcessExportJob` / `IExporter`); shipped `v0.4.30` |
 | **α8.5b.1** | ✅ Download serving — `DownloadExport` + `IDownloadDelivery` (`LocalStreamDelivery`); shipped `v0.4.31` |
 | **α8.5b.2** | ✅ Storage backends & signed-URL delivery — `StorageResolver`/`DeliveryResolver` + `S3ObjectStorage` (S3/R2) + `S3RedirectDelivery` (fixed-TTL presigned `302`); write-active/read-persisted (E2); GCS/Azure plug in the same way; shipped `v0.4.32` |
-| **α8.5b.3** | Notifications — `INotifier` + relay subscriber on `ExportJobSucceeded` (the `notifications` table already exists) |
+| **α8.5b.3** | ✅ Notifications — `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced (partial `UNIQUE (user_id, source_event_id)`); in-app write path only; shipped `v0.4.33` |
+| **α8.5b.3r** | Notifications read API — `GET /notifications`, unread counts, mark-read, archive (query surface on the α8.5b.3 projection) |
+| **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers) |
 
 All remaining work is **downstream of the frozen orchestration platform** — new

@@ -76,6 +76,10 @@ from app.application.use_cases.media.list_media import ListMedia
 from app.application.use_cases.media.media_enrichment_worker import MediaEnrichmentWorker
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
+from app.application.use_cases.notifications.create_notification import CreateNotification
+from app.application.use_cases.notifications.notification_projection import (
+    NotificationProjection,
+)
 from app.application.use_cases.projects.create_project import CreateProject
 from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
@@ -249,13 +253,17 @@ def init(settings: Settings) -> None:
     # α7.3: the outbox relay's publish target. In-process; α8.4a registers the FIRST
     # real consumer — the generated-media ingestion subscriber for
     # ``WorkflowRunSucceeded`` — behind the same ``PublisherPort`` (the relay is
-    # untouched). A broker-backed publisher can replace this later identically. The
-    # subscriber holds a *factory* (not an instance); the object storage + artifact
-    # downloader it needs are built lazily on the first ingestion (see
-    # ``get_ingest_generated_media_use_case``) so the common test path opens no
-    # HTTP client it must close.
+    # untouched). α8.5b.3 registers a SECOND, fully independent consumer — the
+    # notification projection for ``ExportJobSucceeded`` / ``ExportJobFailed`` — on the
+    # same event stream, demonstrating the platform's fan-out seam (the runner knows
+    # nothing about either consumer). A broker-backed publisher can replace this later
+    # identically. Each consumer holds a *factory* (not an instance) so every delivery
+    # runs in its own fresh use case + Unit of Work.
     _publisher = InProcessPublisher(
-        [GeneratedMediaIngestionSubscriber(get_ingest_generated_media_use_case)]
+        [
+            GeneratedMediaIngestionSubscriber(get_ingest_generated_media_use_case),
+            NotificationProjection(get_create_notification_use_case),
+        ]
     )
     # α8.1/α8.2: wire the provider registry. When a provider's key is configured,
     # build a single shared, pre-authenticated httpx client and register the real
@@ -1098,6 +1106,22 @@ def get_ingest_generated_media_use_case() -> IngestGeneratedMedia:
         storage=_get_storage_resolver(),
         downloader=_get_media_downloader(),
     )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.5b.3 — Notification projection)
+# ---------------------------------------------------------------------
+
+
+def get_create_notification_use_case() -> CreateNotification:
+    """Factory: the α8.5b.3 idempotent notification write (fresh UoW per call).
+
+    Invoked by ``NotificationProjection`` once per delivered ``ExportJobSucceeded`` /
+    ``ExportJobFailed`` event, so each projection runs in its own Unit of Work. The use
+    case is strictly downstream of — and never mutates — the frozen export/orchestration
+    pipeline (W8.5b.6); exactly-once is enforced by the DB (W8.5b.7).
+    """
+    return CreateNotification(uow=get_unit_of_work())
 
 
 # ---------------------------------------------------------------------

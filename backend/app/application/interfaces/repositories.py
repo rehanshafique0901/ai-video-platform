@@ -42,6 +42,7 @@ from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
 from app.domain.media.media_asset import MediaAsset
+from app.domain.notifications.notification import Notification
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
 from app.domain.render.render_job import RenderJob
@@ -2116,5 +2117,45 @@ class IModelPricingRepository(ABC):
         Prefers the row whose ``[effective_from, effective_to)`` window contains
         ``at`` (open-ended when ``effective_to IS NULL``). ``None`` when no pricing
         is configured — the recorder then prices that unit at 0 and warns (Q5).
+        """
+        ...
+
+
+class INotificationRepository(ABC):
+    """Write surface for ``notifications`` — the in-app projection sink (Slice α8.5b.3).
+
+    A **notification** is product state projected from an immutable, already-committed
+    export terminal event (``NotificationProjection`` → ``CreateNotification``). This
+    slice ships the **write path only**; the read/query surface (list, unread counts,
+    mark-read, archive) is deferred to α8.5b.3r.
+
+    **Exactly-once is DB-owned (W8.5b.7).** :meth:`add` maps the partial-unique
+    ``uq_notifications_user_id_source_event_id`` violation (over ``(user_id,
+    source_event_id) WHERE source_event_id IS NOT NULL``) to ``ConflictError``; the
+    use case treats that refusal as an already-notified no-op. The relay is
+    at-least-once, so a redelivered event drives the projection again — the database,
+    not subscriber control flow, guarantees at most one row per recipient per event.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        user_id: UUID,
+        kind: str,
+        title: str,
+        body: str | None,
+        payload: dict[str, Any],
+        source_event_id: UUID | None,
+    ) -> Notification:
+        """Insert one in-app notification and return it.
+
+        ``delivered_in_app_at`` is stamped ``now()`` at insert (in-app "delivery" = the
+        committed, visible row); ``delivered_email_at`` / ``read_at`` stay NULL and
+        ``archived`` defaults false. ``id`` / timestamps are DB-populated.
+
+        Raises ``ConflictError`` when ``(user_id, source_event_id)`` already exists
+        (redelivery of the same source event) — the caller resolves it as an
+        idempotent no-op (W8.5b.7).
         """
         ...

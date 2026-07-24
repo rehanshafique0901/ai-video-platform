@@ -27,6 +27,7 @@ from app.application.interfaces.repositories import (
     IExportJobRepository,
     IMediaRepository,
     IModelPricingRepository,
+    INotificationRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -72,6 +73,7 @@ class IUnitOfWork(ABC):
     timeline: ITimelineRepository  # α6.3a
     render_jobs: IRenderJobRepository  # α7.1
     export_jobs: IExportJobRepository  # α8.5a
+    notifications: INotificationRepository  # α8.5b.3
     outbox: IEventOutboxRepository  # α7.1 (+ α7.3 relay read/mark surface)
     workflow_runs: IWorkflowRunRepository  # α7.2
     locks: IDistributedLockManager  # α7.3

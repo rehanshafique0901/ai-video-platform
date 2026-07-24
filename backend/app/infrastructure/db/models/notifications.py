@@ -38,6 +38,11 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # α8.5b.3: the outbox ``event.id`` that produced this row — the logical dedupe key
+    # behind the partial-unique ``(user_id, source_event_id)`` index (W8.5b.7). Nullable
+    # so non-event notifications (future welcome/system messages) stay expressible; no FK
+    # to ``event_outbox`` (the outbox is transient transport state that may be pruned).
+    source_event_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     delivered_in_app_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_email_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -51,6 +56,15 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             postgresql_where=text("read_at IS NULL AND archived = false"),
         ),
         Index("ix_notifications_user_id_created_at", "user_id", "created_at"),
+        # α8.5b.3: exactly-once projection guarantee (W8.5b.7). Partial because
+        # ``source_event_id`` is nullable — event-less notifications must coexist freely.
+        Index(
+            "uq_notifications_user_id_source_event_id",
+            "user_id",
+            "source_event_id",
+            unique=True,
+            postgresql_where=text("source_event_id IS NOT NULL"),
+        ),
     )
 
 

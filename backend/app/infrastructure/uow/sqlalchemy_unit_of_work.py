@@ -24,6 +24,7 @@ from app.application.interfaces.repositories import (
     IExportJobRepository,
     IMediaRepository,
     IModelPricingRepository,
+    INotificationRepository,
     IProjectRepository,
     IProjectVersionRepository,
     IPromptRepository,
@@ -46,6 +47,7 @@ from app.infrastructure.repositories.event_outbox_repository import EventOutboxR
 from app.infrastructure.repositories.export_job_repository import ExportJobRepository
 from app.infrastructure.repositories.media_repository import MediaRepository
 from app.infrastructure.repositories.model_pricing_repository import ModelPricingRepository
+from app.infrastructure.repositories.notification_repository import NotificationRepository
 from app.infrastructure.repositories.project_repository import ProjectRepository
 from app.infrastructure.repositories.project_version_repository import (
     ProjectVersionRepository,
@@ -98,6 +100,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
         self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
         self.export_jobs = cast(IExportJobRepository, ExportJobRepository(self._session))
+        self.notifications = cast(INotificationRepository, NotificationRepository(self._session))
         self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
         self.workflow_runs = cast(IWorkflowRunRepository, WorkflowRunRepository(self._session))
         self.locks = cast(IDistributedLockManager, SqlAlchemyDistributedLockManager(self._session))

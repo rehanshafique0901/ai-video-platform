@@ -895,15 +895,24 @@ feature_flag_overrides (
 ```
 notifications (
   id uuid PK,
-  tenant_id uuid NOT NULL FK → tenants.id ON DELETE RESTRICT,
   user_id uuid NOT NULL FK → users.id ON DELETE CASCADE,
-  kind text NOT NULL,            -- 'render_complete', 'export_ready', 'billing_failed', …
+  kind text NOT NULL,            -- 'export.succeeded', 'export.failed', …
   title text NOT NULL,
-  body text NOT NULL,
+  body text,                     -- nullable
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_event_id uuid,          -- α8.5b.3: outbox event.id that produced this row (nullable, no FK)
+  delivered_in_app_at timestamptz,
+  delivered_email_at timestamptz,
   read_at timestamptz,
+  archived boolean NOT NULL DEFAULT false,
   created_at/updated_at
 )
+-- Indexes:
+--   ix_notifications_user_id_unread      (user_id, created_at) WHERE read_at IS NULL AND archived = false
+--   ix_notifications_user_id_created_at  (user_id, created_at)
+--   uq_notifications_user_id_source_event_id  UNIQUE (user_id, source_event_id) WHERE source_event_id IS NOT NULL
+--     └─ α8.5b.3 W8.5b.7: a notification is projected exactly once per recipient per source event
+--        (partial because source_event_id is nullable; no FK to event_outbox — transport vs product state)
 ```
 
 ---
