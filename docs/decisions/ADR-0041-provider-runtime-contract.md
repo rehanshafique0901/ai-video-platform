@@ -368,6 +368,39 @@ their unit/integration tests, and the mock providers land in α7.3 (relay + lock
 α7.4 (ports + registry + dispatcher + mocks), and α7.5 (recorder). No bodies are
 shipped with this ADR.
 
+## Event projection pattern (established α8.5b.3)
+
+α8.5b.3 (`NotificationProjection`) is the platform's **first general event projection**, and
+elevates what began as the α8.4a ingestion consumer into a named, reusable architectural pattern.
+Recording it here so future projections point back to this precedent rather than re-deriving it.
+
+**Projection pattern.** Immutable domain events may be consumed by **multiple independent
+downstream projections**. Each projection:
+
+- reads a **terminal, already-committed** event and only ever **writes its own** read/product
+  state — it never mutates, re-drives, or calls back into the producing aggregate (export / render
+  / orchestration / provider execution);
+- **owns its own persistence invariant and idempotency strategy** — the *database* owns uniqueness
+  (e.g. `MediaAsset` storage-coords, `ExportJob` partial-unique, `Notification`
+  `(user_id, source_event_id)`), never subscriber control flow, so the subscriber stays stateless;
+- attaches to the shared event stream behind `PublisherPort` **without the producer's knowledge** —
+  producers remain unaware of which (or how many) projections exist.
+
+```
+Event  ──►  PublisherPort  ──┬──► Projection A   (own invariant, own idempotency)
+                             ├──► Projection B
+                             └──► Projection C
+```
+
+This is the seam future projections (analytics, billing, audit, search indexing, …) build on.
+
+**Future invariant to adopt as projections multiply (not yet in force).** *A projection must never
+invoke another projection.* The dependency graph must stay a **fan-out from the event** (Event →
+{A, B, C}), never a **chain** (Event → A → B → C), so no hidden coupling forms between independent
+consumers. Deferred until there are several projections to govern (a projection that needs another
+projection's output should instead subscribe to the *event* that projection also reacts to, or to a
+new event the first projection emits — never call it directly).
+
 ## Future Extensions
 
 - **LangGraph adapter** (D3 of the blueprint): the dispatcher (D4) is the seam a
@@ -379,6 +412,9 @@ shipped with this ADR.
 - **Storage-provider plugin contract** (CR-5): specified in α8.5 (export); **realised in α8.5b.2**
   — S3/R2 adapters + `StorageResolver`/`DeliveryResolver` registries (GCS/Azure plug in the same
   way, no use-case change).
+- **"A projection must never invoke another projection"** (event-projection graph invariant):
+  adopt once several projections exist (see *Event projection pattern* above) to keep the graph a
+  fan-out, never a chain.
 
 ---
 

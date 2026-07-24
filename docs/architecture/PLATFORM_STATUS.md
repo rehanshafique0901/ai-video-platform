@@ -242,8 +242,20 @@ new slices plug into — additive by construction:
 - **Routers, DI/container wiring, config, tests** — the composition layer.
 
 New subscribers can attach to the existing event stream (`WorkflowRunSucceeded`,
-`RenderJobSucceeded`, …) without the orchestration core ever knowing — the property
-the freeze was designed to preserve.
+`RenderJobSucceeded`, `ExportJobSucceeded`, …) without the orchestration core ever
+knowing — the property the freeze was designed to preserve.
+
+**Event projection pattern (established α8.5b.3).** `NotificationProjection` is the platform's
+first *general* event projection and sets the precedent for all that follow (analytics, billing,
+audit, search indexing, …): immutable domain events may be consumed by **multiple independent
+downstream projections**, each of which (a) only reads a terminal event and writes its own
+read/product state — never feeding back into the producer, (b) **owns its own persistence invariant
+and idempotency strategy** so the *database* owns uniqueness and the subscriber stays stateless
+(kin to `MediaAsset` storage-coords, `ExportJob` partial-unique, `Notification`
+`(user_id, source_event_id)`), and (c) attaches behind `PublisherPort` without the producer's
+knowledge. A future graph invariant — *a projection must never invoke another projection* (keep the
+graph a fan-out `Event → {A, B, C}`, never a chain) — is noted for adoption once several projections
+exist. See [`ADR-0041` §Event projection pattern](../decisions/ADR-0041-provider-runtime-contract.md).
 
 ---
 
