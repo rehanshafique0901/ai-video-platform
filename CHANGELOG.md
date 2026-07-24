@@ -6,6 +6,41 @@
 
 ## [Unreleased]
 
+### Tooling / CI — validation-DB isolation & self-healing restoration guard (2026-07-24)
+
+**Infrastructure/tooling only — no application or runtime change, no version bump, no new
+migration.** Hardens `backend/scripts/ci_gate.py` so the destructive migration stages can never
+leave a *persistent* validation database at `base`. This was prompted by a live incident during the
+α8.5b.3r release: a transient DNS failure struck between stage 6 (`alembic downgrade base`) and the
+stage-7 re-upgrade against the shared Supabase validation DB, momentarily emptying it until an
+upgrade was retried by hand.
+
+#### Added
+- **DB isolation for the live stages (5–9).** New precedence: `--ephemeral-db` /
+  `CI_GATE_EPHEMERAL_DB=1` (runner starts a throwaway `pgvector/pgvector:pg16` container on a random
+  loopback port and always tears it down in a `finally`, even on Ctrl-C) → `VALIDATION_DATABASE_URL`
+  (a dedicated validation DB; the primary `DATABASE_URL` is left untouched) → `DATABASE_URL` /
+  `backend/.env.validation` (legacy path, now with a printed warning when a destructive stage runs
+  against the primary DB).
+- **Self-healing restoration guard.** Whenever a downgrade may have run against a persistent DB, the
+  runner performs a bounded-retry `alembic upgrade head` (8 attempts, 6 s backoff — tolerant of
+  transient connection failures) on **every** exit path, then verifies `alembic current == heads`.
+  The gate refuses to print `PASSED` until the DB is confirmed at head
+  (`[ OK ] DB restored & verified at head: <rev>` vs `[FAIL] DB NOT restored to head …`) — it never
+  claims a success it cannot verify.
+
+#### Verified
+- Stages 1–4 green (ruff / black / mypy+import-linter / pytest). The self-healing guard was
+  exercised against the live DB and, during a naturally-occurring transient failure, correctly
+  restored and re-verified the DB to head after a mid-run stage failure; a clean pass reported
+  `DB restored & verified at head: 0009_notifications_source_event_id`. The `--ephemeral-db` path
+  fails closed with a clear message and leaves no container behind when no Docker daemon is
+  reachable.
+
+#### Docs
+- `CI_QUALITY_GATE.md` + `docs/CI_QUALITY_GATE.md` — new "Validation-DB isolation & restoration
+  guard" section (§2.6) and local-run examples.
+
 ### Phase 3 Slice α8.5b.3r — Notification Read API — read & manage the projection (2026-07-24)
 
 The **read/query completion of the notifications bounded context** — the follow-up deferred from

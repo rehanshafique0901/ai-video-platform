@@ -53,6 +53,8 @@ python scripts/ci_gate.py
 
 Live-DB stages 5–9 require either `DATABASE_URL` exported in the shell or `backend/.env.validation` present (git-ignored, format: `DATABASE_URL=postgresql+psycopg://…`).
 
+**Destructive-stage isolation & self-healing (tooling).** Stage 6 (`alembic downgrade base`) empties the target schema, so a transient failure before the stage-7 re-upgrade could once leave a *shared* validation DB at `base`. Two guards remove this: (1) **isolation** — target a throwaway DB via `--ephemeral-db` / `CI_GATE_EPHEMERAL_DB=1` (a `pgvector/pgvector:pg16` container created + destroyed by the runner) or a dedicated `VALIDATION_DATABASE_URL`, in that precedence over `DATABASE_URL`; and (2) **self-healing** — whenever a downgrade may have run against a *persistent* DB, the runner does a bounded-retry `alembic upgrade head` on every exit path (including Ctrl-C) and verifies `current == heads`, refusing to report `PASSED` until the DB is confirmed at head. Recommended local invocation for migration work: `python scripts/ci_gate.py --stages 5-9 --ephemeral-db`.
+
 ### 2.3 Locally — fast pre-push slice
 
 ```powershell
@@ -143,3 +145,4 @@ The threshold lives in `pyproject.toml` (`[tool.coverage.report] fail_under = N`
 | Date       | Author  | Change                                                                                  |
 |------------|---------|------------------------------------------------------------------------------------------|
 | 2026-06-28 | curator | Initial version — ADR-0028 ratified at close of Phase 2 Step B; gate green end-to-end.   |
+| 2026-07-24 | curator | Validation-DB isolation (`--ephemeral-db` / `VALIDATION_DATABASE_URL`) + self-healing restoration guard added to `ci_gate.py`. Tooling-only; no stage changes, no version bump.  |

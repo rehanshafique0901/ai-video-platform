@@ -39,6 +39,12 @@ with `pgvector` (in CI: a `pgvector/pgvector:pg16` service container; in
 local dev: `backend/.env.validation` pointing at Supabase, Neon, or a
 local Docker container).
 
+> **Destructive-stage safety.** Stage 6 (`alembic downgrade base`) empties
+> the target schema. To keep a transient failure between stage 6 and the
+> stage-7 re-upgrade from ever leaving a *persistent* database at `base`, the
+> runner provides DB isolation and a self-healing restoration guard — see
+> [§2.6](#26-validation-db-isolation--restoration-guard).
+
 ---
 
 ## 2. Why these stages?
@@ -114,6 +120,44 @@ the threshold gate either passes or fails. The threshold is recorded in
 | 3         | 80 %         |
 | 9 (CI freeze) | 85 %      |
 
+### 2.6 Validation-DB isolation & restoration guard
+
+Stage 6 is destructive, so a network blip between the downgrade and the
+stage-7 re-upgrade could once leave a *shared* validation database empty
+until an upgrade was retried by hand. Two independent, complementary
+guards (tooling only — no application/runtime change) remove that class of
+failure:
+
+**Isolation — target a throwaway database.** The live stages resolve their
+database in this precedence order:
+
+1. `--ephemeral-db` / `CI_GATE_EPHEMERAL_DB=1` — the runner starts a
+   throwaway `pgvector/pgvector:pg16` Docker container on a random loopback
+   port, points `DATABASE_URL` at it for the run, and **always** removes it
+   in a `finally` (even on Ctrl-C). A transient failure against a container
+   that is about to be deleted is inert.
+2. `VALIDATION_DATABASE_URL` — a dedicated validation database. Used verbatim
+   for the live stages; the primary `DATABASE_URL` is left untouched.
+3. `DATABASE_URL` / `backend/.env.validation` — the legacy path. If a
+   destructive stage is selected here, the runner prints a **warning** that
+   verification is running against the primary DB and leans on the guard
+   below.
+
+**Self-healing — never return success on an unverified DB.** Whenever a
+downgrade may have run against a *persistent* DB (i.e. not the ephemeral
+container), the runner, on **every** exit path, runs a bounded-retry
+`alembic upgrade head` (8 attempts, 6 s backoff — tolerant of transient
+connection failures) and then *verifies* `alembic current == heads`. The
+gate refuses to print `PASSED` until that verification succeeds:
+
+- `[ OK ] DB restored & verified at head: <rev>` — the DB is confirmed safe.
+- `[FAIL] DB NOT restored to head (<rev>) …` — the runner could not confirm
+  safety, so the gate fails **even if every stage passed**. It never claims a
+  success it cannot verify.
+
+CI already runs against an ephemeral service container, so this primarily
+hardens the local flow where `.env.validation` points at a shared Postgres.
+
 ---
 
 ## 3. Running the gate locally
@@ -145,6 +189,19 @@ export DATABASE_URL="postgresql+psycopg://user:pass@host:5432/db?sslmode=require
 # Option B — drop a one-line file at backend/.env.validation (git-ignored)
 echo 'DATABASE_URL=postgresql+psycopg://aivp:aivp@localhost:5432/aivp' \
   > backend/.env.validation
+```
+
+For the destructive stages, prefer an isolated database so a transient
+failure can never touch a shared instance (see §2.6):
+
+```bash
+# Recommended — throwaway Docker container, created + destroyed by the runner.
+python scripts/ci_gate.py --stages 5-9 --ephemeral-db
+
+# Or point the live stages at a dedicated validation DB (primary DATABASE_URL
+# is left untouched); the restoration guard still runs on every exit.
+export VALIDATION_DATABASE_URL="postgresql+psycopg://user:pass@host:5432/validation"
+python scripts/ci_gate.py --stages 5-9
 ```
 
 ---
@@ -190,3 +247,4 @@ checks anyway, so the hook is convenience, not authority.
 | Date       | Author  | Change |
 |------------|---------|--------|
 | 2026-06-28 | curator | Initial — Phase 2C, ADR-0028. 10 stages, local + GH Actions runners, pre-commit subset, coverage floor 60 % (raised in Phase 3). |
+| 2026-07-24 | curator | §2.6 added — validation-DB isolation (`--ephemeral-db` / `VALIDATION_DATABASE_URL`) + self-healing restoration guard (bounded-retry `upgrade head` + head verification on every exit). Tooling-only; no stage changes, no version bump. |

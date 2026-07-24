@@ -27,9 +27,27 @@ Usage
     python scripts/ci_gate.py                # run everything
     python scripts/ci_gate.py --stages 1-4   # iterate locally on lint/types/tests
     python scripts/ci_gate.py --stages 5-9   # only live-DB stages
+    python scripts/ci_gate.py --ephemeral-db # live stages on a throwaway container
     python scripts/ci_gate.py --no-color     # plain output for CI logs
 
 Exit code is 0 iff every executed stage succeeded.
+
+Validation-DB safety
+--------------------
+
+Stage 6 (``alembic downgrade base``) is *destructive*: a transient failure
+between it and the stage-7 re-upgrade can leave a **persistent** database
+empty. Two independent guards make this safe:
+
+* **Isolation** — target a throwaway database so a transient failure is
+  inert. Precedence: ``--ephemeral-db`` / ``CI_GATE_EPHEMERAL_DB=1`` (a
+  Docker ``pgvector/pgvector:pg16`` created before and destroyed after the
+  run) → ``VALIDATION_DATABASE_URL`` (a dedicated DB) → ``DATABASE_URL``.
+  The first two never touch the primary ``DATABASE_URL``.
+* **Self-healing** — whenever a downgrade may have run against a *persistent*
+  DB, a bounded-retry ``alembic upgrade head`` runs on **every** exit path
+  (success, failure, or Ctrl-C) and the gate refuses to report success until
+  it has *verified* the DB is back at head.
 """
 
 from __future__ import annotations
@@ -47,6 +65,12 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_ROOT.parent
+
+# Validation-DB isolation + restoration guard tunables.
+_EPHEMERAL_IMAGE = "pgvector/pgvector:pg16"
+_EPHEMERAL_READY_TIMEOUT_S = 60
+_RESTORE_RETRIES = 8
+_RESTORE_BACKOFF_S = 6
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +225,170 @@ def _run_coverage_report() -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Validation-DB isolation + restoration guard
+#
+# Destructive migration verification (stage 6 `downgrade base`) must never be
+# able to leave a *persistent* database in an intermediate state — the failure
+# mode observed once when a transient network error hit between stage 6 and the
+# stage-7 re-upgrade against the shared validation DB. See the module docstring
+# for the two mitigations (isolation + self-healing) implemented here.
+# ---------------------------------------------------------------------------
+
+
+def _revisions(cmd_tail: list[str]) -> set[str]:
+    """Return the set of alembic revision ids printed by ``alembic <cmd_tail>``.
+
+    Used to compare ``current`` against ``heads``. On any non-zero exit
+    (e.g. a transient connection failure) an empty set is returned, which the
+    caller treats as "not at head" and therefore worth another restore pass.
+    """
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "alembic", *cmd_tail],
+        cwd=BACKEND_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return set()
+    return {line.split()[0] for line in proc.stdout.splitlines() if line.strip()}
+
+
+def _verify_db_at_head() -> tuple[bool, str]:
+    """Return ``(at_head, head_revision)`` for the target database."""
+
+    heads = _revisions(["heads"])
+    current = _revisions(["current"])
+    at_head = bool(heads) and current == heads
+    return at_head, ", ".join(sorted(heads)) if heads else "<unknown>"
+
+
+def _ensure_db_at_head() -> tuple[bool, str]:
+    """Bounded-retry ``alembic upgrade head``, tolerant of transient failures.
+
+    Returns ``(restored, head_revision)``. This is the self-healing guard: it
+    runs on every exit path once a downgrade may have executed, so a network
+    blip can no longer leave a persistent validation DB at ``base``.
+    """
+
+    rev = "<unknown>"
+    for attempt in range(1, _RESTORE_RETRIES + 1):
+        rc = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=BACKEND_ROOT,
+            env=os.environ.copy(),
+            check=False,
+        ).returncode
+        if rc == 0:
+            ok, rev = _verify_db_at_head()
+            if ok:
+                return True, rev
+        if attempt < _RESTORE_RETRIES:
+            print(
+                _c(
+                    "33",
+                    f"  restore attempt {attempt}/{_RESTORE_RETRIES} did not reach "
+                    f"head — retrying in {_RESTORE_BACKOFF_S}s…",
+                ),
+                flush=True,
+            )
+            time.sleep(_RESTORE_BACKOFF_S)
+    ok, rev = _verify_db_at_head()
+    return ok, rev
+
+
+def _docker_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def _stop_ephemeral_db(container_id: str) -> None:
+    subprocess.run(
+        ["docker", "rm", "-f", container_id],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _wait_ephemeral_ready(container_id: str) -> None:
+    deadline = time.time() + _EPHEMERAL_READY_TIMEOUT_S
+    while time.time() < deadline:
+        rc = subprocess.run(
+            ["docker", "exec", container_id, "pg_isready", "-U", "aivp", "-d", "aivp"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        if rc == 0:
+            return
+        time.sleep(1)
+    _stop_ephemeral_db(container_id)
+    raise RuntimeError(f"ephemeral DB did not become ready within {_EPHEMERAL_READY_TIMEOUT_S}s")
+
+
+def _start_ephemeral_db() -> tuple[str, str]:
+    """Start a throwaway ``pgvector`` Postgres; return ``(container_id, url)``.
+
+    The container publishes 5432 on a random loopback host port and is created
+    with ``--rm``; the caller must still call :func:`_stop_ephemeral_db` in a
+    ``finally`` so it is removed even if the run is interrupted.
+    """
+
+    name = f"aivp-ci-gate-{os.getpid()}"
+    print(
+        _c("36", f"  starting ephemeral Postgres ({_EPHEMERAL_IMAGE})…"),
+        flush=True,
+    )
+    run = subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "-e",
+            "POSTGRES_USER=aivp",
+            "-e",
+            "POSTGRES_PASSWORD=aivp",
+            "-e",
+            "POSTGRES_DB=aivp",
+            "-p",
+            "127.0.0.1::5432",
+            _EPHEMERAL_IMAGE,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if run.returncode != 0:
+        raise RuntimeError(run.stderr.strip() or "docker run failed")
+    container_id = run.stdout.strip()
+    inspect = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            '{{ (index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort }}',
+            container_id,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    port = inspect.stdout.strip()
+    if inspect.returncode != 0 or not port:
+        _stop_ephemeral_db(container_id)
+        raise RuntimeError("could not determine ephemeral DB host port")
+    _wait_ephemeral_ready(container_id)
+    url = f"postgresql+psycopg://aivp:aivp@127.0.0.1:{port}/aivp"
+    print(_c("32", f"  ephemeral Postgres ready on 127.0.0.1:{port}"), flush=True)
+    return container_id, url
+
+
 def _stages() -> list[Stage]:
     py = sys.executable
     return [
@@ -316,6 +504,15 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="disable ANSI colour codes (useful for CI logs without an attached TTY)",
     )
+    parser.add_argument(
+        "--ephemeral-db",
+        action="store_true",
+        help=(
+            "run the live-DB stages against a throwaway Docker Postgres "
+            "(pgvector/pgvector:pg16) created before and destroyed after the run "
+            "— isolates destructive migration verification from any shared DB"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.no_color:
@@ -331,16 +528,47 @@ def main(argv: list[str]) -> int:
     total = len(stages)
     selected = _parse_stage_range(args.stages, total)
 
-    db_available = (
-        bool(os.environ.get("DATABASE_URL")) or (BACKEND_ROOT / ".env.validation").exists()
-    )
-    # Populate DATABASE_URL from backend/.env.validation if present. Without
-    # this, stages 5-9 would silently fall back to alembic.ini's localhost URL.
-    # _load_env.load() is idempotent and resolves via sys.path[0] (backend/scripts).
-    if db_available and not os.environ.get("DATABASE_URL"):
+    # --- Resolve the target database for the live-DB stages (5-9) ----------
+    # Precedence: --ephemeral-db  >  VALIDATION_DATABASE_URL  >  DATABASE_URL /
+    # backend/.env.validation. The first two never touch the primary
+    # DATABASE_URL, so destructive verification is isolated from any shared DB.
+    live_selected = any(s in selected for s in range(5, 10))
+    ephemeral_requested = args.ephemeral_db or os.environ.get(
+        "CI_GATE_EPHEMERAL_DB", ""
+    ).strip().lower() in {"1", "true", "yes"}
+    ephemeral_cid: str | None = None
+    using_isolated_db = False
+
+    if ephemeral_requested and live_selected:
+        if not _docker_available():
+            print(_c("31", "error: --ephemeral-db requested but 'docker' is not on PATH"))
+            return 1
+        try:
+            ephemeral_cid, ephemeral_url = _start_ephemeral_db()
+        except RuntimeError as exc:
+            print(_c("31", f"error: could not start ephemeral DB: {exc}"))
+            return 1
+        os.environ["DATABASE_URL"] = ephemeral_url
+        using_isolated_db = True
+    elif os.environ.get("VALIDATION_DATABASE_URL"):
+        os.environ["DATABASE_URL"] = os.environ["VALIDATION_DATABASE_URL"]
+        using_isolated_db = True
+        print(
+            _c(
+                "36",
+                "note: live-DB stages target VALIDATION_DATABASE_URL "
+                "(dedicated validation DB; primary DATABASE_URL left untouched)",
+            )
+        )
+    elif not os.environ.get("DATABASE_URL") and (BACKEND_ROOT / ".env.validation").exists():
+        # Populate DATABASE_URL from backend/.env.validation if present.
+        # Without this, stages 5-9 would silently fall back to alembic.ini's
+        # localhost URL. _load_env.load() is idempotent.
         from _load_env import load as _load_validation_env
 
         _load_validation_env()
+
+    db_available = bool(os.environ.get("DATABASE_URL"))
     if not db_available:
         print(
             _c(
@@ -349,44 +577,74 @@ def main(argv: list[str]) -> int:
             )
         )
 
-    results: list[StageResult] = []
-    started = time.time()
-
-    for stage in stages:
-        if stage.number not in selected:
-            continue
-        _banner(stage.number, total, stage.title)
-        skipped = False
-        skip_reason = ""
-        ok = True
-        t0 = time.time()
-        if stage.requires_db and not db_available:
-            skipped = True
-            skip_reason = "DATABASE_URL absent"
-        elif stage.func is not None:
-            # Stage 9 needs to regenerate the ERD first (subprocess), then
-            # run the comparator (callable). Keep the order explicit.
-            if stage.cmd is not None:
-                ok = _run_subprocess(stage)
-            if ok:
-                ok = bool(stage.func())  # type: ignore[operator]
-        else:
-            ok = _run_subprocess(stage)
-        elapsed_ms = int((time.time() - t0) * 1000)
-        _result(stage.title, ok, skipped, elapsed_ms)
-        results.append(
-            StageResult(
-                number=stage.number,
-                title=stage.title,
-                passed=ok,
-                skipped=skipped,
-                elapsed_ms=elapsed_ms,
-                skip_reason=skip_reason,
+    # A downgrade (stage 6) against a *persistent* DB is the only thing that
+    # can leave the schema mid-flight; when that runs unisolated, warn and lean
+    # on the restoration guard below.
+    destructive_selected = 6 in selected
+    if destructive_selected and db_available and not using_isolated_db:
+        print(
+            _c(
+                "33",
+                "\nWARNING: destructive migration verification (stage 6 "
+                "'downgrade base') will run against the primary DATABASE_URL.\n"
+                "         A restoration guard re-upgrades to head on exit, but "
+                "for full isolation prefer --ephemeral-db or "
+                "VALIDATION_DATABASE_URL.",
             )
         )
-        if not skipped and not ok:
-            # Fail-fast: do not run subsequent stages on first failure.
-            break
+
+    results: list[StageResult] = []
+    started = time.time()
+    restore_ok: bool | None = None
+    restored_rev = ""
+
+    try:
+        for stage in stages:
+            if stage.number not in selected:
+                continue
+            _banner(stage.number, total, stage.title)
+            skipped = False
+            skip_reason = ""
+            ok = True
+            t0 = time.time()
+            if stage.requires_db and not db_available:
+                skipped = True
+                skip_reason = "DATABASE_URL absent"
+            elif stage.func is not None:
+                # Stage 9 needs to regenerate the ERD first (subprocess), then
+                # run the comparator (callable). Keep the order explicit.
+                if stage.cmd is not None:
+                    ok = _run_subprocess(stage)
+                if ok:
+                    ok = bool(stage.func())  # type: ignore[operator]
+            else:
+                ok = _run_subprocess(stage)
+            elapsed_ms = int((time.time() - t0) * 1000)
+            _result(stage.title, ok, skipped, elapsed_ms)
+            results.append(
+                StageResult(
+                    number=stage.number,
+                    title=stage.title,
+                    passed=ok,
+                    skipped=skipped,
+                    elapsed_ms=elapsed_ms,
+                    skip_reason=skip_reason,
+                )
+            )
+            if not skipped and not ok:
+                # Fail-fast: do not run subsequent stages on first failure.
+                break
+    finally:
+        # Guaranteed cleanup — runs on success, failure, and Ctrl-C.
+        if ephemeral_cid is not None:
+            print(_c("36", "\ntearing down ephemeral Postgres…"), flush=True)
+            _stop_ephemeral_db(ephemeral_cid)
+        elif destructive_selected and db_available:
+            print(
+                _c("36", "\nverifying validation DB is restored to head…"),
+                flush=True,
+            )
+            restore_ok, restored_rev = _ensure_db_at_head()
 
     elapsed_total_ms = int((time.time() - started) * 1000)
     print("\n" + "=" * 78)
@@ -397,6 +655,17 @@ def main(argv: list[str]) -> int:
         _result(f"stage {r.number} · {r.title}", r.passed, r.skipped, r.elapsed_ms)
         if not r.skipped and not r.passed:
             overall_pass = False
+    if restore_ok is True:
+        print(_c("32", f"[ OK ] DB restored & verified at head: {restored_rev}"))
+    elif restore_ok is False:
+        overall_pass = False
+        print(
+            _c(
+                "31",
+                f"[FAIL] DB NOT restored to head ({restored_rev}) — run "
+                "'alembic upgrade head' manually before trusting this database",
+            )
+        )
     if not overall_pass:
         print(_c("31", "\nResult: FAILED"))
         return 1
