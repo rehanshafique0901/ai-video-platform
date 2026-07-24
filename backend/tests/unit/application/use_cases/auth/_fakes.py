@@ -1954,12 +1954,16 @@ class FakeExportJobRepository(IExportJobRepository):
 
 @dataclass
 class FakeNotificationRepository(INotificationRepository):
-    """In-memory ``INotificationRepository`` for the α8.5b.3 projection unit tests.
+    """In-memory ``INotificationRepository`` for the notification unit tests (α8.5b.3/3r).
 
-    Models the real adapter's observable contract: the partial-unique
-    ``(user_id, source_event_id)`` dedupe key (``add`` raises ``ConflictError`` on a
-    duplicate where ``source_event_id`` is not None), and stamps ``delivered_in_app_at``
-    at insert. Multiple ``source_event_id IS NULL`` rows are permitted (partial index).
+    Models the real adapter's observable contract:
+    * **Write (α8.5b.3):** the partial-unique ``(user_id, source_event_id)`` dedupe key
+      (``add`` raises ``ConflictError`` on a duplicate where ``source_event_id`` is not
+      None), and stamps ``delivered_in_app_at`` at insert. Multiple ``source_event_id IS
+      NULL`` rows are permitted (partial index).
+    * **Read (α8.5b.3r):** owner-scoped list (keyset, ``created_at DESC, id DESC``, archived
+      excluded — W8.5b.8/10), unread count (``read_at IS NULL AND archived = false``),
+      scoped idempotent ``mark_read`` (metadata-only — W8.5b.9), and bulk ``mark_all_read``.
     """
 
     _rows: dict[UUID, Notification] = field(default_factory=dict)
@@ -1991,11 +1995,54 @@ class FakeNotificationRepository(INotificationRepository):
             payload=dict(payload),
             source_event_id=source_event_id,
             delivered_in_app_at=now,
+            read_at=None,
+            archived=False,
             created_at=now,
             updated_at=now,
         )
         self._rows[notification.id] = notification
         return notification
+
+    async def list_for_user(
+        self,
+        user_id: UUID,
+        *,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[Notification]:
+        rows = [n for n in self._rows.values() if n.user_id == user_id and not n.archived]
+        # Newest first, total order on (created_at, id) — W8.5b.10 (read_at ignored).
+        rows.sort(key=lambda n: (n.created_at, n.id), reverse=True)
+        if after is not None:
+            rows = [n for n in rows if (n.created_at, n.id) < after]
+        return rows[:limit]
+
+    async def count_unread(self, user_id: UUID) -> int:
+        return sum(
+            1
+            for n in self._rows.values()
+            if n.user_id == user_id and n.read_at is None and not n.archived
+        )
+
+    async def mark_read(self, user_id: UUID, notification_id: UUID) -> Notification | None:
+        existing = self._rows.get(notification_id)
+        if existing is None or existing.user_id != user_id:
+            return None
+        if existing.read_at is not None:
+            # Already read — idempotent no-op, return unchanged (200 upstream).
+            return existing
+        updated = replace(existing, read_at=datetime.now(UTC), updated_at=datetime.now(UTC))
+        self._rows[notification_id] = updated
+        return updated
+
+    async def mark_all_read(self, user_id: UUID) -> int:
+        affected = 0
+        for nid, n in list(self._rows.items()):
+            if n.user_id == user_id and n.read_at is None and not n.archived:
+                now = datetime.now(UTC)
+                self._rows[nid] = replace(n, read_at=now, updated_at=now)
+                affected += 1
+        return affected
 
 
 # ---- Event outbox repository ------------------------------------------

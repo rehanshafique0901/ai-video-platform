@@ -47,6 +47,16 @@ from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.list_media import ListMedia
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
+from app.application.use_cases.notifications.count_unread_notifications import (
+    CountUnreadNotifications,
+)
+from app.application.use_cases.notifications.list_notifications import ListNotifications
+from app.application.use_cases.notifications.mark_all_notifications_read import (
+    MarkAllNotificationsRead,
+)
+from app.application.use_cases.notifications.mark_notification_read import (
+    MarkNotificationRead,
+)
 from app.application.use_cases.projects.create_project import CreateProject
 from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
@@ -229,6 +239,21 @@ GetExportJobDep = Annotated[GetExportJob, Depends(container.get_get_export_job_u
 # ---- Use-case dependencies (Slice α8.5b.1 — Download serving) ---------
 
 DownloadExportDep = Annotated[DownloadExport, Depends(container.get_download_export_use_case)]
+
+# ---- Use-case dependencies (Slice α8.5b.3r — Notification read API) ----
+
+ListNotificationsDep = Annotated[
+    ListNotifications, Depends(container.get_list_notifications_use_case)
+]
+CountUnreadNotificationsDep = Annotated[
+    CountUnreadNotifications, Depends(container.get_count_unread_notifications_use_case)
+]
+MarkNotificationReadDep = Annotated[
+    MarkNotificationRead, Depends(container.get_mark_notification_read_use_case)
+]
+MarkAllNotificationsReadDep = Annotated[
+    MarkAllNotificationsRead, Depends(container.get_mark_all_notifications_read_use_case)
+]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
 

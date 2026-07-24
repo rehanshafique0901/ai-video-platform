@@ -76,7 +76,17 @@ from app.application.use_cases.media.list_media import ListMedia
 from app.application.use_cases.media.media_enrichment_worker import MediaEnrichmentWorker
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
+from app.application.use_cases.notifications.count_unread_notifications import (
+    CountUnreadNotifications,
+)
 from app.application.use_cases.notifications.create_notification import CreateNotification
+from app.application.use_cases.notifications.list_notifications import ListNotifications
+from app.application.use_cases.notifications.mark_all_notifications_read import (
+    MarkAllNotificationsRead,
+)
+from app.application.use_cases.notifications.mark_notification_read import (
+    MarkNotificationRead,
+)
 from app.application.use_cases.notifications.notification_projection import (
     NotificationProjection,
 )
@@ -1122,6 +1132,30 @@ def get_create_notification_use_case() -> CreateNotification:
     pipeline (W8.5b.6); exactly-once is enforced by the DB (W8.5b.7).
     """
     return CreateNotification(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.5b.3r — Notification read API)
+# ---------------------------------------------------------------------
+# The owner-facing read/query half of the notifications context. Each is a query-only
+# (or metadata-only mutation) use case over a fresh UoW — never touches the frozen
+# export/orchestration pipeline (Gate 1) nor the write projection (Gate 2).
+
+
+def get_list_notifications_use_case() -> ListNotifications:
+    return ListNotifications(uow=get_unit_of_work())
+
+
+def get_count_unread_notifications_use_case() -> CountUnreadNotifications:
+    return CountUnreadNotifications(uow=get_unit_of_work())
+
+
+def get_mark_notification_read_use_case() -> MarkNotificationRead:
+    return MarkNotificationRead(uow=get_unit_of_work())
+
+
+def get_mark_all_notifications_read_use_case() -> MarkAllNotificationsRead:
+    return MarkAllNotificationsRead(uow=get_unit_of_work())
 
 
 # ---------------------------------------------------------------------

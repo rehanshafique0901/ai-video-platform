@@ -909,10 +909,18 @@ notifications (
 )
 -- Indexes:
 --   ix_notifications_user_id_unread      (user_id, created_at) WHERE read_at IS NULL AND archived = false
+--     └─ α8.5b.3r: serves GET /notifications/unread-count (index-only badge scan) + the
+--        mark-all-read predicate
 --   ix_notifications_user_id_created_at  (user_id, created_at)
+--     └─ α8.5b.3r: serves GET /notifications (keyset feed, created_at DESC, id DESC; the id
+--        tie-break resolves equal-timestamp rows — a composite (user_id, created_at, id) keyset
+--        index is intentionally deferred pending observed production need, Fork E)
 --   uq_notifications_user_id_source_event_id  UNIQUE (user_id, source_event_id) WHERE source_event_id IS NOT NULL
 --     └─ α8.5b.3 W8.5b.7: a notification is projected exactly once per recipient per source event
 --        (partial because source_event_id is nullable; no FK to event_outbox — transport vs product state)
+-- Read API (α8.5b.3r): read-state mutations (read_at) are owner-scoped (user_id) and metadata-only —
+--   they never touch identity / source_event_id / delivery provenance (W8.5b.9) and never affect feed
+--   ordering (W8.5b.10). No schema change: read_at / archived / both feed indexes pre-date the slice.
 ```
 
 ---

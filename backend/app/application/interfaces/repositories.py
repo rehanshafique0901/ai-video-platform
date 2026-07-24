@@ -2122,12 +2122,26 @@ class IModelPricingRepository(ABC):
 
 
 class INotificationRepository(ABC):
-    """Write surface for ``notifications`` — the in-app projection sink (Slice α8.5b.3).
+    """Persistence surface for ``notifications`` — the in-app projection (α8.5b.3 / α8.5b.3r).
 
     A **notification** is product state projected from an immutable, already-committed
-    export terminal event (``NotificationProjection`` → ``CreateNotification``). This
-    slice ships the **write path only**; the read/query surface (list, unread counts,
-    mark-read, archive) is deferred to α8.5b.3r.
+    export terminal event (``NotificationProjection`` → ``CreateNotification``). α8.5b.3
+    shipped the **write path** (:meth:`add`); α8.5b.3r adds the **read/query surface**
+    (:meth:`list_for_user` / :meth:`count_unread` / :meth:`mark_read` /
+    :meth:`mark_all_read`) — pure additive methods; the write path is untouched.
+
+    **Owner-scoped (W8.5b.8).** Every read/query method is scoped by ``user_id`` — a
+    notification belonging to another principal is never returned and never mutated; a
+    foreign/missing id is indistinguishable from "not there" (uniform ``404`` upstream),
+    mirroring the anti-enumeration posture of :class:`IProjectRepository` /
+    :class:`IMediaRepository`. Unlike ``media``/``projects`` there is no ``tenant_id``
+    scope — a notification is addressed to a *user*, so ``user_id`` alone is the key
+    (α8.5b.3r ownership ruling).
+
+    **Read-state mutations are metadata-only (W8.5b.9).** :meth:`mark_read` /
+    :meth:`mark_all_read` write only ``read_at``; they never alter projection identity,
+    ``source_event_id`` linkage, or delivery provenance. Ordering is observational —
+    ``created_at DESC, id DESC``, independent of ``read_at`` (W8.5b.10).
 
     **Exactly-once is DB-owned (W8.5b.7).** :meth:`add` maps the partial-unique
     ``uq_notifications_user_id_source_event_id`` violation (over ``(user_id,
@@ -2157,5 +2171,75 @@ class INotificationRepository(ABC):
         Raises ``ConflictError`` when ``(user_id, source_event_id)`` already exists
         (redelivery of the same source event) — the caller resolves it as an
         idempotent no-op (W8.5b.7).
+        """
+        ...
+
+    # --- Read / query surface (α8.5b.3r) ----------------------------------------
+    #
+    # Pure additive methods on the same port (Fork D). All are owner-scoped by
+    # ``user_id`` (W8.5b.8) and exclude archived rows (archive is deferred, but the
+    # column exists, so the feed/count filter ``archived = false`` future-proofs the
+    # read model). Ordering is ``created_at DESC, id DESC`` — a total order, keyset
+    # pagination-stable (α5a D14 precedent), and independent of ``read_at`` (W8.5b.10).
+
+    @abstractmethod
+    async def list_for_user(
+        self,
+        user_id: UUID,
+        *,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[Notification]:
+        """Return up to ``limit`` of the user's live (non-archived) notifications, newest first.
+
+        Ordering is ``created_at DESC, id DESC`` (a *total* order so keyset pagination
+        never duplicates or skips a row under timestamp ties — the α5a
+        :meth:`IProjectRepository.list_owned` precedent). ``after`` is the decoded cursor
+        position ``(created_at, id)``: when provided, only rows strictly *after* it in the
+        DESC order are returned (row-value comparison ``(created_at, id) < (:created_at,
+        :id)``). The caller (``ListNotifications``) requests ``limit + 1`` to detect a
+        further page. Scoped by ``user_id`` (W8.5b.8); ``archived`` rows are excluded.
+        Read (``read_at != NULL``) rows are still returned — read-state never affects
+        feed membership or order (W8.5b.10). Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def count_unread(self, user_id: UUID) -> int:
+        """Return the count of the user's unread, non-archived notifications.
+
+        Counts rows matching ``user_id = :uid AND read_at IS NULL AND archived = false``
+        — the exact predicate of the partial index ``ix_notifications_user_id_unread``,
+        so the badge count is an index-only scan. Owner-scoped (W8.5b.8);
+        side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_read(self, user_id: UUID, notification_id: UUID) -> Notification | None:
+        """Mark one of the user's notifications read — scoped, idempotent (α8.5b.3r).
+
+        Atomic CAS ``UPDATE … SET read_at = now(), updated_at = now() WHERE id = :id AND
+        user_id = :uid AND read_at IS NULL RETURNING …``. Writes **only** ``read_at`` —
+        never projection identity, ``source_event_id``, or delivery provenance (W8.5b.9).
+
+        Returns:
+        * the freshly-read :class:`Notification` when the CAS marked an unread owned row;
+        * the **already-read** owned row (unchanged) when it was read on a prior call —
+          resolved by a follow-up owner-scoped read, so a repeat call is an idempotent
+          ``200`` rather than a spurious ``404``;
+        * ``None`` when no owned row exists (missing or another principal's — the use case
+          maps it to a uniform ``404``, W8.5b.8).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_all_read(self, user_id: UUID) -> int:
+        """Mark all the user's unread notifications read; return the number affected (α8.5b.3r).
+
+        Bulk CAS ``UPDATE … SET read_at = now(), updated_at = now() WHERE user_id = :uid
+        AND read_at IS NULL AND archived = false``. Writes only ``read_at`` (W8.5b.9) and
+        never reshuffles the feed (W8.5b.10). Returns the affected row count (``0`` when
+        nothing was unread — an idempotent no-op). Owner-scoped (W8.5b.8).
         """
         ...

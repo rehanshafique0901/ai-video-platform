@@ -6,6 +6,87 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.5b.3r — Notification Read API — read & manage the projection (2026-07-24)
+
+The **read/query completion of the notifications bounded context** — the follow-up deferred from
+α8.5b.3. α8.5b.3 established `Immutable Event → Exactly-once Projection → Notification row`; this
+slice adds the owner-facing surface on top of that stable foundation, and **nothing more**: list
+(keyset-paginated), unread badge count, mark-one-read, mark-all-read. It is a pure **read-model**
+slice — query-only + metadata-only mutations — so it touches **no** frozen orchestration surface
+(**ADR-0042** Gate 1 PASS) and does not change how notifications are *projected* or *created*
+(projection contract intact, Gate 2 PASS). Every repository method is additive; the write path
+(`add`) and `NotificationProjection` are byte-for-byte unchanged. **Zero migration** — the feed
+index, the unread partial index, and the `read_at` / `archived` columns all pre-date this slice.
+Freeze guard green, **zero override markers**. Runtime capability → version bump to
+`0.4.34-phase3-alpha8.5b3r`. **Archive / delete / search / filters / folders / labels / pinning /
+snooze stay out** (this is a read-model completion, not an inbox product); **email deferred to
+α8.5b.4**.
+
+#### Added
+- **`GET /api/v1/notifications` (Fork A/B — list, keyset-paginated).** The caller's notifications,
+  newest first (`created_at DESC, id DESC`), owner-scoped by `user_id`. **Reuses the existing
+  `app/application/pagination.py` keyset primitive verbatim** (the α5a `GET /projects` shape):
+  `?limit=` (1..100, default 20) + opaque `?cursor=` → `meta.next_cursor`; a malformed cursor is a
+  clean 422. No offset, no notification-specific cursor format.
+- **`GET /api/v1/notifications/unread-count` → `{ count }`.** The badge count — matches the
+  `ix_notifications_user_id_unread` partial-index predicate (`read_at IS NULL AND archived = false`),
+  an index-only scan.
+- **`POST /api/v1/notifications/{id}/read` (Fork C — action verb).** Marks one notification read;
+  idempotent (a repeat is a 200 no-op); a missing / foreign id is a uniform 404 (anti-enumeration).
+  Matches the established `POST …/render-jobs/{id}/cancel` convention rather than `PATCH`.
+- **`POST /api/v1/notifications/read-all` → `{ updated }`.** Bulk mark-read of the caller's unread
+  set; returns the affected count; a second call returns `0` (idempotent).
+- **`INotificationRepository` read methods (Fork D — pure additive).** `list_for_user` (keyset,
+  owner-scoped, archived excluded), `count_unread`, `mark_read` (owner-scoped CAS on
+  `read_at IS NULL`; already-read → unchanged row so mark-read is idempotent; foreign → `None`),
+  `mark_all_read` (bulk CAS, returns count). All write **only** `read_at` — never identity /
+  `source_event_id` / delivery provenance.
+- **Read use cases** — `ListNotifications`, `CountUnreadNotifications`, `MarkNotificationRead`
+  (404 on missing/foreign), `MarkAllNotificationsRead`; wired via 4 container factories + `deps.py`
+  aliases; router registered in the composition root.
+- **`NotificationPublic` DTO** (id, kind, title, body, payload, source_event_id, read_at,
+  created_at, updated_at) + `{ count }` / `{ updated }` response models. `archived` /
+  `delivered_email_at` intentionally kept off the wire (archive deferred; email is α8.5b.4).
+- **Domain `Notification` entity extended** with `read_at` + `archived` — now legitimate domain
+  state, not repository-only implementation details (implementation-note ruling).
+- **Tests** — read use-case unit suite (keyset ordering + `next_cursor`, owner scoping, bad cursor
+  → 422, count scoping, mark-read idempotency + 404, mark-all count + idempotency, order-stability
+  under read-state); `NotificationRepository` read integration (N5–N8: keyset + owner isolation,
+  unread count scoping, scoped/idempotent mark-read with metadata-only guarantee, mark-all count);
+  `/api/v1/notifications` API integration (auth 401s, empty list + envelope, unread-count 0,
+  read-all 0, mark-read 404/422, bad cursor 422). Seeded-data feed behaviour is proven by the
+  repository + unit suites (layered proof, the α8.5b.3 cadence).
+
+#### Index (Fork E — existing index; no migration)
+- **Composite keyset index `(user_id, created_at, id)` intentionally deferred pending observed
+  production need.** The existing `ix_notifications_user_id_created_at` supports the dominant feed
+  access pattern and the `id` tie-break resolves equal-timestamp rows; a composite index is an
+  optimization, not a capability. Consistent with the platform cadence: prove correctness first,
+  optimize when justified — not speculative indexing.
+
+#### Invariants
+- **W8.5b.8 (new) — Notification queries never expose notifications belonging to another
+  principal.** Every read/read-state method is scoped by `user_id` at the repository layer; a
+  foreign / missing id is indistinguishable (uniform 404). The read-side ownership invariant.
+- **W8.5b.9 (new) — Read-state mutations modify only notification metadata and never alter
+  projection identity, source-event linkage, or delivery provenance.** `mark_read` / `mark_all_read`
+  write only `read_at`; they never touch `id`, `user_id`, `kind`, `title`, `body`, `payload`,
+  `source_event_id`, or `delivered_in_app_at`. Mirrors W8.5b.6/7 — the read side cannot re-project
+  or re-key.
+- **W8.5b.10 (new) — Notification ordering is observational only; read-state mutations must not
+  affect feed ordering.** The feed is ordered purely by `(created_at, id)`, independent of
+  `read_at`; marking one read, or marking all read, never moves a notification or reshuffles the
+  feed.
+
+#### Unchanged (freeze holds)
+- **Read-model + additive only** — no frozen contract modified: `NotificationProjection`,
+  `CreateNotification`, `INotificationRepository.add`, the outbox, the relay, the export event
+  emitters, and the notification write path are byte-for-byte unchanged (ADR-0042 Gate 1;
+  projection contract intact, Gate 2). Nothing near composition/render (ADR-0043). **Zero
+  migration** — `read_at` / `archived` / both feed indexes pre-date this slice. Freeze guard green,
+  **zero override markers**. **Deferred:** archive/delete + inbox features → out of scope;
+  email/push/websocket → α8.5b.4+; publishing → α8.6.
+
 ### Phase 3 Slice α8.5b.3 — Notifications — project export terminal events into in-app notifications (2026-07-24)
 
 The **third and final distribution-stage slice** — it closes the loop opened by α8.5a/α8.5b.1–2:

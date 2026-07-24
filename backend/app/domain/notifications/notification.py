@@ -1,6 +1,6 @@
-"""``Notification`` domain entity — the in-app notification projection (α8.5b.3).
+"""``Notification`` domain entity — the in-app notification projection (α8.5b.3 / α8.5b.3r).
 
-A **slim projection** of the ``notifications`` table (``schema.md`` §25 /
+A projection of the ``notifications`` table (``schema.md`` §25 /
 ``models/notifications.py``). Frozen for value-semantics — the same discipline as
 :class:`app.domain.export.export_job.ExportJob`.
 
@@ -11,8 +11,13 @@ that produced the row — the logical dedupe key behind the partial-unique
 ``(user_id, source_event_id)`` index (nullable so non-event notifications remain
 expressible; no FK to the transient outbox).
 
-Only the columns the write path needs are modelled here; the read/query surface
-(unread counts, mark-read, archive) lands in the α8.5b.3r follow-up.
+**Read-state (α8.5b.3r).** ``read_at`` and ``archived`` are the mutable *metadata* the
+read API manages — they are legitimate domain state, not repository-only implementation
+details (α8.5b.3r Fork D / implementation note). Read-state mutations touch only these
+fields and never the projection identity, source-event linkage, or delivery provenance
+(W8.5b.9); ordering is a pure function of ``(created_at, id)``, independent of ``read_at``
+(W8.5b.10). ``archived`` is not yet exposed on the wire (archive is deferred), but it is
+modelled here so a full row round-trips faithfully.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from uuid import UUID
 
 @dataclass(frozen=True, slots=True)
 class Notification:
-    """In-app notification — one row of the ``notifications`` table (slim view)."""
+    """In-app notification — one row of the ``notifications`` table."""
 
     id: UUID
     user_id: UUID
@@ -35,6 +40,8 @@ class Notification:
     payload: dict[str, Any]
     source_event_id: UUID | None
     delivered_in_app_at: datetime | None
+    read_at: datetime | None
+    archived: bool
     created_at: datetime
     updated_at: datetime
 

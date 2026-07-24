@@ -161,6 +161,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IEventOutboxRepository,
         IMediaRepository,
         IModelPricingRepository,
+        INotificationRepository,
         IProjectRepository,
         IProjectVersionRepository,
         IPromptRepository,
@@ -185,6 +186,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.media_repository import MediaRepository
     from app.infrastructure.repositories.model_pricing_repository import (
         ModelPricingRepository,
+    )
+    from app.infrastructure.repositories.notification_repository import (
+        NotificationRepository,
     )
     from app.infrastructure.repositories.project_repository import ProjectRepository
     from app.infrastructure.repositories.project_version_repository import (
@@ -253,6 +257,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 )
                 self.prompts = cast(IPromptRepository, PromptRepository(self._session))
                 self.media = cast(IMediaRepository, MediaRepository(self._session))
+                self.notifications = cast(
+                    INotificationRepository, NotificationRepository(self._session)
+                )
                 self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
                 self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
                 self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))

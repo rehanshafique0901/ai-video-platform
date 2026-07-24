@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.33-phase3-alpha8.5b3` |
-| **Latest runtime tag** | `v0.4.33-phase3-alpha8.5b3` |
+| **Application version** | `0.4.34-phase3-alpha8.5b3r` |
+| **Latest runtime tag** | `v0.4.34-phase3-alpha8.5b3r` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3 all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -128,6 +128,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Download serving (deliver artifact bytes) | ✅ | α8.5b.1 | owner-scoped `GET …/exports/{id}/download`; neutral `IDownloadDelivery` seam (`LocalStreamDelivery` now, redirect-ready); best-effort accounting |
 | Storage backends & signed-URL delivery (S3/R2) | ✅ | α8.5b.2 | `StorageResolver` + `DeliveryResolver` registries; write-active/read-persisted (E2); `S3ObjectStorage` (S3+R2) + fixed-TTL offline-presigned `302` redirects; cloud SDK import-linter-isolated; endpoint unchanged |
 | Notifications (in-app projection) | ✅ | α8.5b.3 | `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced via partial `UNIQUE (user_id, source_event_id)`; write path only (read API → α8.5b.3r, email → α8.5b.4) |
+| Notification read API (list / count / mark-read) | ✅ | α8.5b.3r | owner-scoped read-model completion on the α8.5b.3 projection: `GET /notifications` (keyset feed, reuses α5a pagination), `GET /notifications/unread-count`, `POST /notifications/{id}/read` + `/read-all` (action verbs); read-state metadata-only + order-stable (W8.5b.8/9/10); pure additive repo methods; **zero migration**; archive/inbox features out |
 
 ### Invariant catalog
 
@@ -210,6 +211,16 @@ by review + tests, not the mechanical guard:
   deliver more than once and the projection may execute more than once; the partial `UNIQUE
   (user_id, source_event_id)` guarantees the row exists at most once, and the use case treats the
   refused duplicate as a successful no-op.
+- **W8.5b.8** (α8.5b.3r) — notification queries never expose notifications belonging to another
+  principal: every read/read-state method is scoped by `user_id` at the repository layer, and a
+  foreign/missing id is indistinguishable (uniform 404). The read-side ownership invariant.
+- **W8.5b.9** (α8.5b.3r) — read-state mutations modify only notification metadata and never alter
+  projection identity, source-event linkage, or delivery provenance: `mark_read` / `mark_all_read`
+  write only `read_at`, never `id`/`user_id`/`kind`/`title`/`body`/`payload`/`source_event_id`/
+  `delivered_in_app_at` (mirror of W8.5b.6/7 — the read side cannot re-project or re-key).
+- **W8.5b.10** (α8.5b.3r) — notification ordering is observational only; read-state mutations must
+  not affect feed ordering. The feed is ordered purely by `(created_at, id)`, independent of
+  `read_at`, so marking one read or all read never moves a notification or reshuffles the feed.
 
 ---
 
@@ -268,7 +279,7 @@ exist. See [`ADR-0041` §Event projection pattern](../decisions/ADR-0041-provide
 | **α8.5b.1** | ✅ Download serving — `DownloadExport` + `IDownloadDelivery` (`LocalStreamDelivery`); shipped `v0.4.31` |
 | **α8.5b.2** | ✅ Storage backends & signed-URL delivery — `StorageResolver`/`DeliveryResolver` + `S3ObjectStorage` (S3/R2) + `S3RedirectDelivery` (fixed-TTL presigned `302`); write-active/read-persisted (E2); GCS/Azure plug in the same way; shipped `v0.4.32` |
 | **α8.5b.3** | ✅ Notifications — `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced (partial `UNIQUE (user_id, source_event_id)`); in-app write path only; shipped `v0.4.33` |
-| **α8.5b.3r** | Notifications read API — `GET /notifications`, unread counts, mark-read, archive (query surface on the α8.5b.3 projection) |
+| **α8.5b.3r** | ✅ Notifications read API — `GET /notifications` (keyset feed), `GET /notifications/unread-count`, `POST /notifications/{id}/read` + `/read-all` (action verbs); owner-scoped read-model completion on the α8.5b.3 projection (W8.5b.8/9/10); zero migration; archive/inbox features out; shipped `v0.4.34` |
 | **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers) |
 
