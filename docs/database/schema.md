@@ -48,6 +48,20 @@ Defined once, used widely:
 | `flag_scope` | `tenant, user, role` |
 | `idempotency_status` | `in_flight, succeeded, failed` |
 | `audit_actor_kind` | `user, system, admin, api_key, webhook` |
+| `provider_pricing` *(α8.5d)* | `free, freemium, paid` |
+| `provider_auth` *(α8.5d)* | `none, api_key, oauth, token` |
+| `adapter_status` *(α8.5d)* | `planned, implemented` |
+| `adapter_execution_mode` *(α8.5d)* | `local, cloud, hybrid` |
+| `cost_unit` *(α8.5d)* | `image, second, minute, token, character, request` |
+| `cost_source` *(α8.5d)* | `declared, derived, unknown` |
+| `routing_strategy` *(α8.5d)* | `free_first, lowest_cost, highest_quality, fastest, balanced, offline_only, privacy_first, commercial_only, free_only` |
+| `fallback_mode` *(α8.5d)* | `automatic, none` |
+| `selection_mode` *(α8.5d)* | `best_available, first_available` |
+| `gpu_backend` *(α8.5d)* | `metal, cuda, rocm, cpu` |
+| `generation_mode` *(α8.5d)* | `quick, balanced, quality, ultra` |
+| `capability_dep_kind` *(α8.5d)* | `requires, optional` |
+
+> α8.5d catalogue enums mirror the Pydantic StrEnums in `backend/scripts/provider_manifest.py` one-to-one (created by migration `0010`; see §38). `kind` on catalogue tables reuses the existing `plugin_kind` enum.
 
 > The generic `setting_scope` ENUM has been **removed**. Configuration is now split into dedicated tables (`system_settings`, `tenant_settings`, `provider_settings`) per CR-DB-4. The generic `settings` table from the earlier revision is replaced; see §27.
 
@@ -1429,3 +1443,46 @@ Per reviewer guidance at the Phase 2D close, the 13 items above should not all b
 - `cost_reconciliations` immutability (finance correction workflow).
 
 Each wave produces its own ADR(s); a wave does not start until the previous wave has merged. The CI gate must stay green at the close of every wave's final PR.
+
+---
+
+## 38. Provider Capability Catalogue (Phase 3 α8.5d)
+
+> Additive catalogue tables created by migration `0010_provider_catalogue` (schema only; the seeder `backend/scripts/seed_providers.py` owns the data). **The seeder is the only writer; the runtime never mutates these rows and never reads YAML** (W8.5c.2 / W8.5d.1 / W8.5d.10). Design intent + ownership in `docs/engineering/PROVIDER_RUNTIME_DATA_MODEL.md`; the design-time source is `backend/providers/*.yaml`. These **coexist with, and never duplicate,** `ai_models`/`ai_model_pricing` (model catalogue + authoritative pricing, §15) and `provider_plugin_registrations` (loaded code plugins + live health, §15). Operational state (health, latency, quota-remaining, success rate, queue) is **forbidden** on these tables (W8.5d.10) — it lives in operational tables owned by the runtime.
+
+**D-B storage tiers:** stable ⇒ typed columns; semi-structured ⇒ JSONB (`supports`, `runtime`, `features`, `outputs`, `extra`); highly-variable ⇒ own tables (`capability_dependencies`, `adapter_fallbacks`).
+
+### 38.1 `capabilities` — the capability vocabulary
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | text | NO | | PK (e.g. `image_generation`) |
+| `kind` | plugin_kind | NO | | coarse routing kind |
+| `inputs` / `outputs` | text[] | NO | `'{}'` | io-type vocabulary |
+| `requires` / `optional` | text[] | NO | `'{}'` | request **parameter** names |
+| `created_at` / `updated_at` | timestamptz | NO | `now()` | |
+
+### 38.2 `capability_dependencies` — capability → capability
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| `capability_id` | text | NO | FK → `capabilities(id)` ON DELETE CASCADE |
+| `depends_on_id` | text | NO | FK → `capabilities(id)` ON DELETE RESTRICT |
+| `kind` | capability_dep_kind | NO | `requires` \| `optional` |
+| PK `(capability_id, depends_on_id, kind)`; CHECK `capability_id <> depends_on_id`. `requires` graph seeded acyclic. |
+
+### 38.3 `providers`
+Typed: `id` PK, `name`, `homepage`, `license`, `commercial`, `authentication` (`provider_auth`), `requires_login`, `pricing` (`provider_pricing`), `quota_daily`/`quota_monthly` (int; NULL≡unlimited, CHECK `>0`), `config_keys text[]`, `score_quality/cost/speed/reliability` (smallint, CHECK 0–100), `enabled`; `extra jsonb`; `created_at`/`updated_at`. Index `ix_providers_pricing_enabled(pricing, enabled)`.
+
+### 38.4 `provider_adapters` — the runtime-loadable unit
+Typed: `id` PK (`provider.suffix`), `provider_id` FK→providers CASCADE, `capability_id` FK→capabilities RESTRICT, `status` (`adapter_status`), `execution_mode` (`adapter_execution_mode`, nullable), `implemented`, `enabled`, `import_path`; cost typed: `cost_unit`/`cost_amount numeric(18,8)`/`cost_currency varchar(3)`/`cost_source` + derived `estimated_generation_cost`/`estimated_download_cost numeric(18,8)`/`estimated_gpu_minutes numeric(12,4)`. JSONB: `supports`, `runtime`, `features`, `outputs`, `extra`. Constraints: UNIQUE `(provider_id, capability_id)`; CHECK `(status='implemented')=implemented` (W8.5d.4); CHECK `cost_amount >= 0`. Indexes on `capability_id`, `provider_id`, `(status, enabled)`.
+
+### 38.5 `adapter_fallbacks` — ordered fallback join (D-A2)
+`adapter_id` FK→adapters CASCADE, `fallback_adapter_id` FK→adapters RESTRICT, `reason text`, `ordinal int`. PK `(adapter_id, fallback_adapter_id)`; CHECK no-self; UNIQUE `(adapter_id, ordinal)`. Seeded acyclic; enables FK integrity + SQL traversal + future weighted routing.
+
+### 38.6 `routing_policies`
+`scope` PK (`'default'` \| capability id), `strategy` (`routing_strategy`), `fallback` (`fallback_mode`), `selection` (`selection_mode`).
+
+### 38.7 `device_profiles` — curated reference data
+`id` PK, `ram_gb` (CHECK `>0`), `gpu`, `backend` (`gpu_backend`), `unified_memory`, `preferred_mode` (`generation_mode`), `extra jsonb`. Declarative only; hardware detection/selection is α8.5x-exec (W8.5d.7).
+
+### 38.8 `provider_registry_meta` — singleton provenance
+Single row (`id boolean PK DEFAULT true`, CHECK `id IS TRUE`): `manifest_digest`, `manifest_revision` (CHECK `>0`), `generator_version`, `generated_at`, `seeded_at`. Powers idempotency (unchanged digest ⇒ no-op, W8.5d.2) and answers "which manifest version / commit populated this DB, and are two environments in sync?".
