@@ -125,7 +125,8 @@ guaranteed restore-to-`head`. α8.5d's seed round-trip test rides that seam.
 3. **Seeder:** `scripts/seed_providers.py` — idempotent YAML→DB sync.
 4. **CI:** a seed round-trip stage (validate → migrate → seed → assert DB == manifest)
    on the ephemeral/validation DB.
-5. **Docs + version bump** (`-dev`), invariants **W8.5d.1–9**.
+5. **Docs + version bump** (`-dev`), invariants **W8.5d.1–10**, and the
+   `PROVIDER_RUNTIME_DATA_MODEL.md` ownership blueprint.
 
 **Explicitly out (later slices):**
 - **Resolver logic** (capability + strategy → provider) → **α8.5e** (MRC-2/-3).
@@ -442,6 +443,12 @@ renumbering 1–10 (same rationale as α8.5c's Stage 0).
   `ai_model_pricing` + `usage_records`.
 - **W8.5d.9** — α8.5d changes no ADR-0042 frozen surface (Gate 1 = No) and no render
   composition (Gate 2 = N/A).
+- **W8.5d.10** — **runtime operational state shall never be stored in catalogue
+  metadata** (and vice-versa). Catalogue rows are seeder-owned and immutable at
+  runtime; operational state (health, latency, success rate, quota-remaining,
+  current queue, last-request/-success) lives in operational tables only. See
+  `docs/engineering/PROVIDER_RUNTIME_DATA_MODEL.md` for the ownership matrix that
+  enforces this.
 
 ---
 
@@ -504,7 +511,7 @@ renumbering 1–10 (same rationale as α8.5c's Stage 0).
 - [x] **D-I** amend α8.5c manifests/schema + ADR-0044 addendum before the held push
 - [x] **Ruled-in metadata (§4.5):** capability dependencies · feature matrix · resource estimation · output characteristics
 - [x] **Scope guard (§2.1):** α8.5d = catalogue metadata only (resolver α8.5e / planner own logic)
-- [x] Invariants **W8.5d.1–9** accepted
+- [x] Invariants **W8.5d.1–10** accepted (W8.5d.10 — operational state never in catalogue)
 - [x] Version `0.4.35-phase3-alpha8.5d-dev` + migration `0010` (additive) accepted
 - [x] Scope/non-goals (resolver→α8.5e, hardware detection→α8.5x-exec, estimator→MRC) accepted
 
@@ -514,5 +521,6 @@ renumbering 1–10 (same rationale as α8.5c's Stage 0).
 
 | Date | Change |
 |---|---|
+| 2026-07-25 | **Pre-implementation checkpoint** — added invariant **W8.5d.10** (runtime operational state shall never be stored in catalogue metadata, and vice-versa) and the engineering blueprint `docs/engineering/PROVIDER_RUNTIME_DATA_MODEL.md` (ownership matrix + runtime flow + reserved bounded contexts). This is the implementation reference for migration `0010` and the seeder; no ADR, no runtime change. Push still held until the blueprint lands. |
 | 2026-07-25 | **SIGNED OFF** — D-A…D-I approved with refinements: catalogue tables alongside legacy (D-A); fallback **join table** with `reason`+`ordinal` (D-A2); **three storage tiers** stable⇒typed / semi-structured⇒JSONB / highly-variable⇒tables (D-B); DDL+seeder split (D-C); flatten variants at seed (D-F); derived cost-estimation view atop `ai_model_pricing` (D-G); amend α8.5c + ADR-0044 before the held push (D-I). Ruled in four additive metadata categories (§4.5): **capability dependencies**, **feature matrix**, **resource estimation**, **output characteristics**. Added a **scope guard** (§2.1): α8.5d owns catalogue metadata only — resolver (α8.5e) owns scoring/routing/health/selection/fallback-execution; planner owns workflow/dependency/requests. |
 | 2026-07-25 | Initial **DRAFT** — α8.5d seeds the α8.5c capability registry into the DB (the runtime source of truth). Answers the nine design questions (seed mechanism, versioning, capability changes, idempotency, planned-vs-implemented, execution prefs, hardware reqs, variant inheritance, backward compat); adds the user-directed **runtime requirements**, **device profiles**, **cost estimation**, and **local-model-as-provider** treatment (all additive to α8.5c). Proposes additive migration `0010` (catalogue tables, DDL only) + an idempotent `seed_providers.py` + a CI seed round-trip on the ephemeral/validation DB, invariants **W8.5d.1–9**, version `0.4.35-phase3-alpha8.5d-dev`. Freeze Gate 1 = No, Gate 2 = N/A. Forks **D-A…D-I** raised for sign-off. |
