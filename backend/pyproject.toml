@@ -26,6 +26,11 @@ dependencies = [
     # Async HTTP client the provider adapters call. Promoted from the `dev`
     # extra to a core runtime dependency now that a real provider ships.
     "httpx>=0.27.0",
+    # Phase 3 Slice α8.5b.2 (multi-backend storage + signed-URL delivery) — added 2026-07-24.
+    # AWS SDK for the S3/R2 object-storage adapter + offline presigned-URL generation.
+    # Import is confined to app/infrastructure/{storage,delivery} (import-linter contract);
+    # R2 reuses the same S3-compatible client with a different injected endpoint.
+    "boto3>=1.35.0",
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -161,6 +166,13 @@ exclude = ["alembic/", "tests/", "scripts/", ".validation/"]
 module = ["pgvector.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# boto3/botocore do not ship a py.typed marker (typed stubs live in the separate
+# boto3-stubs package). The SDK is confined to the storage/delivery adapters
+# (import-linter contract), so untyped surface stays isolated there.
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # Pytest — Stage 4 of the CI gate.
 #
@@ -226,6 +238,9 @@ exclude_lines = [
 # ---------------------------------------------------------------------------
 [tool.importlinter]
 root_package = "app"
+# Required so the cloud-SDK isolation contract (α8.5b.2) can name external
+# forbidden modules (boto3 / botocore) — see the contract below.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Domain layer has no infrastructure / application / api dependencies"
@@ -298,3 +313,26 @@ forbidden_modules = [
     "app.api",
     "app.domain.workflow",
 ]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α8.5b.2 — the cloud storage SDK (boto3/botocore, used for the S3/R2
+# object-storage adapter + presigned-URL delivery) is a strict infrastructure-leaf
+# concern. It must stay confined to the storage/delivery adapter packages; no SDK type
+# may leak above the ``StorageResolver`` / ``IDownloadDelivery`` seams (α8.5b.2 Ruling D).
+# The domain, application, api, and composition-root (core) layers must never import it.
+name = "Cloud storage SDK is confined to the storage/delivery adapters"
+type = "forbidden"
+source_modules = [
+    "app.domain",
+    "app.application",
+    "app.api",
+    "app.core",
+]
+forbidden_modules = ["boto3", "botocore"]
+# Only *direct* SDK imports from these layers are forbidden. The composition root
+# (``app.core.container``) legitimately imports the ``app.infrastructure.{storage,delivery}``
+# packages to wire the adapters, and those packages import boto3 — an *indirect* chain
+# (core → infrastructure → boto3) that is allowed by design, exactly like the
+# "API talks to application services" contract above. Any layer here that wrote
+# ``import boto3`` itself would be a direct edge and would fail this contract.
+allow_indirect_imports = "True"

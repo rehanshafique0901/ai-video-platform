@@ -15,6 +15,7 @@ from app.application.interfaces.object_storage import (
     ObjectStorageError,
     StoredObject,
 )
+from app.infrastructure.storage import StorageResolver
 from tests.unit.application.use_cases.auth._fakes import (
     FakeMediaRepository,
     FakeProjectRepository,
@@ -72,6 +73,9 @@ class ExportFixture:
         self.media = FakeMediaRepository()
         self.render_jobs = FakeRenderJobRepository()
         self.storage = FakeObjectStorage()
+        # α8.5b.2: use cases now take an IStorageResolver; the single-backend resolver mirrors
+        # the pre-α8.5b.2 single-instance behaviour (active + only backend = 'local').
+        self.storage_resolver = StorageResolver.single(self.storage)
         self.uow = FakeUnitOfWork(
             projects=self.projects,
             media=self.media,

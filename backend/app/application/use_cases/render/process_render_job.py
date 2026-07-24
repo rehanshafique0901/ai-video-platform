@@ -38,7 +38,7 @@ from uuid import UUID, uuid4
 
 import structlog
 
-from app.application.interfaces.object_storage import IObjectStorage, ObjectStorageError
+from app.application.interfaces.object_storage import ObjectStorageError
 from app.application.interfaces.renderer import (
     AudioInput,
     IRenderer,
@@ -47,6 +47,7 @@ from app.application.interfaces.renderer import (
     RenderResult,
     RenderSpec,
 )
+from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.render._events import (
     emit_render_job_failed,
@@ -107,7 +108,7 @@ class ProcessRenderJob:
     def __init__(
         self,
         uow: IUnitOfWork,
-        storage: IObjectStorage,
+        storage: IStorageResolver,
         renderer: IRenderer,
         *,
         workspace_dir: str | None = None,
@@ -231,7 +232,7 @@ class ProcessRenderJob:
 
         checksum = hashlib.sha256(output_bytes).digest()
         output_key = f"renders/{tenant_id}/{project_id}/{render_job_id}.{_OUTPUT_CONTAINER}"
-        stored = await self._storage.put(
+        stored = await self._storage.active().put(
             key=output_key, data=output_bytes, content_type=_OUTPUT_MIME
         )
 
@@ -358,17 +359,18 @@ class ProcessRenderJob:
     async def _materialize(self, clip: _ResolvedClip | _ResolvedAudio, dest: Path) -> str:
         """Fetch a resolved clip's bytes from storage into ``dest``; return its path.
 
-        Enforces that the source lives in the render storage location (W8.4b.2: only
+        Reads always resolve by the clip's *persisted* backend (W8.5b.4 / W8.5b.5), never the
+        active write backend — existing source media stays readable wherever it actually lives.
+        Enforces that the source lives in the resolved storage location (W8.4b.2: only
         ``MediaAsset`` coordinates are consumed, never provider URLs).
         """
-        if clip.storage_backend != self._storage.backend or (
-            clip.storage_bucket != self._storage.bucket
-        ):
+        source = self._storage.resolve(clip.storage_backend)
+        if clip.storage_bucket != source.bucket:
             raise RenderError(
                 "source media is not in the render storage location "
                 f"({clip.storage_backend}/{clip.storage_bucket})"
             )
-        data = await self._storage.get(key=clip.storage_key)
+        data = await source.get(key=clip.storage_key)
         await asyncio.to_thread(dest.write_bytes, data)
         return str(dest)
 

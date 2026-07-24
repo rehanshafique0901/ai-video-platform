@@ -40,6 +40,7 @@ from app.application.use_cases.media.enrichers import (
     WaveformEnricher,
 )
 from app.application.use_cases.media.media_enrichment_worker import MediaEnrichmentWorker
+from app.infrastructure.storage import StorageResolver
 from tests.unit.application.use_cases.auth._fakes import (
     FakeMediaRepository,
     FakeProjectRepository,
@@ -195,7 +196,9 @@ class _Fixture:
         ]
 
     def use_case(self) -> EnrichGeneratedMedia:
-        return EnrichGeneratedMedia(self.uow, self.storage, self.enrichers())
+        return EnrichGeneratedMedia(
+            self.uow, StorageResolver.single(self.storage), self.enrichers()
+        )
 
     def worker(self, *, batch_size: int = 10) -> MediaEnrichmentWorker:
         return MediaEnrichmentWorker(uow=self.uow, enrich=self.use_case(), batch_size=batch_size)

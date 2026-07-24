@@ -25,6 +25,7 @@ from app.application.interfaces.renderer import (
 )
 from app.application.use_cases.render.process_render_job import ProcessRenderJob
 from app.domain.render.render_status import RenderStatus
+from app.infrastructure.storage import StorageResolver
 from tests.unit.application.use_cases.auth._fakes import (
     FakeMediaRepository,
     FakeProjectRepository,
@@ -104,6 +105,7 @@ class _Fixture:
         self.media = FakeMediaRepository()
         self.render_jobs = FakeRenderJobRepository()
         self.storage = FakeObjectStorage()
+        self.storage_resolver = StorageResolver.single(self.storage)
         self.uow = FakeUnitOfWork(
             projects=self.projects,
             timeline=self.timeline_repo,
@@ -238,7 +240,7 @@ class _Fixture:
 
 
 async def _process(fx: _Fixture, renderer: FakeRenderer, job_id: UUID):
-    uc = ProcessRenderJob(uow=fx.uow, storage=fx.storage, renderer=renderer)
+    uc = ProcessRenderJob(uow=fx.uow, storage=fx.storage_resolver, renderer=renderer)
     return await uc.process(project_id=fx.project_id, render_job_id=job_id)
 
 

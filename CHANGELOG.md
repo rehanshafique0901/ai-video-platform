@@ -6,6 +6,83 @@
 
 ## [Unreleased]
 
+### Phase 3 Slice α8.5b.2 — Storage Backends & Signed-URL Delivery — where artifacts live and how they're delivered (2026-07-24)
+
+The **second distribution-stage slice** — it completes the α8.5b.1 delivery seam by making
+storage **multi-backend**. α8.5b.1 shipped local streaming behind `IDownloadDelivery`; α8.5b.2
+adds **AWS S3 / Cloudflare R2** object storage plus **fixed-TTL presigned-URL redirect**
+delivery, selected per artifact — with **no change** to `DownloadExport` or the
+`GET …/exports/{id}/download` endpoint. Selection is centralised in two registries so no use
+case is backend-aware. Write-side is **E2**: a single `storage_active_backend` config value
+selects where *new* `MediaAsset`s are persisted; reads/deletes/deliveries **always** resolve by
+the artifact's *persisted* backend — so a backend change is operational, never migratory
+(W8.5b.5). Entirely outside the **ADR-0042** frozen surface (Gate 1) and below the **ADR-0043**
+render boundary (Gate 2): storage is transport/persistence, never re-encoding (RC5 / W8.5.3).
+The `media_assets.storage_backend` / `storage_bucket` / `storage_key` columns already existed
+(ADR-0030), so **zero migration**. Freeze guard green, **zero override markers**. Runtime
+capability → version bump to `0.4.32-phase3-alpha8.5b2`.
+
+#### Added
+- **`IStorageResolver` port + `StorageResolver` registry (Ruling A — centralised selection).**
+  `active() → IObjectStorage` (the single configured write backend) and
+  `resolve(backend) → IObjectStorage` (an existing artifact's persisted backend). No use case is
+  backend-aware — they receive the resolver and call `active()` to write, `resolve(...)` to read.
+  `StorageResolver.single()` mirrors the pre-α8.5b.2 single-instance behaviour.
+- **`S3ObjectStorage` adapter (S3 + R2 — Ruling C).** One S3-compatible adapter serves both AWS
+  S3 and Cloudflare R2 (R2 differs only by the injected endpoint + credentials); the persisted
+  `backend` label (`s3`/`r2`) is injected. Synchronous boto3 calls run in a worker thread (same
+  discipline as the local adapter); SDK/transport errors map to the neutral `ObjectStorageError`.
+- **`S3RedirectDelivery` adapter (Ruling B — signing lives in delivery, not storage).** Returns a
+  `RedirectDelivery` to a **fixed-TTL** presigned GET URL (Fork F: `download_signed_url_ttl_seconds`,
+  default 900 s; **no** per-request TTL, **no** CDN/edge signing). The presign is **offline**
+  (`botocore.generate_presigned_url` — no request-path network call); `expires_at` is populated.
+- **`DeliveryResolver` registry (backend-dispatching `IDownloadDelivery` facade).** Dispatches
+  `deliver()` on `request.storage_backend` (local → `LocalStreamDelivery`, s3/r2 →
+  `S3RedirectDelivery`). Because it *is* an `IDownloadDelivery`, `DownloadExport` and the download
+  endpoint are unchanged (Ruling A + E). Observable difference only: `200` stream (local) vs
+  `302` redirect (cloud).
+- **Config (E2, Ruling C, Fork F).** `storage_active_backend ∈ {local, s3, r2}` (default `local`);
+  `s3_bucket` / `s3_region` / `s3_endpoint_url` / `s3_access_key_id` / `s3_secret_access_key`
+  (injected, W8.1.1); `download_signed_url_ttl_seconds`. A cloud active backend with missing
+  bucket/credentials is a hard fail-fast config error. **Exactly one** active write backend — no
+  `preferred`/`fallback`/`mirror`/`replication` semantics.
+- **Cloud-SDK isolation contract (Ruling D).** New import-linter `forbidden` contract keeps
+  `boto3`/`botocore` out of `app.domain` / `app.application` / `app.api` / `app.core` (direct
+  imports); the SDK is confined to `app.infrastructure.{storage,delivery}`. `boto3>=1.35.0` added
+  as a runtime dependency with a mypy `ignore_missing_imports` override.
+- **Tests** — `StorageResolver` (active/resolve/single, unknown-backend `ObjectStorageError`,
+  active-must-be-registered); `S3ObjectStorage` (put/get/exists/delete against a stub client,
+  404→`False`, transport error→`ObjectStorageError`); `DeliveryResolver` (dispatch-by-backend,
+  unknown→`DownloadDeliveryError`); `S3RedirectDelivery` (presigned URL + `expires_at`, fixed TTL
+  passed to signer, backend/bucket mismatch + signer error → `DownloadDeliveryError`); end-to-end
+  `DownloadExport` parity through the real `DeliveryResolver` (local→stream 200, s3→redirect 302).
+
+#### Threaded (write-active, read-by-persisted-backend)
+- **`ProcessExportJob`, `ProcessRenderJob`, `EnrichGeneratedMedia`, `IngestGeneratedMedia`** now
+  take an `IStorageResolver` instead of a single `IObjectStorage`: **writes** go to
+  `active()` (new artifacts honour `storage_active_backend`); **byte reads** resolve by the
+  source artifact's *persisted* backend (`resolve(asset.storage_backend)`), so existing artifacts
+  stay readable wherever they live (W8.5b.5). No behavioural change when `storage_active_backend`
+  is `local` (the default).
+
+#### Invariants
+- **W8.5b.4 (new) — Delivery selection is derived solely from the artifact's persisted storage
+  backend.** The delivery mechanism is a pure function of `MediaAsset.storage_backend` via the
+  resolver — never request headers, endpoint params, feature flags, client preference, or the
+  active write backend. The same artifact always delivers the same way.
+- **W8.5b.5 (new) — The active write backend affects only future writes.** Changing
+  `storage_active_backend` changes where *new* `MediaAsset`s are persisted and **never** changes
+  the location or interpretation of existing ones — each remains readable/deliverable from its
+  own `(storage_backend, storage_bucket, storage_key)`. Backend changes are operational, not
+  migratory.
+
+#### Unchanged (freeze holds)
+- **Zero migrations** (`storage_backend` / `storage_bucket` / `storage_key` already modelled,
+  ADR-0030). No frozen orchestration path changed (ADR-0042 Gate 1). Storage/delivery are below
+  the render boundary and uphold RC5/W8.5.3 (ADR-0043 Gate 2). `DownloadExport` + the download
+  endpoint are byte-for-byte unchanged (Ruling E). Freeze guard green, **zero override markers**.
+  No notifications / publishing / share links / CDN (deferred to α8.5b.3 / α8.6).
+
 ### Phase 3 Slice α8.5b.1 — Download Serving — deliver an export artifact to the user (2026-07-24)
 
 The **first distribution-stage slice** — downstream of the α8.5a export engine. α8.5a made the

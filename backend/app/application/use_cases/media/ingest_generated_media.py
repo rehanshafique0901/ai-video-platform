@@ -30,7 +30,7 @@ from uuid import UUID
 import structlog
 
 from app.application.interfaces.media_downloader import IMediaDownloader
-from app.application.interfaces.object_storage import IObjectStorage
+from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.core.errors import ConflictError
 from app.domain.workflow.workflow_run_status import WorkflowRunStatus
@@ -129,7 +129,7 @@ class IngestGeneratedMedia:
     def __init__(
         self,
         uow: IUnitOfWork,
-        storage: IObjectStorage,
+        storage: IStorageResolver,
         downloader: IMediaDownloader,
     ) -> None:
         self._uow = uow
@@ -165,7 +165,7 @@ class IngestGeneratedMedia:
                 f"{ref.step_index}/{_sanitize(ref.request_id) or ref.kind}"
                 f"{_ext_for(downloaded.mime_type, ref.url)}"
             )
-            stored = await self._storage.put(
+            stored = await self._storage.active().put(
                 key=key, data=downloaded.content, content_type=downloaded.mime_type
             )
             checksum = hashlib.sha256(downloaded.content).digest()

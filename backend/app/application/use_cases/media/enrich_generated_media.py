@@ -41,11 +41,11 @@ import structlog
 
 from app.application.interfaces.gif_previewer import GifPreviewError
 from app.application.interfaces.object_storage import (
-    IObjectStorage,
     ObjectStorageError,
     StoredObject,
 )
 from app.application.interfaces.preview_clipper import PreviewClipError
+from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.thumbnailer import ThumbnailError
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.interfaces.waveform_renderer import WaveformError
@@ -85,7 +85,7 @@ class EnrichGeneratedMedia:
     def __init__(
         self,
         uow: IUnitOfWork,
-        storage: IObjectStorage,
+        storage: IStorageResolver,
         enrichers: Sequence[Enricher],
         *,
         workspace_dir: str | None = None,
@@ -131,10 +131,13 @@ class EnrichGeneratedMedia:
                     return EnrichGeneratedMediaResult(
                         media_asset_id=asset.id, status="noop", reason="already_enriched"
                     )
-                if (
-                    fresh.storage_backend != self._storage.backend
-                    or fresh.storage_bucket != self._storage.bucket
-                ):
+                # Reads resolve by the parent's *persisted* backend (W8.5b.4 / W8.5b.5), never
+                # the active write backend — an existing asset stays enrichable where it lives.
+                try:
+                    source = self._storage.resolve(fresh.storage_backend)
+                except ObjectStorageError:
+                    source = None
+                if source is None or fresh.storage_bucket != source.bucket:
                     return EnrichGeneratedMediaResult(
                         media_asset_id=asset.id, status="noop", reason="unsupported_storage"
                     )
@@ -147,8 +150,10 @@ class EnrichGeneratedMedia:
 
     async def _run_pipeline(self, parent: MediaAsset) -> EnrichGeneratedMediaResult:
         # Phase 2 — materialize once + run each enricher, OUTSIDE any DB transaction.
+        # Read from the parent's persisted backend; derived artifacts are new writes → active().
+        source = self._storage.resolve(parent.storage_backend)
         try:
-            data = await self._storage.get(key=parent.storage_key)
+            data = await source.get(key=parent.storage_key)
         except ObjectStorageError as exc:
             _LOGGER.warning(
                 "enrichment.materialize_failed", media_asset_id=str(parent.id), error=str(exc)[:500]
@@ -177,7 +182,7 @@ class EnrichGeneratedMedia:
                 if artifact is None:
                     continue  # not applicable (e.g. waveform, no audio) — clean skip
                 try:
-                    stored = await self._storage.put(
+                    stored = await self._storage.active().put(
                         key=artifact.storage_key,
                         data=artifact.data,
                         content_type=artifact.mime_type,

@@ -97,7 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="AI Video Platform — backend",
-        version="0.4.31-phase3-alpha8.5b1",
+        version="0.4.32-phase3-alpha8.5b2-dev",
         lifespan=lifespan,
     )
 

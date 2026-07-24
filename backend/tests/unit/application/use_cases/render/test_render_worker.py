@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 
 
 def _worker(fx: _Fixture, renderer: FakeRenderer, *, batch_size: int = 10) -> RenderWorker:
-    process = ProcessRenderJob(uow=fx.uow, storage=fx.storage, renderer=renderer)
+    process = ProcessRenderJob(uow=fx.uow, storage=fx.storage_resolver, renderer=renderer)
     return RenderWorker(uow=fx.uow, process=process, batch_size=batch_size)
 
 

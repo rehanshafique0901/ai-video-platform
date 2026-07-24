@@ -52,7 +52,7 @@ async def _queue(fx: ExportFixture, render_job_id: UUID, *, format: str = "mp4")
 
 
 def _worker(fx: ExportFixture) -> ExportWorker:
-    process = ProcessExportJob(uow=fx.uow, storage=fx.storage, exporter=FakeExporter())
+    process = ProcessExportJob(uow=fx.uow, storage=fx.storage_resolver, exporter=FakeExporter())
     return ExportWorker(uow=fx.uow, process=process, batch_size=10)
 
 

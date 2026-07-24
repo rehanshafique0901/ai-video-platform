@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.31-phase3-alpha8.5b1` |
-| **Latest runtime tag** | `v0.4.31-phase3-alpha8.5b1` |
+| **Application version** | `0.4.32-phase3-alpha8.5b2` |
+| **Latest runtime tag** | `v0.4.32-phase3-alpha8.5b2` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1 all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–2 all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -126,6 +126,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Render composition — audio mixing | ✅ | α8.4e | first ADR-0043 slice; video + deterministic audio (`amix`, no DSP) |
 | Export engine (delivery encodings) | ✅ | α8.5a | delivery transform (RC5/RC6): master → `(format, quality)` delivery `MediaAsset`, same-orientation; poll worker + discrete `IExporter` |
 | Download serving (deliver artifact bytes) | ✅ | α8.5b.1 | owner-scoped `GET …/exports/{id}/download`; neutral `IDownloadDelivery` seam (`LocalStreamDelivery` now, redirect-ready); best-effort accounting |
+| Storage backends & signed-URL delivery (S3/R2) | ✅ | α8.5b.2 | `StorageResolver` + `DeliveryResolver` registries; write-active/read-persisted (E2); `S3ObjectStorage` (S3+R2) + fixed-TTL offline-presigned `302` redirects; cloud SDK import-linter-isolated; endpoint unchanged |
 
 ### Invariant catalog
 
@@ -189,6 +190,16 @@ by review + tests, not the mechanical guard:
 - **W8.5b.3** — accounting never blocks or corrupts delivery: download-count updates are
   best-effort, non-transactional with the byte transfer, and non-retrying; a failure is
   telemetry loss, not a user-visible error, and delivery never depends on the counter write.
+- **W8.5b.4** — delivery selection is derived solely from the artifact's persisted storage
+  backend: the delivery mechanism is a pure function of `MediaAsset.storage_backend` via the
+  `DeliveryResolver` (local → stream, s3/r2 → presigned redirect) — never request headers,
+  endpoint/query params, feature flags, client preference, or the active *write* backend. The
+  same artifact always delivers the same way.
+- **W8.5b.5** — the active write backend affects only future writes: changing
+  `storage_active_backend` changes where *new* `MediaAsset`s are persisted and **never** changes
+  the location or interpretation of existing ones — each stays readable/deliverable from its own
+  `(storage_backend, storage_bucket, storage_key)`. Backend changes are operational, not migratory
+  (no backfill).
 
 ---
 
@@ -233,7 +244,7 @@ the freeze was designed to preserve.
 | **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
 | **α8.5a** | ✅ Export engine — delivery encodings (`ExportWorker` / `ProcessExportJob` / `IExporter`); shipped `v0.4.30` |
 | **α8.5b.1** | ✅ Download serving — `DownloadExport` + `IDownloadDelivery` (`LocalStreamDelivery`); shipped `v0.4.31` |
-| **α8.5b.2** | Storage backends — `IObjectStorage.signed_url()` + `S3/R2/GCS/Azure` delivery adapters + CDN |
+| **α8.5b.2** | ✅ Storage backends & signed-URL delivery — `StorageResolver`/`DeliveryResolver` + `S3ObjectStorage` (S3/R2) + `S3RedirectDelivery` (fixed-TTL presigned `302`); write-active/read-persisted (E2); GCS/Azure plug in the same way; shipped `v0.4.32` |
 | **α8.5b.3** | Notifications — `INotifier` + relay subscriber on `ExportJobSucceeded` (the `notifications` table already exists) |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers) |
 

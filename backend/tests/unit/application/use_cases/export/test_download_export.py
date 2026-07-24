@@ -270,6 +270,62 @@ async def test_redirect_delivery_is_passed_through() -> None:
     assert fx.exports._jobs[export_id].download_count == 1
 
 
+async def test_delivery_resolver_selects_by_persisted_backend() -> None:
+    """W8.5b.4 end-to-end: the same ``DeliveryResolver`` streams a local artifact (200) and
+    presigns a redirect for an s3 artifact — selection is a pure function of the persisted
+    backend, and ``DownloadExport`` is unchanged (injected the resolver as an IDownloadDelivery)."""
+    from app.infrastructure.delivery import DeliveryResolver, S3RedirectDelivery
+
+    class _Signer:
+        def generate_presigned_url(
+            self, op: str, *, Params: dict[str, str], ExpiresIn: int  # noqa: N803
+        ) -> str:
+            return f"https://s3.example/{Params['Bucket']}/{Params['Key']}"
+
+    fx = ExportFixture()
+    render_job_id, _ = await fx.seed_ready()
+    resolver = DeliveryResolver(
+        adapters={
+            "local": LocalStreamDelivery(fx.storage),
+            "s3": S3RedirectDelivery(
+                backend="s3", bucket="media", client=_Signer(), ttl_seconds=900
+            ),
+        }
+    )
+    uc = DownloadExport(uow=fx.uow, delivery=resolver)
+
+    # A local artifact streams through the API (200).
+    local_id = await fx.seed_delivery_asset(data=b"LOCAL-BYTES")
+    local_export = await fx.seed_succeeded_export(render_job_id=render_job_id, delivery_id=local_id)
+    local_decision = await uc.execute(
+        project_id=fx.project_id,
+        render_job_id=render_job_id,
+        export_job_id=local_export,
+        owner_user_id=fx.owner,
+        tenant_id=fx.tenant,
+    )
+    assert isinstance(local_decision, StreamDelivery)
+
+    # An s3 artifact resolves to a presigned redirect (302 upstream) — same resolver, no
+    # endpoint or use-case change.
+    s3_id = await fx.seed_delivery_asset(data=b"CLOUD-BYTES")
+    fx.media._media[s3_id] = replace(
+        fx.media._media[s3_id], storage_backend="s3", storage_bucket="media"
+    )
+    s3_export = await fx.seed_succeeded_export(
+        render_job_id=render_job_id, delivery_id=s3_id, quality="sd_480p"
+    )
+    s3_decision = await uc.execute(
+        project_id=fx.project_id,
+        render_job_id=render_job_id,
+        export_job_id=s3_export,
+        owner_user_id=fx.owner,
+        tenant_id=fx.tenant,
+    )
+    assert isinstance(s3_decision, RedirectDelivery)
+    assert s3_decision.url.startswith("https://s3.example/media/exports/delivery-")
+
+
 async def test_local_delivery_rejects_foreign_backend() -> None:
     """LocalStreamDelivery refuses an artifact stored in a non-local backend (→ 404 upstream)."""
     fx = ExportFixture()

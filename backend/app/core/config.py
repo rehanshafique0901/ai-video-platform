@@ -168,6 +168,43 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Storage backends & signed-URL delivery (Slice α8.5b.2) ---------
+    # The single active write backend selects where *new* MediaAssets are persisted
+    # (writers use ``StorageResolver.active()``). Reads/deletes/deliveries always resolve
+    # by the artifact's persisted ``storage_backend`` — so changing this affects only
+    # future writes, never existing assets (W8.5b.5). Exactly one active backend
+    # (no preferred/fallback/mirror/replication — E2). ``s3``/``r2`` share one
+    # S3-compatible client; R2 sets ``s3_endpoint_url`` (configuration-blind, W8.1.1).
+    storage_active_backend: Literal["local", "s3", "r2"] = Field(
+        default="local",
+        description="Backend new MediaAssets are written to (local|s3|r2). E2, α8.5b.2.",
+    )
+    s3_bucket: str | None = Field(
+        default=None,
+        description="Bucket/container for the S3/R2 object-storage adapter (α8.5b.2).",
+    )
+    s3_region: str | None = Field(
+        default=None,
+        description="Region for the S3 client (e.g. us-east-1; 'auto' for R2).",
+    )
+    s3_endpoint_url: str | None = Field(
+        default=None,
+        description="Custom S3 endpoint (set for R2/MinIO; None = AWS default).",
+    )
+    s3_access_key_id: str | None = Field(
+        default=None,
+        description="Access key id for the S3/R2 client (injected, never fetched — W8.1.1).",
+    )
+    s3_secret_access_key: SecretStr | None = Field(
+        default=None,
+        description="Secret access key for the S3/R2 client (injected — W8.1.1).",
+    )
+    download_signed_url_ttl_seconds: int = Field(
+        default=900,
+        description="Fixed TTL for presigned download URLs (α8.5b.2 Fork F; no per-request TTL).",
+        gt=0,
+    )
+
     # --- Render engine (α8.4b) ------------------------------------------------
     # The render worker composes a project's Timeline into an output video via the
     # neutral ``IRenderer`` port (FFmpeg adapter in prod). Configuration-blind

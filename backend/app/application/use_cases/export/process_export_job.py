@@ -46,7 +46,8 @@ from app.application.interfaces.exporter import (
     ExportSpec,
     IExporter,
 )
-from app.application.interfaces.object_storage import IObjectStorage, ObjectStorageError
+from app.application.interfaces.object_storage import ObjectStorageError
+from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.export._events import (
     emit_export_job_failed,
@@ -87,7 +88,7 @@ class ProcessExportJob:
     def __init__(
         self,
         uow: IUnitOfWork,
-        storage: IObjectStorage,
+        storage: IStorageResolver,
         exporter: IExporter,
         *,
         workspace_dir: str | None = None,
@@ -211,7 +212,7 @@ class ProcessExportJob:
         output_key = (
             f"exports/{tenant_id}/{project_id}/{export_job_id}/" f"{quality}_{orientation}.{format}"
         )
-        stored = await self._storage.put(
+        stored = await self._storage.active().put(
             key=output_key, data=output_bytes, content_type=result.mime_type
         )
 
@@ -288,17 +289,18 @@ class ProcessExportJob:
     async def _materialize(self, master: _ResolvedMaster, dest: Path) -> str:
         """Fetch the master's bytes from storage into ``dest``; return its path.
 
-        Enforces that the source lives in the export storage location (W8.5.2: only the
-        master ``MediaAsset`` coordinates are consumed, never provider URLs).
+        Reads always resolve by the master's *persisted* backend (W8.5b.4 / W8.5b.5), never the
+        active write backend — an existing master stays readable wherever it actually lives.
+        Enforces that the source lives in the resolved storage location (W8.5.2: only the master
+        ``MediaAsset`` coordinates are consumed, never provider URLs).
         """
-        if master.storage_backend != self._storage.backend or (
-            master.storage_bucket != self._storage.bucket
-        ):
+        source = self._storage.resolve(master.storage_backend)
+        if master.storage_bucket != source.bucket:
             raise ExportError(
                 "master media is not in the export storage location "
                 f"({master.storage_backend}/{master.storage_bucket})"
             )
-        data = await self._storage.get(key=master.storage_key)
+        data = await source.get(key=master.storage_key)
         await asyncio.to_thread(dest.write_bytes, data)
         return str(dest)
 

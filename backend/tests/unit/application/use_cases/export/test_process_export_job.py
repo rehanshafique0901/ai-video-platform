@@ -76,7 +76,7 @@ async def _queue_export(
 
 
 async def _process(fx: ExportFixture, exporter: FakeExporter, export_job_id: UUID):
-    uc = ProcessExportJob(uow=fx.uow, storage=fx.storage, exporter=exporter)
+    uc = ProcessExportJob(uow=fx.uow, storage=fx.storage_resolver, exporter=exporter)
     return await uc.process(project_id=fx.project_id, export_job_id=export_job_id)
 
 

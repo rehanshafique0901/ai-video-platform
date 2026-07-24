@@ -18,6 +18,7 @@ from app.application.interfaces.media_downloader import DownloadedMedia, IMediaD
 from app.application.interfaces.object_storage import IObjectStorage, StoredObject
 from app.application.use_cases.media.ingest_generated_media import IngestGeneratedMedia
 from app.domain.workflow.workflow_run_status import WorkflowRunStatus
+from app.infrastructure.storage import StorageResolver
 from tests.unit.application.use_cases.auth._fakes import (
     FakeMediaRepository,
     FakeProjectRepository,
@@ -124,7 +125,9 @@ async def test_happy_path_registers_one_image_asset() -> None:
     )
     downloader = FakeDownloader({url: (b"PNGDATA", "image/png")})
     storage = FakeObjectStorage()
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=storage, downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(storage), downloader=downloader
+    )
 
     result = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
 
@@ -163,7 +166,9 @@ async def test_idempotent_on_redelivery() -> None:
     )
     storage = FakeObjectStorage()
     downloader = FakeDownloader({url: (b"PNGDATA", "image/png")})
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=storage, downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(storage), downloader=downloader
+    )
 
     first = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
     second = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
@@ -187,7 +192,9 @@ async def test_multiple_refs_across_steps() -> None:
     )
     storage = FakeObjectStorage()
     downloader = FakeDownloader({img: (b"IMG", "image/png"), vid: (b"VID", "video/mp4")})
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=storage, downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(storage), downloader=downloader
+    )
 
     result = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
 
@@ -206,7 +213,9 @@ async def test_run_without_media_is_noop() -> None:
     )
     storage = FakeObjectStorage()
     downloader = FakeDownloader({})
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=storage, downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(storage), downloader=downloader
+    )
 
     result = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
 
@@ -223,7 +232,9 @@ async def test_non_succeeded_run_is_noop() -> None:
         step_outputs=[{"provider_outputs": [_view("openai-image", "rid-1", image_ref=url)]}],
     )
     downloader = FakeDownloader({url: (b"PNGDATA", "image/png")})
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=FakeObjectStorage(), downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(FakeObjectStorage()), downloader=downloader
+    )
 
     result = await uc.execute(project_id=fx.project_id, workflow_run_id=run_id)
 
@@ -240,7 +251,9 @@ async def test_missing_project_ownership_is_noop() -> None:
         step_outputs=[{"provider_outputs": [_view("openai-image", "rid-1", image_ref=url)]}],
     )
     downloader = FakeDownloader({url: (b"PNGDATA", "image/png")})
-    uc = IngestGeneratedMedia(uow=fx.uow, storage=FakeObjectStorage(), downloader=downloader)
+    uc = IngestGeneratedMedia(
+        uow=fx.uow, storage=StorageResolver.single(FakeObjectStorage()), downloader=downloader
+    )
 
     result = await uc.execute(project_id=orphan_project, workflow_run_id=run_id)
 

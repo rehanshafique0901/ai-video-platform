@@ -44,6 +44,7 @@ from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
+from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.thumbnailer import IThumbnailer
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.interfaces.waveform_renderer import IWaveformRenderer
@@ -140,7 +141,11 @@ from app.infrastructure.ai.providers.ports import Provider
 from app.infrastructure.ai.providers.registry import ProviderRegistry
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.db.session import make_engine, make_session_factory
-from app.infrastructure.delivery import LocalStreamDelivery
+from app.infrastructure.delivery import (
+    DeliveryResolver,
+    LocalStreamDelivery,
+    S3RedirectDelivery,
+)
 from app.infrastructure.export import FfmpegExporter
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
@@ -155,7 +160,12 @@ from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.token_issuer import AuthTokenIssuer
-from app.infrastructure.storage import LocalObjectStorage
+from app.infrastructure.storage import (
+    LocalObjectStorage,
+    S3ObjectStorage,
+    StorageResolver,
+    build_s3_client,
+)
 from app.infrastructure.uow.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 
 _engine: AsyncEngine | None = None
@@ -185,7 +195,15 @@ _media_downloader: IMediaDownloader | None = None
 _renderer: IRenderer | None = None
 _exporter: IExporter | None = None
 # α8.5b.1: the download-delivery seam (local streaming adapter; cloud/redirect adapters α8.5b.2).
+# In α8.5b.2 ``_download_delivery`` holds the backend-dispatching ``DeliveryResolver`` facade.
 _download_delivery: IDownloadDelivery | None = None
+# α8.5b.2: multi-backend storage. ``_storage_resolver`` selects the write/read adapter per
+# backend (E2). When ``storage_active_backend`` is s3/r2, one shared S3-compatible client backs
+# both the cloud object-storage adapter and the cloud redirect-delivery adapter; ``_cloud_bundle``
+# memoises them as a unit (``_cloud_bundle_built`` disambiguates "not built" from "local-only").
+_storage_resolver: IStorageResolver | None = None
+_cloud_bundle: tuple[str, IObjectStorage, IDownloadDelivery] | None = None
+_cloud_bundle_built: bool = False
 _thumbnailer: IThumbnailer | None = None
 _preview_clipper: IPreviewClipper | None = None
 _gif_previewer: IGifPreviewer | None = None
@@ -317,6 +335,7 @@ async def shutdown() -> None:
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
+    global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -344,6 +363,9 @@ async def shutdown() -> None:
     _gif_previewer = None
     _waveform_renderer = None
     _download_delivery = None
+    _storage_resolver = None
+    _cloud_bundle = None
+    _cloud_bundle_built = False
     _settings = None
 
 
@@ -355,6 +377,7 @@ def reset() -> None:
     global _fal_webhook_verifier, _fal_webhook_client
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
+    global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     _settings = None
     _engine = None
     _session_factory = None
@@ -382,6 +405,9 @@ def reset() -> None:
     _waveform_renderer = None
     _exporter = None
     _download_delivery = None
+    _storage_resolver = None
+    _cloud_bundle = None
+    _cloud_bundle_built = False
 
 
 def _require_init() -> None:
@@ -813,15 +839,25 @@ def get_get_export_job_use_case() -> GetExportJob:
 
 
 def _get_download_delivery() -> IDownloadDelivery:
-    """Lazily build + memoise the download-delivery adapter (local streaming in α8.5b.1).
+    """Lazily build + memoise the download-delivery facade (α8.5b.2 — ``DeliveryResolver``).
 
-    Wraps the process-wide object storage; cloud (signed-URL redirect) adapters replace this
-    behind the same port in α8.5b.2 with no use-case or endpoint change.
+    Registers ``local`` → :class:`LocalStreamDelivery` (200 stream) always + the active cloud
+    backend → :class:`S3RedirectDelivery` (302 presigned redirect) when configured. The resolver
+    *is* an ``IDownloadDelivery``, so :class:`DownloadExport` and the download endpoint are
+    unchanged (Ruling A + E); delivery selection is a pure function of the artifact's persisted
+    backend (W8.5b.4).
     """
     global _download_delivery
     _require_init()
     if _download_delivery is None:
-        _download_delivery = LocalStreamDelivery(_get_object_storage())
+        adapters: dict[str, IDownloadDelivery] = {
+            "local": LocalStreamDelivery(_get_object_storage())
+        }
+        bundle = _get_cloud_bundle()
+        if bundle is not None:
+            backend, _, delivery = bundle
+            adapters[backend] = delivery
+        _download_delivery = DeliveryResolver(adapters=adapters)
     return _download_delivery
 
 
@@ -947,7 +983,11 @@ def get_receive_provider_webhook_use_case() -> ReceiveProviderWebhook:
 
 
 def _get_object_storage() -> IObjectStorage:
-    """Lazily build + memoise the object-storage adapter (local FS in α8.4a)."""
+    """Lazily build + memoise the *local* object-storage adapter (local FS, α8.4a).
+
+    Always present — the local backend anchors the resolver (α8.5b.2) and backs the local
+    streaming delivery adapter — even when ``storage_active_backend`` is a cloud backend.
+    """
     global _object_storage
     _require_init()
     if _object_storage is None:
@@ -956,6 +996,74 @@ def _get_object_storage() -> IObjectStorage:
             root=settings.media_storage_root, bucket=settings.media_storage_bucket
         )
     return _object_storage
+
+
+def _get_cloud_bundle() -> tuple[str, IObjectStorage, IDownloadDelivery] | None:
+    """Build + memoise the S3/R2 adapter pair when a cloud backend is active (α8.5b.2).
+
+    Returns ``(backend, storage, delivery)`` sharing **one** S3-compatible client, or ``None``
+    when ``storage_active_backend`` is ``local`` (local-only deployment). Credentials are
+    injected (W8.1.1); a cloud backend with missing bucket/credentials is a hard config error.
+    """
+    global _cloud_bundle, _cloud_bundle_built
+    _require_init()
+    if _cloud_bundle_built:
+        return _cloud_bundle
+    settings = _get_settings()
+    backend = settings.storage_active_backend
+    if backend not in ("s3", "r2"):
+        _cloud_bundle = None
+        _cloud_bundle_built = True
+        return None
+    if (
+        not settings.s3_bucket
+        or not settings.s3_access_key_id
+        or settings.s3_secret_access_key is None
+    ):
+        raise RuntimeError(
+            f"storage_active_backend={backend!r} requires s3_bucket + s3_access_key_id + "
+            "s3_secret_access_key to be configured"
+        )
+    client = build_s3_client(
+        region=settings.s3_region,
+        endpoint_url=settings.s3_endpoint_url,
+        access_key_id=settings.s3_access_key_id,
+        secret_access_key=settings.s3_secret_access_key.get_secret_value(),
+    )
+    storage: IObjectStorage = S3ObjectStorage(
+        backend=backend, bucket=settings.s3_bucket, client=client
+    )
+    delivery: IDownloadDelivery = S3RedirectDelivery(
+        backend=backend,
+        bucket=settings.s3_bucket,
+        client=client,
+        ttl_seconds=settings.download_signed_url_ttl_seconds,
+    )
+    _cloud_bundle = (backend, storage, delivery)
+    _cloud_bundle_built = True
+    return _cloud_bundle
+
+
+def _get_storage_resolver() -> IStorageResolver:
+    """Lazily build + memoise the multi-backend storage resolver (α8.5b.2 — E2).
+
+    Registers ``local`` always + the active cloud backend when configured. ``active()`` is the
+    single configured write backend; reads resolve by an artifact's persisted backend (W8.5b.4 /
+    W8.5b.5). No use case is backend-aware — the resolver centralises selection (Ruling A).
+    """
+    global _storage_resolver
+    _require_init()
+    if _storage_resolver is None:
+        settings = _get_settings()
+        adapters: dict[str, IObjectStorage] = {"local": _get_object_storage()}
+        bundle = _get_cloud_bundle()
+        if bundle is not None:
+            backend, storage, _ = bundle
+            adapters[backend] = storage
+        _storage_resolver = StorageResolver(
+            adapters=adapters, active_backend=settings.storage_active_backend
+        )
+    return _storage_resolver
 
 
 def _get_media_downloader() -> IMediaDownloader:
@@ -987,7 +1095,7 @@ def get_ingest_generated_media_use_case() -> IngestGeneratedMedia:
     """
     return IngestGeneratedMedia(
         uow=get_unit_of_work(),
-        storage=_get_object_storage(),
+        storage=_get_storage_resolver(),
         downloader=_get_media_downloader(),
     )
 
@@ -1016,7 +1124,7 @@ def get_process_render_job_use_case() -> ProcessRenderJob:
     settings = _get_settings()
     return ProcessRenderJob(
         uow=get_unit_of_work(),
-        storage=_get_object_storage(),
+        storage=_get_storage_resolver(),
         renderer=_get_renderer(),
         workspace_dir=settings.render_workspace_dir,
         lease=timedelta(seconds=settings.render_timeout_seconds),
@@ -1067,7 +1175,7 @@ def get_process_export_job_use_case() -> ProcessExportJob:
     settings = _get_settings()
     return ProcessExportJob(
         uow=get_unit_of_work(),
-        storage=_get_object_storage(),
+        storage=_get_storage_resolver(),
         exporter=_get_exporter(),
         workspace_dir=settings.render_workspace_dir,
         lease=timedelta(seconds=settings.render_timeout_seconds),
@@ -1178,7 +1286,7 @@ def get_enrich_generated_media_use_case() -> EnrichGeneratedMedia:
     settings = _get_settings()
     return EnrichGeneratedMedia(
         get_unit_of_work(),
-        _get_object_storage(),
+        _get_storage_resolver(),
         _build_enrichers(),
         workspace_dir=settings.render_workspace_dir,
         lease=timedelta(seconds=settings.render_timeout_seconds),
