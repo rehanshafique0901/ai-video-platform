@@ -3,9 +3,9 @@
 > The single source of truth for "what does *green* mean on this repo?"
 > Authority: **ADR-0028**.
 
-Every pull request and every push to `main` runs the same 10-stage pipeline.
-Local invocation produces byte-identical output via the same Python
-entrypoint so a contributor can reproduce CI on a laptop:
+Every pull request and every push to `main` runs the same 13-stage pipeline
+(numbered 0–12). Local invocation produces byte-identical output via the same
+Python entrypoint so a contributor can reproduce CI on a laptop:
 
 ```bash
 cd "ai creation/backend"
@@ -31,6 +31,8 @@ A red gate blocks merge. There are no opt-outs.
 | 8  | Schema validator                     | `scripts/validate_schema.py` | **yes** | < 30 s |
 | 9  | ERD comparison                       | `scripts/regenerate_erd.py` + `compare_erd.py` | **yes** | < 30 s |
 | 10 | Coverage threshold                   | `coverage report`      | no       | <  2 s   |
+| 11 | Provider-catalogue seed round-trip   | `scripts/verify_seed_roundtrip.py` | **yes** | < 60 s |
+| 12 | Runtime integration verification     | `pytest -m integration` (Decision-plane repos) | **yes** | < 30 s |
 
 Total wall-clock budget: **≤ 6 min** in CI; observed Phase 2C run on a warm runner ≈ **3 m 40 s**.
 
@@ -165,6 +167,41 @@ gate refuses to print `PASSED` until that verification succeeds:
 CI already runs against an ephemeral service container, so this primarily
 hardens the local flow where `.env.validation` points at a shared Postgres.
 
+### 2.7 Provider-catalogue seed round-trip (11)
+
+α8.5d. After the schema reaches head, `verify_seed_roundtrip.py` proves the
+YAML → DB seeder is deterministic and idempotent end-to-end on live Postgres:
+empty DB → seed creates everything; re-seed is a zero-write digest
+short-circuit; a single manifest change updates exactly one row; a removed
+entity is disabled (never deleted); registry metadata (digest, revision,
+`catalogue_version`) updates correctly. It touches only the eight catalogue
+tables and leaves the DB seeded, so it also populates the validation DB and
+cannot disturb the destructive-migration guard.
+
+### 2.8 Runtime integration verification (12)
+
+α8.5e. The final stage answers one question: **"can a freshly created database
+actually support the runtime?"** Against a DB that is at head and seeded
+(stages 5–7 + 11), it exercises the Decision-plane persistence boundaries end
+to end — the catalogue reader, the runtime-state reader, the resolver service,
+and the resolution ledger — with each test wrapped in a `SAVEPOINT` that rolls
+back on teardown. This is the stage that would have caught the α8.5e
+`window` reserved-keyword and raw-SQL reader regressions at PR time rather than
+only on the live-DB stages.
+
+> **Scope freeze (governance).** Stage 12 should only grow when a **new runtime
+> repository or persistence boundary** is introduced. Business-feature
+> integration tests (planner, generation runtime, verification, repair, FFmpeg,
+> export, providers, publishing) belong to their **feature slices**, not this
+> infrastructure gate. This keeps Stage 12 a fast, stable "does the DB drive the
+> runtime plumbing?" check instead of slowly becoming a kitchen sink.
+
+A companion permanent, offline guard lives in stage 4:
+`tests/unit/database/test_migration_reserved_identifiers.py` scans every Alembic
+migration and fails on any PostgreSQL reserved keyword (`window`, `user`,
+`order`, `group`, `table`, `constraint`, …) used as an **unquoted** identifier.
+Quoting (`"window"`) is the sanctioned escape hatch.
+
 ---
 
 ## 3. Running the gate locally
@@ -246,6 +283,8 @@ checks anyway, so the hook is convenience, not authority.
 | 8 validator   | structural regression                              | re-read `SCHEMA_VALIDATION.md` §6.2; check `pg_catalog` |
 | 9 ERD diff    | design ERD claims a FK the implementation does not have | fix one side; add an ADR if intentional |
 | 10 coverage   | overall coverage below `fail_under`                | add tests, do not lower the floor |
+| 11 seed round-trip | seeder non-idempotent / wrong disable/delete / digest drift | re-read `verify_seed_roundtrip.py`; check `seed_providers.py` upsert + `_canon` |
+| 12 runtime integration | reader/resolver/ledger SQL breaks on a real DB; reserved keyword | re-read the failing test; a reserved identifier should have been caught by stage 4's guard |
 
 ---
 
@@ -255,3 +294,4 @@ checks anyway, so the hook is convenience, not authority.
 |------------|---------|--------|
 | 2026-06-28 | curator | Initial — Phase 2C, ADR-0028. 10 stages, local + GH Actions runners, pre-commit subset, coverage floor 60 % (raised in Phase 3). |
 | 2026-07-24 | curator | §2.6 added — validation-DB isolation (`--ephemeral-db` / `VALIDATION_DATABASE_URL`) + self-healing restoration guard (bounded-retry `upgrade head` + head verification on every exit). Tooling-only; no stage changes, no version bump. |
+| 2026-07-25 | curator | Stage map updated to 13 stages (0–12): documented stage 11 (α8.5d provider-catalogue seed round-trip) and stage 12 (α8.5e runtime integration verification) in §2.7/§2.8, added the Stage 12 scope-freeze governance note and the reserved-identifier stage-4 guard, and extended the failure table. Docs-only. |

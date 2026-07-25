@@ -6,7 +6,7 @@
 
 ## 1. What runs, in what order
 
-Eleven stages (**0–10**), **fail-fast** — the first failure stops the run.
+Thirteen stages (**0–12**), **fail-fast** — the first failure stops the run.
 
 | # | Stage                                              | Tool                                              | Needs DB? | Typical runtime |
 |---|----------------------------------------------------|---------------------------------------------------|-----------|-----------------|
@@ -21,6 +21,22 @@ Eleven stages (**0–10**), **fail-fast** — the first failure stops the run.
 | 8 | Live schema validator (9 structural checks)        | `scripts/validate_schema.py`                      | yes       | 10–20 s         |
 | 9 | ERD regenerate + structural diff                   | `scripts/regenerate_erd.py` → `scripts/compare_erd.py` | yes  | 15–25 s         |
 | 10| Coverage threshold enforcement                     | `coverage report` (`fail_under` from `pyproject.toml`) | no   | < 1 s           |
+| 11| Provider-catalogue seed round-trip (α8.5d)         | `scripts/verify_seed_roundtrip.py`                | yes       | 20–60 s         |
+| 12| Runtime integration verification (α8.5e)           | `pytest -m integration` (Decision-plane repos)    | yes       | 10–30 s         |
+
+Stages 11–12 are appended after the destructive migration round-trip so they
+cannot disturb its restoration guard. Stage 11 seeds the eight catalogue tables
+from YAML and proves the seeder is deterministic/idempotent; stage 12 then runs
+the Decision-plane persistence tests (catalogue reader, runtime-state reader,
+resolver service, resolution ledger) against that seeded DB — each inside a
+`SAVEPOINT` that rolls back — to prove a freshly created database can drive the
+runtime plumbing.
+
+> **Stage 12 scope freeze (governance).** Stage 12 grows *only* when a new
+> runtime repository or persistence boundary is introduced. Business-feature
+> integration tests (planner, generation, verification, repair, FFmpeg, export,
+> providers, publishing) belong to their feature slices, not this infrastructure
+> gate — keeping Stage 12 from becoming a kitchen sink.
 
 End-to-end runtime: **~3 minutes** in CI (service container), **~2.5 minutes** locally against a low-latency Postgres, **~5 minutes** locally against a cross-region pooled Postgres (e.g. Supabase). The earlier validator was 263 s for stage 8 alone; the pg_catalog rewrite brought it to 17 s.
 
