@@ -1,0 +1,74 @@
+{
+  "_comment": "ACTIVE golden \u2014 Golden V2 (Cinematic Planner, \u03b18.7). The 'storyboard' section is the deterministic Planner V2 + Storyboard output and is asserted byte-for-byte by tests/unit/domain/generation/test_golden_scenario.py (which also asserts the cinematic-diversity invariants: distinct shots, CS-7 adjacency). The 'resolver' section is validated by the live end-to-end test and is authored by hand. Regenerate with: python -m tests.fixtures.golden.regen. The frozen minimal-planner snapshot lives in ../v1/fox_snowy_forest.json.",
+  "request": {
+    "prompt": "A little red fox walking through a snowy forest at sunrise.",
+    "seed": 70707,
+    "global_style": "pixar",
+    "execution_mode": "free_remote_only",
+    "aspect_ratio": "9:16",
+    "target_platform": "reel",
+    "target_duration_seconds": 18.0,
+    "per_shot_seconds": 3.0
+  },
+  "storyboard": {
+    "title": "A little red fox walking through",
+    "shot_count": 6,
+    "shots": [
+      {
+        "index": 0,
+        "seed": 6529991986808499022,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, establishing shot, sweeping crane shot, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 1,
+        "seed": 7387270396458476037,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide shot, camera panning right, walking, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 2,
+        "seed": 9107509662607379327,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, medium shot, tracking shot, walking, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 3,
+        "seed": 3380239216379581498,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, close-up shot, slow push-in, looking around, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 4,
+        "seed": 9201996333250618409,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, dynamic action shot, handheld camera, running, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 5,
+        "seed": 1749102174068610874,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, closing shot, camera pulling back, soft sunrise light, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      }
+    ]
+  },
+  "resolver": {
+    "capability": "image_generation",
+    "expected_execution_mode": "free_remote_only",
+    "expected_top_provider": "golden_provider",
+    "expected_top_adapter": "golden_provider.image",
+    "expected_execution_tier": "free_remote"
+  }
+}

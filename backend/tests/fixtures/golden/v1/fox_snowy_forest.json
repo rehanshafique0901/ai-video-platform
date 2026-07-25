@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden regression scenario for the generation pipeline (Increment 5). The 'storyboard' section is the deterministic Planner+Storyboard output and is asserted byte-for-byte by tests/unit/domain/generation/test_golden_scenario.py. The 'resolver' section is validated by the live end-to-end test (tests/integration/infrastructure/generation/test_generation_end_to_end.py), which also asserts run-to-run reproducibility of the full candidate ordering. Regenerate with: python -m tests.fixtures.golden.regen (or edit deliberately when the planner behaviour changes on purpose).",
+  "_comment": "FROZEN HISTORICAL ARTIFACT — Golden V1 (Minimal Planner, α8.6). This snapshot is NOT replayed by the live planner; it is kept only as architectural history. It records the minimal planner's output, where every shot shared one prompt and one seed — the duplicate-scene weakness the α8.6 Increment 5 timeline gate correctly rejected and that α8.7 (Planner V2, cinematic storyboard) exists to fix. The active regression suite lives in ../v2/fox_snowy_forest.json. See docs/engineering/CINEMATIC_STORYBOARD_CONTRACT.md.",
   "request": {
     "prompt": "A little red fox walking through a snowy forest at sunrise.",
     "seed": 70707,

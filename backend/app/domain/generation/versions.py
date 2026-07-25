@@ -14,9 +14,11 @@ from __future__ import annotations
 
 from app.domain.resolver import RESOLVER_VERSION, SCORE_SCHEMA_VERSION
 
-PLANNER_VERSION = "planner/1.0"
-STORYBOARD_VERSION = "storyboard/1.0"
-PROMPT_BUILDER_VERSION = "prompt_builder/1.0"
+# α8.7 Planner V2: cinematic storyboard (ShotIntent, story arcs, per-shot seeds)
+# and the Prompt Builder that translates intent into descriptor phrases.
+PLANNER_VERSION = "planner/2.0"
+STORYBOARD_VERSION = "storyboard/2.0"
+PROMPT_BUILDER_VERSION = "prompt_builder/2.0"
 VERIFIER_VERSION = "verifier/1.0"
 REPAIR_VERSION = "repair/1.0"
 RENDERER_VERSION = "slideshow/1.0"
