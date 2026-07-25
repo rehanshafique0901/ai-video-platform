@@ -322,6 +322,8 @@ async def _assert_persistence(
         assert all(r["accepted"] for r in shots)
         assert all(r["adapter_used"] == _ADAPTER_ID for r in shots)
         assert all(r["asset_id"] is not None for r in shots)
+        # α8.7: every shot persisted its own derived seed (no single-seed scene).
+        assert len({r["seed"] for r in shots}) == shot_count
 
         # generation_assets — one frame per shot + exactly one final video.
         kinds = {
@@ -447,6 +449,12 @@ async def test_generation_end_to_end(
         assert result1.provenance.execution_tier == golden["resolver"]["expected_execution_tier"]
         assert len(gen1.calls) == shot_count
         assert {c["adapter_id"] for c in gen1.calls} == {_ADAPTER_ID}
+        # ---- Architectural proof (α8.7): the improvement is the PLANNER alone ---
+        # Planner V2 hands the (unchanged) generator a *distinct* prompt and seed per
+        # shot — the duplicate-scene cause from α8.6 is gone. Resolver, renderer,
+        # verifier, and the Execution-Runtime store are all untouched.
+        assert len({c["prompt"] for c in gen1.calls}) == shot_count
+        assert len({c["seed"] for c in gen1.calls}) == shot_count
 
         # ---- Persistence + Explainability -----------------------------------
         await _assert_persistence(session_factory, result1.generation_id, golden)
@@ -470,10 +478,11 @@ async def test_generation_end_to_end_live_pollinations(
 ) -> None:
     """Same flow over the *real* Pollinations network path (opt-in, not in CI).
 
-    One shot only: the current minimal storyboard reuses the same prompt+seed for
-    every shot, so a deterministic remote provider would otherwise trip the timeline
-    duplicate gate. This proves the real HTTP adapter integrates end-to-end; multi-
-    shot remote variation is a later-increment storyboard concern.
+    The α8.7 payoff, proven against a real *deterministic remote* provider: the full
+    multi-shot cinematic storyboard now feeds Pollinations a distinct prompt+seed per
+    shot, so it returns distinct frames and the timeline duplicate gate passes — no
+    single-shot workaround needed. This is the exact scenario the α8.6 Increment 5
+    live run failed on, now succeeding because *only the planner* improved.
     """
     import httpx
 
@@ -481,6 +490,7 @@ async def test_generation_end_to_end_live_pollinations(
         PollinationsImageGenerator,
     )
 
+    golden = json.loads(GOLDEN_JSON.read_text())
     storage = LocalObjectStorage(root=str(tmp_path), bucket=_BUCKET)
     await _seed_golden_catalogue(session_factory)
     created: list[UUID] = []
@@ -491,10 +501,12 @@ async def test_generation_end_to_end_live_pollinations(
     )
     try:
         generator = PollinationsImageGenerator(client=client, model=settings.pollinations_model)
-        request = fox_request(generation_id=uuid4(), target_duration_seconds=3.0)
+        request = fox_request(generation_id=uuid4())  # full cinematic arc, all shots
         result = await _run(session_factory, storage, generator, request)
         created.append(result.generation_id)
         assert result.status is GenerationStatus.SUCCEEDED, result.reason
+        assert len(result.shots) == golden["storyboard"]["shot_count"]
+        assert all(s.accepted for s in result.shots)  # distinct frames passed the timeline gate
         assert result.video_key
         assert (tmp_path / _BUCKET / result.video_key).is_file()
     finally:
