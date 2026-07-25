@@ -417,6 +417,84 @@ def derive_shot_seed(project_seed: int, shot_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Invariants: CS-7 (cinematic continuity) and CS-8 (semantic-intent boundary)
+# ---------------------------------------------------------------------------
+
+
+class CinematicContinuityError(ValueError):
+    """Raised when adjacent shots fail CS-7 (a duplicate-scene storyboard)."""
+
+
+class ProviderLanguageError(ValueError):
+    """Raised when planner intent leaks provider/render language (CS-8)."""
+
+
+# Provider/render vocabulary that must never appear in *planner* output (CS-8). This
+# is generator-facing wording — it belongs exclusively to the Prompt Builder. The
+# planner speaks in cinematic *intent* (``CLOSE_UP``), not render adjectives.
+PROVIDER_LEXICON: frozenset[str] = frozenset(
+    {
+        "photorealistic",
+        "hyperrealistic",
+        "8k",
+        "4k",
+        "ultra detailed",
+        "ultra-detailed",
+        "highly detailed",
+        "masterpiece",
+        "best quality",
+        "cinematic lighting",
+        "octane render",
+        "unreal engine",
+        "trending on artstation",
+        "sdxl",
+        "flux",
+        "comfyui",
+        "midjourney",
+        "dall-e",
+        "dalle",
+        "stable diffusion",
+    }
+)
+
+
+def provider_language_in(*texts: str) -> tuple[str, ...]:
+    """Return any banned provider/render terms found across ``texts`` (lower-cased)."""
+    haystack = " ".join(t.lower() for t in texts if t)
+    return tuple(term for term in sorted(PROVIDER_LEXICON) if term in haystack)
+
+
+def validate_adjacency(intents: Sequence[ShotIntent]) -> None:
+    """Enforce CS-7 across a storyboard: every adjacent pair differs cinematically.
+
+    Raises ``CinematicContinuityError`` on the first offending pair. A single-shot
+    (or empty) storyboard trivially satisfies the invariant.
+    """
+    for index, (a, b) in enumerate(pairwise(intents), start=1):
+        if not adjacent_ok(a, b):
+            reason = "primary" if not differs_primary(a, b) else "secondary"
+            raise CinematicContinuityError(
+                f"CS-7 violated: shots {index - 1}->{index} do not differ in a "
+                f"{reason} cinematic dimension"
+            )
+
+
+def assert_semantic_only(intents: Sequence[ShotIntent]) -> None:
+    """Enforce CS-8: planner-authored intent carries no provider/render language.
+
+    Only the planner-authored free-text field (``emotional_purpose``) is checked;
+    ``subject_focus`` is an identity id and the shot ``description`` is user-supplied
+    pass-through, so neither is the planner *adding* provider wording.
+    """
+    for index, intent in enumerate(intents):
+        hits = provider_language_in(intent.emotional_purpose)
+        if hits:
+            raise ProviderLanguageError(
+                f"CS-8 violated: shot {index} intent contains provider language {hits}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Introspection helper (test-facing; never wired into runtime scoring)
 # ---------------------------------------------------------------------------
 

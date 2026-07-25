@@ -23,9 +23,11 @@ from app.domain.generation.plan import GenerationPlan, Shot
 from app.domain.generation.shot_intent import (
     FocusHint,
     ShotIntent,
+    assert_semantic_only,
     assign_shot_ids,
     derive_shot_seed,
     select_arc,
+    validate_adjacency,
 )
 
 # Short-form video envelope; the planner keeps total duration inside this band.
@@ -143,6 +145,15 @@ def plan_from_prompt(request: PlanRequest) -> GenerationPlan:
         )
         for i, (beat, beat_text) in enumerate(zip(arc.beats, beats, strict=True))
     )
+
+    # Defensive enforcement of the Planner V2 invariants before the plan escapes:
+    # CS-7 (no duplicate-scene storyboard) and CS-8 (no provider language in intent).
+    # Authored/synthesised arcs always satisfy these; this guarantees a bad future
+    # template can never silently reintroduce the α8.6 duplicate-frame defect.
+    intents = tuple(shot.intent for shot in shots if shot.intent is not None)
+    validate_adjacency(intents)
+    assert_semantic_only(intents)
+
     return GenerationPlan(
         title=request.title or _derive_title(prompt),
         prompt=prompt,

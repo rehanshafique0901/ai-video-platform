@@ -47,9 +47,12 @@ from app.domain.generation.planner import PlanRequest, plan_from_prompt
 from app.domain.generation.prompt_builder import build_prompt
 from app.domain.generation.repair import RepairAction, RepairDecision, decide_repair
 from app.domain.generation.shot_intent import (
+    PROVIDER_LEXICON,
     Camera,
+    CinematicContinuityError,
     FocusHint,
     Movement,
+    ProviderLanguageError,
     ShotIntent,
     ShotType,
     StoryArcTemplate,
@@ -57,12 +60,15 @@ from app.domain.generation.shot_intent import (
     TemplateBeat,
     Transition,
     adjacent_ok,
+    assert_semantic_only,
     assign_shot_ids,
     derive_shot_seed,
     differs_primary,
     differs_secondary,
+    provider_language_in,
     select_arc,
     shot_id_for,
+    validate_adjacency,
 )
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
 from app.domain.generation.timeline_verification import (
@@ -103,9 +109,12 @@ __all__ = [
     "PlanRequest",
     "plan_from_prompt",
     # shot intent (Planner V2 / α8.7)
+    "PROVIDER_LEXICON",
     "Camera",
+    "CinematicContinuityError",
     "FocusHint",
     "Movement",
+    "ProviderLanguageError",
     "ShotIntent",
     "ShotType",
     "StoryArcTemplate",
@@ -113,12 +122,15 @@ __all__ = [
     "TemplateBeat",
     "Transition",
     "adjacent_ok",
+    "assert_semantic_only",
     "assign_shot_ids",
     "derive_shot_seed",
     "differs_primary",
     "differs_secondary",
+    "provider_language_in",
     "select_arc",
     "shot_id_for",
+    "validate_adjacency",
     # storyboard
     "ShotPrompt",
     "build_storyboard",
