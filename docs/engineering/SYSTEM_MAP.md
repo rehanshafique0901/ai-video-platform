@@ -11,6 +11,48 @@ into the governing documents for the stage you care about.
 
 ---
 
+## Architecture at a glance
+
+*Read this in under a minute; the rest of the document is detail.*
+
+Three planes, each with its own mutability model (full rationale:
+[`AI_RUNTIME_PLANES.md`](./AI_RUNTIME_PLANES.md)):
+
+```
+  Knowledge plane   — what CAN exist       provider catalogue, device profiles
+        │
+        ▼
+  Decision plane    — what SHOULD happen   planner · storyboard · resolver ·
+        │                                  verification · repair · timeline
+        ▼
+  Execution plane   — what DID happen      generation · ffmpeg · execution
+                                           runtime · asset store · publisher*
+
+  * Publishing is a planned Execution-plane capability, not a separate plane.
+```
+
+…and the single request that flows through them, end to end:
+
+```
+  Prompt
+    ↓  Planner
+    ↓  Storyboard
+    ↓  Resolver
+    ↓  Generation
+    ↓  Verification
+    ↓  Repair
+    ↓  Timeline
+    ↓  FFmpeg
+    ↓  Execution Runtime
+    ↓  Asset Store
+    ↓  Publisher   (planned)
+```
+
+Everything below expands these two pictures: the annotated flow (§1), the per-stage
+table with code seams + governing docs (§2), and the deeper references (§6).
+
+---
+
 ## 1. The pipeline at a glance
 
 One `GenerateVideoRequest` flows top-to-bottom. The **plane** column shows which
