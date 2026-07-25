@@ -46,6 +46,21 @@ from app.domain.generation.plan import GenerationPlan, Shot
 from app.domain.generation.planner import PlanRequest, plan_from_prompt
 from app.domain.generation.prompt_builder import build_prompt
 from app.domain.generation.repair import RepairAction, RepairDecision, decide_repair
+from app.domain.generation.shot_intent import (
+    Camera,
+    FocusHint,
+    Movement,
+    ShotIntent,
+    ShotType,
+    StoryArcTemplate,
+    StoryboardDiversityReport,
+    TemplateBeat,
+    Transition,
+    adjacent_ok,
+    differs_primary,
+    differs_secondary,
+    select_arc,
+)
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
 from app.domain.generation.timeline_verification import (
     TimelineFrame,
@@ -84,6 +99,20 @@ __all__ = [
     # planner
     "PlanRequest",
     "plan_from_prompt",
+    # shot intent (Planner V2 / α8.7)
+    "Camera",
+    "FocusHint",
+    "Movement",
+    "ShotIntent",
+    "ShotType",
+    "StoryArcTemplate",
+    "StoryboardDiversityReport",
+    "TemplateBeat",
+    "Transition",
+    "adjacent_ok",
+    "differs_primary",
+    "differs_secondary",
+    "select_arc",
     # storyboard
     "ShotPrompt",
     "build_storyboard",
