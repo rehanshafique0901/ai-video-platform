@@ -125,7 +125,7 @@ def test_d1_privacy_mode_excludes_cloud() -> None:
     assert [c.adapter_id for c in res.eligible] == ["comfyui.flux_schnell"]
 
 
-def test_d2_commercial_not_allowed() -> None:
+def test_d2_commercial_terms_not_allowed() -> None:
     providers = {
         "free_nc": f.provider("free_nc", commercial=False),
         "comm": f.provider("comm", commercial=True),
@@ -135,12 +135,20 @@ def test_d2_commercial_not_allowed() -> None:
         f.adapter("comm.a", "comm", mode=ExecutionMode.CLOUD),
     )
     res = resolve(
-        _req(commercial_allowed=False),
+        _req(allow_commercial_terms=False),
         f.catalogue(providers=providers, adapters=adapters),
         f.runtime(),
     )
     assert [c.adapter_id for c in res.eligible] == ["free_nc.a"]
-    assert _reason(res, "comm.a") == "commercial_not_allowed"
+    assert _reason(res, "comm.a") == "commercial_terms_not_allowed"
+
+
+def test_d2b_paid_providers_not_allowed() -> None:
+    # Licensing and cost are orthogonal: fal is paid (excluded) even though it is a
+    # commercial provider; the free-but-commercial default providers survive.
+    res = resolve(_req(allow_paid_providers=False), f.catalogue(), f.runtime())
+    assert _reason(res, "fal.flux") == "paid_not_allowed"
+    assert {c.provider_id for c in res.eligible} == {"pollinations", "comfyui"}
 
 
 def test_d3_budget_zero_excludes_paid() -> None:
@@ -266,16 +274,10 @@ def test_g1_eligible_carry_breakdown_ineligible_do_not() -> None:
     res = resolve(_req(privacy_mode=True), f.catalogue(), f.runtime())
     top = res.top
     assert top is not None and top.breakdown is not None
-    keys = set(top.breakdown.as_dict())
-    assert keys == {
-        "quality",
-        "cost",
-        "speed",
-        "reliability",
-        "hardware",
-        "health_multiplier",
-        "final_score",
-    }
+    payload = top.breakdown.as_dict()
+    assert payload["score_schema"] == 1
+    assert set(payload) == {"score_schema", "components", "health_multiplier", "final_score"}
+    assert set(payload["components"]) == {"quality", "cost", "speed", "reliability", "hardware"}
     for c in res.candidates:
         if not c.eligible:
             assert c.breakdown is None and c.ineligible_reason is not None

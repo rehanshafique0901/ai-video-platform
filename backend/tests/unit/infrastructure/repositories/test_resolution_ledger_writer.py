@@ -62,14 +62,13 @@ def test_candidate_list_payload_captures_full_ranked_list() -> None:
     eligible = by_id["p.local"]
     assert eligible["eligible"] is True
     assert eligible["ineligible_reason"] is None
-    assert set(eligible["breakdown"]) == {
+    assert eligible["breakdown"]["score_schema"] == 1
+    assert set(eligible["breakdown"]["components"]) == {
         "quality",
         "cost",
         "speed",
         "reliability",
         "hardware",
-        "health_multiplier",
-        "final_score",
     }
 
     filtered = by_id["p.cloud"]

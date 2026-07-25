@@ -109,8 +109,9 @@ so the core is trivially unit-testable and satisfies determinism (W8.5e.4).
 | `quality` | requested tier (maps to `generation_mode`) |
 | `device` | current `device_profile` id (or detected specs) |
 | `privacy_mode` | if set, disallow cloud egress of sensitive inputs |
-| `local_only` | hard filter: only `execution.local` adapters |
-| `commercial_allowed` | hard filter: only `supports.commercial` adapters |
+| `local_only` | hard filter: only `execution.local`/`hybrid` adapters |
+| `allow_paid_providers` | hard filter: `false` ⇒ `pricing == paid` providers ineligible |
+| `allow_commercial_terms` | hard filter: `false` ⇒ commercial-licensed providers ineligible |
 
 > **Group discipline:** these three groups never bleed. Static is read-only catalogue;
 > operational is live runtime; request is per-call. The resolver's job is to *join* them
@@ -155,8 +156,9 @@ Selection is two stages: **hard eligibility filters** (binary, remove candidates
 
 - capability mismatch (adapter does not serve `request.capability`)
 - missing a **required** feature/input the request needs
-- `local_only` and adapter is not `execution.local`
-- `commercial_allowed=false`-clash (request needs commercial, adapter can't)
+- `local_only` and adapter is not `execution.local`/`hybrid`
+- `allow_paid_providers=false` and provider `pricing == paid`
+- `allow_commercial_terms=false` and provider is commercial-licensed
 - `privacy_mode` and adapter is cloud (egress of sensitive input)
 - device cannot meet adapter `runtime.hardware.minimum_ram_gb` / GPU backend
 - `budget` insufficient for the adapter's minimum cost (unless free-capable)
@@ -168,8 +170,9 @@ silently dropped (aids debugging and the provenance ledger).
 > **Eligibility is separate from scoring (Amendment 4).** A hard constraint makes a
 > candidate **ineligible** — it never becomes a score *penalty*. If the request sets
 > `local_only=true`, cloud adapters do not appear with a lower score; they are
-> ineligible. Likewise `commercial_allowed=false` makes commercial adapters ineligible
-> rather than penalised. Scoring (§4.2) ranks *only* the eligible survivors, so a
+> ineligible. Likewise `allow_paid_providers=false` / `allow_commercial_terms=false`
+> make paid / commercial-licensed providers ineligible rather than penalised — cost and
+> licensing are orthogonal gates. Scoring (§4.2) ranks *only* the eligible survivors, so a
 > filtered adapter can never out-rank — or under-rank — its way back into contention.
 
 ### 4.2 Soft score (rank the eligible)
@@ -197,20 +200,22 @@ score = raw · health_multiplier          # health ∈ [0,1], from §7
 
 **Explainability is structural, not prose (Amendment 2 [W8.5e.5]).** Each candidate's
 score is returned — and persisted — as a machine-readable breakdown, never a bare
-number:
+number. The breakdown carries an explicit **`score_schema`** version so scoring can
+evolve without breaking historical replay / analytics:
 
 ```json
 {
   "adapter": "pollinations.image",
+  "score_schema": 1,
   "final_score": 91,
+  "health_multiplier": 1.08,
   "routing_strategy": "free_first",
   "components": {
     "quality": 30,
     "cost": 20,
     "speed": 15,
     "hardware": 12,
-    "reliability": 10,
-    "health_multiplier": 1.08
+    "reliability": 10
   }
 }
 ```
@@ -415,5 +420,6 @@ grounding → contract → implementation → verification cadence used througho
 
 | Date | Change |
 | --- | --- |
+| 2026-07-25 | **α8.5e implemented + reviewed.** Post-review refinements: split the single `commercial_allowed` request flag into two orthogonal gates — `allow_paid_providers` (cost) and `allow_commercial_terms` (licensing) — since a provider can be free-but-commercial, paid-but-open, freemium, local, or enterprise-licensed. Versioned the score breakdown (`score_schema: 1`, nested `components`) so scoring can evolve without breaking historical replay/analytics. Boundaries frozen by **ADR-0045** (three planes: Knowledge/Decision/Execution); overview in `AI_RUNTIME_PLANES.md` (supersedes the earlier §8a forward note). |
 | 2026-07-25 | **SIGNED OFF** with amendments 1–6. Added invariants **W8.5e.6** (single immutable catalogue snapshot per invocation), **W8.5e.7** (stable candidate ordering via explicit comparator, never SQL order), **W8.5e.8** (capability-first — no provider-specific branching); strengthened **W8.5e.3** (health is read-only input) and **W8.5e.5** (explainability is machine-readable — structured `components` object incl. `health_multiplier`). Made eligibility explicitly separate from scoring (`local_only`/`commercial_allowed` ⇒ ineligible, never a penalty). Clarified the three signal tables stay independent (`provider_health` observational / `provider_quota_state` operational / `adapter_runtime_metrics` historical — never merged). Expanded `generation_resolution_ledger` (routing_strategy, full candidate_list, start/end_time, execution_result) for complete replay. Added the forward note on the three architectural planes (§8a). |
 | 2026-07-25 | Initial contract — resolver as a pure function (§1); three input groups (§2); ordered-candidate output (§3); explainable two-stage scoring with strategy-as-weight-vector + deterministic tie-break (§4); invariants **W8.5e.1–5** (§5); per-request provenance (§6); **grounded operational tables** `provider_health` / `adapter_runtime_metrics` / `provider_quota_state` / `local_runtime_state` / `generation_resolution_ledger` (§7); non-goals (§8); roadmap (§9); α8.5e implementation order (§10). Pairs with the completed α8.5d milestone; no runtime change. |

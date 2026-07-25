@@ -37,7 +37,8 @@ def _fingerprint(request: ResolveRequest) -> str:
         "device": request.device,
         "privacy_mode": request.privacy_mode,
         "local_only": request.local_only,
-        "commercial_allowed": request.commercial_allowed,
+        "allow_paid_providers": request.allow_paid_providers,
+        "allow_commercial_terms": request.allow_commercial_terms,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

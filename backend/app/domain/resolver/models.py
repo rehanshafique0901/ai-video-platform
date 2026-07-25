@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 # --------------------------------------------------------------------------- #
 # Enums (mirror the α8.5d catalogue / manifest wire strings)
@@ -155,7 +156,11 @@ class ResolveRequest:
     device: str | None = None
     privacy_mode: bool = False
     local_only: bool = False
-    commercial_allowed: bool = True
+    # Cost and licensing are orthogonal (a provider can be free-but-commercial,
+    # paid-but-open, freemium, locally hosted, or enterprise licensed), so they are
+    # two independent gates rather than one flag.
+    allow_paid_providers: bool = True  # False ⇒ pricing == paid is ineligible
+    allow_commercial_terms: bool = True  # False ⇒ commercial-licensed providers ineligible
 
 
 # --------------------------------------------------------------------------- #
@@ -163,9 +168,18 @@ class ResolveRequest:
 # --------------------------------------------------------------------------- #
 
 
+# Bump when the ScoreBreakdown wire shape changes, so historical ledger rows /
+# analytics remain interpretable across scoring evolutions (replay-safe).
+SCORE_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True, slots=True)
 class ScoreBreakdown:
-    """Machine-readable decomposition of a candidate's score (W8.5e.5)."""
+    """Machine-readable decomposition of a candidate's score (W8.5e.5).
+
+    Serialised with an explicit ``score_schema`` version so scoring can evolve without
+    breaking historical replay or analytics.
+    """
 
     quality: float
     cost: float
@@ -175,13 +189,16 @@ class ScoreBreakdown:
     health_multiplier: float
     final_score: float
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, Any]:
         return {
-            "quality": self.quality,
-            "cost": self.cost,
-            "speed": self.speed,
-            "reliability": self.reliability,
-            "hardware": self.hardware,
+            "score_schema": SCORE_SCHEMA_VERSION,
+            "components": {
+                "quality": self.quality,
+                "cost": self.cost,
+                "speed": self.speed,
+                "reliability": self.reliability,
+                "hardware": self.hardware,
+            },
             "health_multiplier": self.health_multiplier,
             "final_score": self.final_score,
         }

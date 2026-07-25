@@ -42,8 +42,10 @@ def ineligibility_reason(
         return "not_local"
     if request.privacy_mode and adapter.execution_mode == ExecutionMode.CLOUD:
         return "privacy_cloud_egress"
-    if not request.commercial_allowed and provider.commercial:
-        return "commercial_not_allowed"
+    if not request.allow_paid_providers and provider.pricing == Pricing.PAID:
+        return "paid_not_allowed"
+    if not request.allow_commercial_terms and provider.commercial:
+        return "commercial_terms_not_allowed"
 
     # Budget: 0 ⇒ free-only; >0 ⇒ paid adapter whose declared cost exceeds it is out.
     if request.budget is not None and provider.pricing == Pricing.PAID:

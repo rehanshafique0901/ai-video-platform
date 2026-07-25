@@ -9,6 +9,7 @@ provider execution. Catalogue/runtime readers (α8.5e.3/.4) build the snapshots;
 from __future__ import annotations
 
 from app.domain.resolver.models import (
+    SCORE_SCHEMA_VERSION,
     AdapterInfo,
     AdapterMetrics,
     Candidate,
@@ -30,6 +31,7 @@ from app.domain.resolver.strategy import ResolverStrategy, Weights, get_strategy
 
 __all__ = [
     "RESOLVER_VERSION",
+    "SCORE_SCHEMA_VERSION",
     "AdapterInfo",
     "AdapterMetrics",
     "Candidate",
