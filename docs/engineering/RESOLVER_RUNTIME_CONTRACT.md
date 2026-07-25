@@ -7,10 +7,11 @@
 > (`PROVIDER_RUNTIME_DATA_MODEL.md`). This document is the *reference* engineers
 > consult while writing the α8.5e resolver and its operational tables.
 >
-> **Status:** Contract for α8.5e (pre-implementation). No runtime change lands from
-> this document. α8.5d (catalogue + seeder) is a completed, verified milestone; α8.5e
-> is the point where the catalogue stops being passive data and starts influencing
-> runtime behaviour — hence this grounding pass.
+> **Status:** **SIGNED OFF** ✅ (2026-07-25) for α8.5e (pre-implementation), with
+> amendments 1–6 folded in (invariants **W8.5e.6–8**, machine-readable explainability,
+> expanded resolution ledger). No runtime change lands from this document. α8.5d
+> (catalogue + seeder) is a completed, verified milestone; α8.5e is the point where the
+> catalogue stops being passive data and starts influencing runtime behaviour.
 >
 > **One-line purpose:** define the resolver as a **pure, deterministic, explainable
 > selection function** — never an executor — so selection, execution, and orchestration
@@ -164,6 +165,13 @@ Selection is two stages: **hard eligibility filters** (binary, remove candidates
 Filtered candidates are **kept in the output** with `eligible=false` + reason — never
 silently dropped (aids debugging and the provenance ledger).
 
+> **Eligibility is separate from scoring (Amendment 4).** A hard constraint makes a
+> candidate **ineligible** — it never becomes a score *penalty*. If the request sets
+> `local_only=true`, cloud adapters do not appear with a lower score; they are
+> ineligible. Likewise `commercial_allowed=false` makes commercial adapters ineligible
+> rather than penalised. Scoring (§4.2) ranks *only* the eligible survivors, so a
+> filtered adapter can never out-rank — or under-rank — its way back into contention.
+
 ### 4.2 Soft score (rank the eligible)
 
 A transparent weighted sum of normalised components (each 0–100), then a health
@@ -187,6 +195,30 @@ score = raw · health_multiplier          # health ∈ [0,1], from §7
 | `hardware_fit` | device_profile × adapter `runtime.hardware` (0 = would have been filtered) |
 | `health_multiplier` | `provider_health` (recent success rate / 429 frequency) |
 
+**Explainability is structural, not prose (Amendment 2 [W8.5e.5]).** Each candidate's
+score is returned — and persisted — as a machine-readable breakdown, never a bare
+number:
+
+```json
+{
+  "adapter": "pollinations.image",
+  "final_score": 91,
+  "routing_strategy": "free_first",
+  "components": {
+    "quality": 30,
+    "cost": 20,
+    "speed": 15,
+    "hardware": 12,
+    "reliability": 10,
+    "health_multiplier": 1.08
+  }
+}
+```
+
+Every weighted contribution and the health multiplier appears as a named field. This is
+consumed directly by debugging, telemetry, UI explanations ("chosen because free +
+healthy"), and future ML weight-tuning — with no re-derivation.
+
 ### 4.3 Routing strategy = the weight vector
 
 `routing_policies` (per capability, else `default`) selects the weights — the strategy
@@ -203,7 +235,9 @@ is *only* a weight vector, keeping scoring uniform and explainable:
 
 Given identical `(request, catalogue snapshot, runtime state)` the output is byte-for-byte
 identical. Ties break by a **total order**: `score desc → reliability desc → adapter_id
-asc`. No wall-clock, no RNG, no map-iteration-order dependence in the core.
+asc`, applied by an **explicit comparator** — never SQL/result-set ordering (W8.5e.7). No
+wall-clock, no RNG, no map-iteration-order dependence in the core. The snapshot the
+scoring runs against is fixed for the whole invocation (W8.5e.6).
 
 ---
 
@@ -215,37 +249,60 @@ asc`. No wall-clock, no RNG, no map-iteration-order dependence in the core.
 > ### W8.5e.2 — The resolver never mutates the catalogue.
 > §A.1 tables are read-only to it (reinforces W8.5d.10).
 
-> ### W8.5e.3 — The resolver never mutates runtime health.
-> §A.2 health/metrics/quota are written by the Health Worker / Execution Runtime, never
-> the resolver. The resolver *reads* operational state.
+> ### W8.5e.3 — Health is an input only; the resolver never mutates it.
+> The resolver **may read** `provider_health` (and the other §A.2 tables) but **never
+> writes** them. Health/metrics/quota updates belong to the Execution Runtime, the
+> Health Worker, and telemetry — never the resolver. (Amendment 3.)
 
 > ### W8.5e.4 — Same inputs produce identical ordered candidates.
 > Determinism is a hard guarantee (total-order tie-break, no I/O in the core).
 
-> ### W8.5e.5 — Scoring must be explainable.
-> Every score decomposes into named components (§4.2). No opaque ranking; the breakdown
-> is returned with each candidate and persisted in the resolution ledger (§6).
+> ### W8.5e.5 — Scoring must be explainable, and machine-readable.
+> Every score decomposes into named components serialised as a structured object (§4.2),
+> not a bare number. The breakdown is returned with each candidate and persisted in the
+> resolution ledger (§6). No opaque ranking. (Amendment 2.)
 
-These sit alongside W8.5c.* and W8.5d.1–10 and are proposed for the α8.5e sign-off.
+> ### W8.5e.6 — One immutable catalogue snapshot per invocation.
+> Every resolution operates against a single, immutable catalogue snapshot: it reads one
+> `catalogue_version`, scores entirely against it, and finishes against it even if a
+> re-seed lands mid-request. The catalogue cannot change halfway through a resolution.
+> (Amendment 1 — keeps routing reproducible.)
+
+> ### W8.5e.7 — Candidate ordering is stable.
+> Two candidates with equal score always appear in exactly the same order. Ordering is
+> produced by an explicit deterministic comparator (`score desc → reliability desc →
+> adapter_id asc`), **never** by SQL/result-set ordering. (Amendment 5.)
+
+> ### W8.5e.8 — Capability-first; the resolver knows no provider implementations.
+> The resolver contains no provider-specific branching — no `if provider == "pollinations"`
+> or `if adapter == "fal.image"`. Every decision derives from catalogue metadata and
+> operational state. Provider-specific behaviour lives in adapters (Execution Runtime),
+> never in selection. (Amendment 6 — preserves the capability-first architecture.)
+
+These sit alongside W8.5c.* and W8.5d.1–10 and are locked for α8.5e.
 
 ---
 
 ## 6. Provenance — reproduce *why* a provider was chosen
 
-Every generation request records enough to reconstruct the decision months later, even
-after the catalogue changes:
+Every generation request records enough to reconstruct — and *replay* — the decision
+months later, even after the catalogue changes:
 
 | Field | Source |
 | --- | --- |
+| `generation_id` | the generation this resolution served |
 | `catalogue_version` | `provider_registry_meta.catalogue_version` |
 | `manifest_digest` | `provider_registry_meta.manifest_digest` |
 | `resolver_version` | resolver code version (own constant) |
-| `request_fingerprint` | canonical hash of the `ResolveRequest` |
-| `ordered_candidates` | full ranked list + per-candidate breakdown (W8.5e.5) |
-| `chosen_adapter_id` | the adapter Execution ultimately succeeded with |
+| `routing_strategy` | the strategy/weight vector applied (§4.3) |
+| `candidate_list` | full ranked list + per-candidate structured breakdown (W8.5e.5) — *not only the chosen adapter* |
+| `chosen_adapter` | the adapter Execution ultimately succeeded with |
+| `start_time` / `end_time` | resolution + execution window |
+| `execution_result` | success / failure / fell-through-to-fallback |
 
 Persisted to the runtime-owned `generation_resolution_ledger` (§7) — an operational
-table, never catalogue. This directly serves AR18 (provider transparency) and AR16
+table, never catalogue. Keeping the **full `candidate_list`** (not just the winner) gives
+complete replay capability. This directly serves AR18 (provider transparency) and AR16
 (project memory): "Planner Qwen3 · Images Pollinations · Voice Kokoro …" is a projection
 of this ledger.
 
@@ -259,13 +316,20 @@ columns, writer, cadence) so α8.5e builds them deliberately rather than bolting
 state onto the catalogue. **None of these ships in α8.5d.** Migration numbering (`0011+`)
 is assigned at α8.5e implementation time.
 
-| Table | Writer | Cadence | Key columns (indicative) |
-| --- | --- | --- | --- |
-| `provider_health` | Health Worker | periodic probe + on-failure | `provider_id`, `health_score`, `last_success_at`, `last_failure_at`, `error_rate`, `rate_limit_hits`, `updated_at` |
-| `adapter_runtime_metrics` | Execution Runtime | rolling, per execution | `adapter_id`, `avg_latency_ms`, `p95_latency_ms`, `success_rate`, `current_queue_depth`, `sample_window`, `updated_at` |
-| `provider_quota_state` | Execution Runtime | per call + window reset | `provider_id`, `window`, `used`, `remaining`, `resets_at`, `updated_at` |
-| `local_runtime_state` | Execution Runtime / device agent | on device/model change | `device_profile_id`, `gpu_available`, `loaded_models`, `free_vram_gb`, `updated_at` |
-| `generation_resolution_ledger` | Resolver caller (Execution) | one row per request | `generation_id`, `capability`, `catalogue_version`, `manifest_digest`, `resolver_version`, `request_fingerprint`, `ordered_candidates` (JSONB), `chosen_adapter_id`, `created_at` |
+| Table | Kind | Writer | Cadence | Key columns (indicative) |
+| --- | --- | --- | --- | --- |
+| `provider_health` | **observational** | Health Worker | periodic probe + on-failure | `provider_id`, `health_score`, `last_success_at`, `last_failure_at`, `error_rate`, `rate_limit_hits`, `updated_at` |
+| `provider_quota_state` | **operational** | Execution Runtime | per call + window reset | `provider_id`, `window`, `used`, `remaining`, `resets_at`, `updated_at` |
+| `adapter_runtime_metrics` | **historical** | Execution Runtime | rolling, per execution | `adapter_id`, `avg_latency_ms`, `p95_latency_ms`, `success_rate`, `current_queue_depth`, `sample_window`, `updated_at` |
+| `local_runtime_state` | operational | Execution Runtime / device agent | on device/model change | `device_profile_id`, `gpu_available`, `loaded_models`, `free_vram_gb`, `updated_at` |
+| `generation_resolution_ledger` | provenance | Resolver caller (Execution) | one row per request | `generation_id`, `capability`, `catalogue_version`, `manifest_digest`, `resolver_version`, `routing_strategy`, `candidate_list` (JSONB), `chosen_adapter`, `start_time`, `end_time`, `execution_result`, `created_at` |
+
+> **Keep the three signal tables independent (operational-table clarification).**
+> `provider_health` is **observational** (is the provider up / behaving?),
+> `provider_quota_state` is **operational** (how much budget/quota is left right now?),
+> and `adapter_runtime_metrics` is **historical** (rolling latency/success trends). They
+> have different write cadences, retention, and consumers — do **not** merge them into a
+> single "provider status" table later.
 
 Existing, already-runtime-owned: `provider_plugin_registrations` (loaded-code plugins +
 health surface), `usage_records` (authoritative spend — the Cost Estimator reads this;
@@ -290,6 +354,27 @@ adapter `cost_*` remain estimation-only hints, W8.5d.8).
 | publishing | **Publishing** |
 
 The resolver is the thin, pure seam between the catalogue and everything above it.
+
+---
+
+## 8a. Forward note — the three architectural planes
+
+Stepping back from the individual slices, a larger pattern is emerging that these
+boundaries should preserve. The platform is separating into **three planes**, each with a
+*different mutability model and different invariants* — a stronger separation than a
+typical layered architecture:
+
+| Plane | Contains | Mutability | Example invariants |
+| --- | --- | --- | --- |
+| **Knowledge** | catalogue, manifests, capabilities, routing policy, provider metadata | static, design-time (seeded) | W8.5c.*, W8.5d.1–10 |
+| **Decision** | resolver, planner, verifier | pure functions over knowledge + runtime state | W8.5e.1–8 (deterministic, explainable, no side effects) |
+| **Execution** | provider adapters, local GPU, FFmpeg/ComfyUI/Ollama, uploads, publishing | stateful, side-effecting | writes §A.2 only; owns all I/O |
+
+The resolver (this contract) is the first fully-realised member of the **Decision** plane,
+and its invariants exist precisely to keep it from leaking into the Execution plane.
+A dedicated architectural-overview document (engineering doc, **not** an ADR) capturing
+these three planes and *why* the boundaries exist will be authored **once α8.5e is
+complete** — recorded here so the intent is not lost.
 
 ---
 
@@ -330,4 +415,5 @@ grounding → contract → implementation → verification cadence used througho
 
 | Date | Change |
 | --- | --- |
+| 2026-07-25 | **SIGNED OFF** with amendments 1–6. Added invariants **W8.5e.6** (single immutable catalogue snapshot per invocation), **W8.5e.7** (stable candidate ordering via explicit comparator, never SQL order), **W8.5e.8** (capability-first — no provider-specific branching); strengthened **W8.5e.3** (health is read-only input) and **W8.5e.5** (explainability is machine-readable — structured `components` object incl. `health_multiplier`). Made eligibility explicitly separate from scoring (`local_only`/`commercial_allowed` ⇒ ineligible, never a penalty). Clarified the three signal tables stay independent (`provider_health` observational / `provider_quota_state` operational / `adapter_runtime_metrics` historical — never merged). Expanded `generation_resolution_ledger` (routing_strategy, full candidate_list, start/end_time, execution_result) for complete replay. Added the forward note on the three architectural planes (§8a). |
 | 2026-07-25 | Initial contract — resolver as a pure function (§1); three input groups (§2); ordered-candidate output (§3); explainable two-stage scoring with strategy-as-weight-vector + deterministic tie-break (§4); invariants **W8.5e.1–5** (§5); per-request provenance (§6); **grounded operational tables** `provider_health` / `adapter_runtime_metrics` / `provider_quota_state` / `local_runtime_state` / `generation_resolution_ledger` (§7); non-goals (§8); roadmap (§9); α8.5e implementation order (§10). Pairs with the completed α8.5d milestone; no runtime change. |
