@@ -23,15 +23,22 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.34-phase3-alpha8.5b3r` |
-| **Latest runtime tag** | `v0.4.34-phase3-alpha8.5b3r` |
+| **Application version** | `0.4.34-phase3-alpha8.5b3r` (code constant — a version bump lapsed after α8.5b.3r; see the tag/version note below) |
+| **Latest runtime tag** | `v0.4.35-phase3-alpha8.7` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, and α8.7 Planner V2 all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
 strictly additive — no frozen path changed, no `Freeze-Override:` trailer used.
+
+> **Tag/version note.** Milestone tagging lapsed after `v0.4.34-phase3-alpha8.5b3r`:
+> α8.5c, α8.5d, α8.5e, the α8.5x execution runtime + first generation slice, and
+> α8.7 Planner V2 all landed **folded into the single `v0.4.35-phase3-alpha8.7`
+> baseline tag**. The FastAPI `version` constant in `backend/app/main.py` still reads
+> `0.4.34-phase3-alpha8.5b3r`; realigning that code constant is a separate (code)
+> bump, out of scope for this documentation sync.
 
 ---
 
@@ -99,10 +106,13 @@ orchestration / providers own external communication · two public resume seams.
 
 ## Completed capability lifecycles
 
-The runtime pipeline is complete through rendering. Each boundary is clean —
-providers know nothing about rendering, rendering knows nothing about providers,
-orchestration doesn't know FFmpeg exists, completion doesn't know storage exists,
-storage doesn't know timelines exist:
+The orchestration pipeline is complete through rendering, export, and delivery, and
+a persistent **generation runtime** (Planner → Storyboard → Resolver → … → Export)
+now sits *upstream* of the frozen runner — see [`SYSTEM_MAP.md`](../engineering/SYSTEM_MAP.md)
+for the end-to-end map. Each boundary is clean — providers know nothing about
+rendering, rendering knows nothing about providers, orchestration doesn't know
+FFmpeg exists, completion doesn't know storage exists, storage doesn't know
+timelines exist:
 
 ```
 Provider → Completion → Generated Media Ingestion → MediaAsset → Timeline → Render Engine → Output MediaAsset
@@ -129,6 +139,12 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Storage backends & signed-URL delivery (S3/R2) | ✅ | α8.5b.2 | `StorageResolver` + `DeliveryResolver` registries; write-active/read-persisted (E2); `S3ObjectStorage` (S3+R2) + fixed-TTL offline-presigned `302` redirects; cloud SDK import-linter-isolated; endpoint unchanged |
 | Notifications (in-app projection) | ✅ | α8.5b.3 | `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced via partial `UNIQUE (user_id, source_event_id)`; write path only (read API → α8.5b.3r, email → α8.5b.4) |
 | Notification read API (list / count / mark-read) | ✅ | α8.5b.3r | owner-scoped read-model completion on the α8.5b.3 projection: `GET /notifications` (keyset feed, reuses α5a pagination), `GET /notifications/unread-count`, `POST /notifications/{id}/read` + `/read-all` (action verbs); read-state metadata-only + order-stable (W8.5b.8/9/10); pure additive repo methods; **zero migration**; archive/inbox features out |
+| Capability catalogue & provider registry (design-time) | ✅ | α8.5c / α8.5d | three YAML manifests (`capabilities`/`providers`/`routing`) + optional `devices.yaml`, strict Pydantic loaders, offline validator, CI Stage 0; the runtime never reads the YAML (W8.5c.2); enriched for the resolver + planner (capability dependencies, feature matrix, resource/cost estimates, device profiles) |
+| Catalogue seed → DB | ✅ | α8.5d | idempotent `YAML → validator → seeder → DB`; additive migration; the DB is the runtime source of truth, carrying execution/hardware/mode metadata (ADR-0044 X-G) |
+| Capability resolver | ✅ | α8.5e | local-first / free-first, **explainable** candidate resolution over immutable catalogue + runtime snapshots; writes a resolution ledger (ADR-0041 D2 realised; AI-runtime core frozen by [`ADR-0045`](../decisions/ADR-0045-ai-runtime-core-freeze.md), [`RESOLVER_RUNTIME_CONTRACT.md`](../engineering/RESOLVER_RUNTIME_CONTRACT.md)) |
+| Execution runtime & provenance | ✅ | α8.5x-mrc.4 (Increment 4) | persistent Execution plane: `generations` / `generation_shots` / `generation_assets` (+ `parent_asset_id` lineage), `model_cache`, the `generations.status` state machine, and transactional-outbox lifecycle events; raw-SQL / ORM-less (migration `0012`); Execution-plane boundaries X1–X8 frozen ([`ADR-0046`](../decisions/ADR-0046-execution-runtime-boundaries.md), [`EXECUTION_RUNTIME_CONTRACT.md`](../engineering/EXECUTION_RUNTIME_CONTRACT.md)) |
+| First end-to-end generation slice | ✅ | α8.5x-mrc (Increment 5) | prompt → plan → storyboard → resolve → generate → verify → render → export, persisted with AR18 provenance; proven on an ephemeral Postgres + ffmpeg (CI Stage 13); golden-scenario regression, Pollinations wired purely as an `IImageGenerator` |
+| Cinematic storyboard — Planner V2 | ✅ | α8.7 | `ShotIntent` value object + data-driven `StoryArcTemplate` (3/5/6 arcs); deterministic, position-independent shot ids + `blake2b` per-shot seeds; invariants CS-7 (adjacent shots differ) + CS-8 (no provider language in intent); Golden V1 frozen, Golden V2 active ([`CINEMATIC_STORYBOARD_CONTRACT.md`](../engineering/CINEMATIC_STORYBOARD_CONTRACT.md)) |
 
 ### Invariant catalog
 
@@ -297,21 +313,14 @@ rather than guarding against code that does not yet exist.
 
 ## Remaining roadmap
 
+> Shipped slices (α8.5a → α8.5b.3r, α8.5c → α8.5e, the α8.5x execution runtime +
+> first generation slice, and α8.7 Planner V2) have moved up into
+> *Completed capability lifecycles*. Only genuinely future work remains below.
+
 | Slice | Scope |
 |---|---|
 | **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
-| **α8.5a** | ✅ Export engine — delivery encodings (`ExportWorker` / `ProcessExportJob` / `IExporter`); shipped `v0.4.30` |
-| **α8.5b.1** | ✅ Download serving — `DownloadExport` + `IDownloadDelivery` (`LocalStreamDelivery`); shipped `v0.4.31` |
-| **α8.5b.2** | ✅ Storage backends & signed-URL delivery — `StorageResolver`/`DeliveryResolver` + `S3ObjectStorage` (S3/R2) + `S3RedirectDelivery` (fixed-TTL presigned `302`); write-active/read-persisted (E2); GCS/Azure plug in the same way; shipped `v0.4.32` |
-| **α8.5b.3** | ✅ Notifications — `NotificationProjection` (2nd relay consumer) on `ExportJobSucceeded`/`ExportJobFailed`; exactly-once per recipient per source event, DB-enforced (partial `UNIQUE (user_id, source_event_id)`); in-app write path only; shipped `v0.4.33` |
-| **α8.5b.3r** | ✅ Notifications read API — `GET /notifications` (keyset feed), `GET /notifications/unread-count`, `POST /notifications/{id}/read` + `/read-all` (action verbs); owner-scoped read-model completion on the α8.5b.3 projection (W8.5b.8/9/10); zero migration; archive/inbox features out; shipped `v0.4.34` |
 | **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
-| **α8.5c** | Capability Catalogue & Provider Registry (tooling) — three design-time manifests + offline validator + CI Stage 0; *capability → providers*, score+strategy, static-only; runtime never reads the YAML (W8.5c.2). No runtime/migration/version bump |
-| **α8.5x** | **AI Runtime & Generation Architecture (governance, ADR-0044 — Accepted)** — verify-driven, capability-first, local-first pipeline (Plan → Generate → Verify → Repair); requirements AR1–AR18 + invariants W8.5x.1–W8.5x.18; local execution/hardware abstraction. Carves out the **Minimum Runtime Contract MRC-1…MRC-8** as the Phase-1 MVP scope (the only runtime α8.5d/α8.5e + the first generation slice must ship); Phase 2 defers the AR depth. Governs α8.5d→α8.6. Docs-only |
-| **α8.5d** | Seed — YAML → DB seeder + additive migration (DB = populated runtime source of truth; carries execution/hardware/mode metadata per ADR-0044 X-G; α8.5x) |
-| **α8.5e** | Capability resolver — local-first / free-first selection (MRC-2/-3; ADR-0041 D2 realised; α8.5x) |
-| **α8.5x-mrc** | MRC — the MVP: planner → character memory → scene-by-scene → generate → threshold verification → resume → asset cache → render → export, capturing AR18 provenance (α8.5x) |
-| **α8.5x-mrc.4** | **Execution Runtime & Provenance (Increment 4; ADR-0046 — Accepted)** — makes the Execution plane persistent: generation ledger (`generations` + `generation_shots`), execution artefact registry (`generation_assets`, `parent_asset_id` lineage graph), model cache (`model_cache`), `generations.status` state machine, and outbox lifecycle events. Raw-SQL/ORM-less (migration 0012); freezes Execution-plane boundaries X1–X8 (`EXECUTION_RUNTIME_CONTRACT.md`). `generation_assets` is execution-owned; promotion to `media_assets` is deferred to an explicit `PublishGenerationAssets` |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers; its own parallel registry, shared α8.5c tooling; after the AR runtime) |
 
 All remaining work is **downstream of / additive to the frozen orchestration
