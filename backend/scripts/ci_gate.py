@@ -498,13 +498,15 @@ def _stages() -> list[Stage]:
             cmd=[py, "scripts/verify_seed_roundtrip.py"],
             requires_db=True,
         ),
-        # Stage 12 (α8.5e) — Integration Runtime Verification. Proves a freshly
-        # migrated + seeded database (stages 5-7 + 11) can actually drive the
-        # runtime: the raw-SQL catalogue/runtime readers materialise snapshots,
-        # the resolver resolves against them, and the resolution ledger persists
-        # provenance. Deliberately narrow — only the Decision-plane repositories
-        # — so it stays fast and answers one question: "can a real DB support the
-        # runtime?" Each test runs inside a SAVEPOINT that rolls back on teardown.
+        # Stage 12 (α8.5e / α8.6) — Integration Runtime Verification. Proves a
+        # freshly migrated + seeded database (stages 5-7 + 11) can actually drive
+        # the runtime: the raw-SQL catalogue/runtime readers materialise snapshots,
+        # the resolver resolves against them, the resolution ledger persists
+        # provenance, and the Execution Runtime ledger/asset/model-cache repos
+        # round-trip (enum casts, jsonb, self-FK lineage, ON CONFLICT upserts).
+        # Narrow, Decision- + Execution-plane repositories only, so it stays fast
+        # and answers one question: "can a real DB support the runtime?" Each test
+        # runs inside a SAVEPOINT that rolls back on teardown.
         Stage(
             number=12,
             title="runtime integration verification",
@@ -517,6 +519,9 @@ def _stages() -> list[Stage]:
                 "tests/integration/infrastructure/repositories/test_catalogue_reader.py",
                 "tests/integration/infrastructure/repositories/test_runtime_state_reader.py",
                 "tests/integration/infrastructure/repositories/test_resolver_integration.py",
+                # α8.6 Increment 4 — Execution Runtime ledger/asset/model-cache repos.
+                "tests/integration/infrastructure/repositories/"
+                "test_execution_runtime_repositories.py",
             ],
             requires_db=True,
         ),

@@ -286,6 +286,7 @@ exist. See [`ADR-0041` §Event projection pattern](../decisions/ADR-0041-provide
 | **α8.5d** | Seed — YAML → DB seeder + additive migration (DB = populated runtime source of truth; carries execution/hardware/mode metadata per ADR-0044 X-G; α8.5x) |
 | **α8.5e** | Capability resolver — local-first / free-first selection (MRC-2/-3; ADR-0041 D2 realised; α8.5x) |
 | **α8.5x-mrc** | MRC — the MVP: planner → character memory → scene-by-scene → generate → threshold verification → resume → asset cache → render → export, capturing AR18 provenance (α8.5x) |
+| **α8.5x-mrc.4** | **Execution Runtime & Provenance (Increment 4; ADR-0046 — Accepted)** — makes the Execution plane persistent: generation ledger (`generations` + `generation_shots`), execution artefact registry (`generation_assets`, `parent_asset_id` lineage graph), model cache (`model_cache`), `generations.status` state machine, and outbox lifecycle events. Raw-SQL/ORM-less (migration 0012); freezes Execution-plane boundaries X1–X8 (`EXECUTION_RUNTIME_CONTRACT.md`). `generation_assets` is execution-owned; promotion to `media_assets` is deferred to an explicit `PublishGenerationAssets` |
 | **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers; its own parallel registry, shared α8.5c tooling; after the AR runtime) |
 
 All remaining work is **downstream of / additive to the frozen orchestration

@@ -55,12 +55,20 @@ responsibilities.
 
 - **Owns:** provider adapters, local GPU engines (ComfyUI, Ollama, Stable Diffusion,
   Flux), FFmpeg, uploads and publishing — plus the operational tables (`provider_health`,
-  `provider_quota_state`, `adapter_runtime_metrics`, `local_runtime_state`) and the
-  `generation_resolution_ledger`.
-- **Mutability:** stateful, side-effecting. Writes operational state and provenance;
-  consumes the resolver's ordered candidates (executes the first, falls back on failure).
-- **Invariants:** never scores (F2); writes health/quota/metrics that the Decision plane
-  only reads (F5); records the full ranked `candidate_list` for replay (AR18).
+  `provider_quota_state`, `adapter_runtime_metrics`, `local_runtime_state`), the
+  `generation_resolution_ledger`, and (α8.6 Increment 4) the **persistent Execution
+  Runtime**: the generation ledger (`generations` + `generation_shots`), the execution
+  artefact registry (`generation_assets`, with a `parent_asset_id` lineage graph), the
+  model cache (`model_cache`), the `generations.status` state machine, and lifecycle
+  events via the transactional outbox.
+- **Mutability:** stateful, side-effecting. Writes operational state, artefacts, and
+  provenance; consumes the resolver's ordered candidates (executes the first, falls back
+  on failure). Persists incrementally in short transactions (a multi-minute run never
+  holds one open).
+- **Invariants:** never scores (F2) and never plans (F3); writes health/quota/metrics that
+  the Decision plane only reads (F5); records the full ranked `candidate_list` for replay
+  (AR18); artefacts are execution-owned and reach `media_assets` only via an explicit
+  promotion use case. Frozen by **ADR-0046** (X1–X8, `EXECUTION_RUNTIME_CONTRACT.md`).
 
 ---
 
@@ -88,4 +96,5 @@ responsibilities.
 4. **Project Memory** — reuse prior assets, embeddings, scenes.
 5. **Publishing** — YouTube / TikTok / Instagram adapters.
 
-Each plugs into stable seams; none revisits the frozen boundaries (ADR-0045 F1–F7).
+Each plugs into stable seams; none revisits the frozen boundaries (ADR-0045 F1–F7 for the
+Decision plane, ADR-0046 X1–X8 for the Execution plane).

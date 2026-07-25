@@ -162,6 +162,13 @@ ORMLESS_CATALOGUE_TABLES = {
     "adapter_runtime_metrics",
     "local_runtime_state",
     "generation_resolution_ledger",
+    # migration 0012 — Execution Runtime & Provenance (α8.6 Increment 4).
+    # Execution-owned, raw-SQL/ORM-less by design (ADR-0045 F4/F5, ADR-0046);
+    # written via raw-SQL repositories, never through the SQLAlchemy models.
+    "generations",
+    "generation_shots",
+    "generation_assets",
+    "model_cache",
 }
 
 # Every table the ORM-vs-DB drift check should ignore: present in the database by

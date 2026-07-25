@@ -1042,6 +1042,128 @@ erDiagram
 
 ---
 
+## Cluster 12 — Execution Runtime & Provenance (α8.6 Increment 4)
+
+> **The Execution plane made persistent, intentionally ORM-less.** Created by migration
+> `0012_execution_runtime` and read/written via raw-SQL repositories (Q2 ruling A /
+> ADR-0045 F4/F5, frozen by **ADR-0046**). See
+> `docs/engineering/EXECUTION_RUNTIME_CONTRACT.md` (invariants W8.6.1–8, state machine).
+> These tables are **execution-owned** and never write into the platform's `media_assets`
+> library — promotion is a future explicit use case, `PublishGenerationAssets` (W8.6.8).
+> `validate_schema.py` lists them as ORM-less extras rather than treating them as drift.
+
+```mermaid
+erDiagram
+    generations         ||--o{ generation_shots : generation_id
+    generations         ||--o{ generation_assets : generation_id
+    generation_assets   ||--o{ generation_assets : parent_asset_id
+    generation_assets   ||--o{ generation_shots : asset_id
+
+    generations {
+        uuid id PK
+        generation_status status
+        text prompt
+        text title "nullable"
+        text identity_id "nullable"
+        text execution_mode
+        execution_tier execution_tier "nullable"
+        text chosen_provider "nullable"
+        text chosen_adapter "nullable"
+        bigint seed "nullable"
+        text aspect_ratio "nullable"
+        text target_platform "nullable"
+        int width "nullable"
+        int height "nullable"
+        int fps "nullable"
+        int shot_count "nullable"
+        text planner_version "nullable"
+        text storyboard_version "nullable"
+        text prompt_builder_version "nullable"
+        text resolver_version "nullable"
+        text verifier_version "nullable"
+        text repair_version "nullable"
+        text renderer_version "nullable"
+        int score_schema_version "nullable"
+        text catalogue_version "nullable"
+        text manifest_digest "nullable"
+        uuid final_video_asset_id "logical ref"
+        storage_backend video_backend "nullable"
+        text video_bucket "nullable"
+        text video_key "nullable"
+        numeric duration_seconds "nullable"
+        text failure_reason "nullable"
+        jsonb provenance
+        timestamptz created_at
+        timestamptz started_at "nullable"
+        timestamptz finished_at "nullable"
+        timestamptz updated_at
+    }
+    generation_assets {
+        uuid id PK
+        uuid generation_id FK
+        int shot_number "nullable"
+        generation_asset_kind asset_kind
+        storage_backend storage_backend
+        text storage_bucket
+        text storage_key
+        text mime_type
+        bigint size_bytes "nullable"
+        bytea checksum_sha256 "nullable"
+        int width "nullable"
+        int height "nullable"
+        int duration_ms "nullable"
+        uuid parent_asset_id FK "nullable"
+        jsonb metadata
+        timestamptz created_at
+    }
+    generation_shots {
+        uuid id PK
+        uuid generation_id FK
+        int shot_number
+        text prompt
+        text negative_prompt "nullable"
+        jsonb reference_images
+        text adapter_used "nullable"
+        bigint seed "nullable"
+        boolean accepted
+        jsonb verification
+        jsonb attempts
+        int repair_count
+        uuid asset_id FK "nullable"
+        text reason "nullable"
+        timestamptz created_at
+    }
+    model_cache {
+        uuid id PK
+        text model_ref UK
+        text version "nullable"
+        bytea sha256 "nullable"
+        bigint size_bytes "nullable"
+        text backend "nullable"
+        execution_tier execution_tier "nullable"
+        text_array supported_capabilities
+        text local_path "nullable"
+        text status
+        timestamptz downloaded_at "nullable"
+        timestamptz last_used_at "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+```
+
+> **Reconciliation note (α8.6 Increment 4).**
+> - `generations.final_video_asset_id` points at `generation_assets(id)` but carries **no
+>   DB FK** (a hard FK would be circular — `generation_assets` FKs back to `generations`);
+>   the runtime sets it after registering the final render.
+> - `generation_resolution_ledger.generation_id` (Cluster 11) stays a **logical** reference
+>   to `generations(id)`: every pre-Increment-4 ledger row predates `generations`, so a hard
+>   FK would be destructive; the Execution Runtime guarantees the `generations` row exists
+>   before it records the ledger.
+> - `generation_assets` is **execution-owned**; it never links to `media_assets`. Promotion
+>   is the future `PublishGenerationAssets` use case (W8.6.8).
+
+---
+
 ## Cross-Cluster Foreign-Key Summary
 
 These FKs span clusters and are easy to miss; documented here for review:

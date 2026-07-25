@@ -37,8 +37,9 @@ class ShotResult:
 class GenerationProvenance:
     """Everything needed to explain/replay why this render was produced.
 
-    Mirrors the resolution ledger fields (ADR-0044) so the Execution plane can
-    persist it later without the use case owning the ledger.
+    Mirrors the resolution ledger fields (ADR-0044) plus the full component
+    version set (EXECUTION_RUNTIME_CONTRACT.md §5) so the Execution plane can
+    persist a complete, attributable provenance record.
     """
 
     generation_id: UUID
@@ -47,9 +48,18 @@ class GenerationProvenance:
     resolver_version: str
     chosen_adapter: str | None = None
     chosen_provider: str | None = None
+    execution_tier: str | None = None
     catalogue_version: str | None = None
     manifest_digest: str | None = None
     candidate_adapters: tuple[str, ...] = ()
+    # Component versions (frozen in app.domain.generation.versions).
+    planner_version: str | None = None
+    storyboard_version: str | None = None
+    prompt_builder_version: str | None = None
+    verifier_version: str | None = None
+    repair_version: str | None = None
+    renderer_version: str | None = None
+    score_schema_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

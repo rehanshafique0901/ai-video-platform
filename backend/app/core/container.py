@@ -171,6 +171,8 @@ from app.infrastructure.delivery import (
     S3RedirectDelivery,
 )
 from app.infrastructure.export import FfmpegExporter
+from app.infrastructure.generation.execution_runtime_store import SqlExecutionRuntimeStore
+from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
 from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
 from app.infrastructure.media import HttpMediaDownloader
@@ -1313,13 +1315,14 @@ def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
     """Factory: the α8.6 end-to-end generation use case over the supplied session.
 
     The capability resolver reads the catalogue + runtime snapshots through the
-    session; the image generator / extractor / renderer / probe are process-wide
-    (memoised). Frames + the final video land in local object storage for now
-    (real asset-storage backends + a resolution ledger arrive in Increment 4). The
-    Model Cache is not wired yet (no local adapter until Increment 6), so
-    ``model_manager`` is omitted.
+    request ``session``; the image generator / extractor / renderer / probe are
+    process-wide (memoised). The persistent Execution Runtime store + model cache
+    manager use their own short-lived sessions (generation is long-running, so no
+    single transaction spans the run — Increment 4 / ADR-0046). The Model Cache has
+    no downloader until Increment 6; it resolves already-registered local models.
     """
     resolver = ResolverCapabilityResolver(CatalogueReader(session), RuntimeStateReader(session))
+    session_factory = get_session_factory()
     return GenerateVideo(
         resolver=resolver,
         image_generator=_get_image_generator(),
@@ -1327,6 +1330,8 @@ def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
         renderer=_get_slideshow_renderer(),
         video_probe=_get_video_probe(),
         storage=_get_object_storage(),
+        model_manager=ModelCacheManager(session_factory),
+        store=SqlExecutionRuntimeStore(session_factory),
     )
 
 

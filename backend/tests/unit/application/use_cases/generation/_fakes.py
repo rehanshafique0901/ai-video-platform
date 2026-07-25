@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from uuid import UUID, uuid4
+
 from app.application.interfaces.capability_resolver import (
     CapabilityResolution,
     ICapabilityResolver,
     ResolvedAdapter,
+)
+from app.application.interfaces.execution_runtime_store import (
+    IExecutionRuntimeStore,
+    NewGenerationAsset,
+    ShotRecord,
 )
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
 from app.application.interfaces.image_generator import GeneratedImage, IImageGenerator
@@ -170,6 +177,55 @@ class FakeModelManager(IModelManager):
             local_path=f"/cache/{model_ref}",
             from_cache=len(self.calls) > 1,
         )
+
+
+class RecordingExecutionRuntimeStore(IExecutionRuntimeStore):
+    """Records every persistence call so tests can assert the lifecycle sequence."""
+
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+        self.assets: list[NewGenerationAsset] = []
+        self.shots: list[ShotRecord] = []
+        self.resolutions: list[str] = []
+        self.began = False
+        self.completed = False
+        self.failed_reason: str | None = None
+
+    async def begin(self, *, generation_id, request, provenance, title, shot_count) -> None:
+        self.began = True
+        self.statuses.append("planning")
+
+    async def set_status(self, *, generation_id, status) -> None:
+        self.statuses.append(status.value)
+
+    async def record_resolution(self, *, generation_id, resolution, outcome) -> None:
+        self.resolutions.append(outcome.value)
+
+    async def register_asset(self, asset: NewGenerationAsset) -> UUID:
+        self.assets.append(asset)
+        return uuid4()
+
+    async def record_shot(self, shot: ShotRecord) -> None:
+        self.shots.append(shot)
+
+    async def complete(
+        self,
+        *,
+        generation_id,
+        final_video_asset_id,
+        storage_backend,
+        storage_bucket,
+        storage_key,
+        duration_seconds,
+        width,
+        height,
+    ) -> None:
+        self.completed = True
+        self.statuses.append("completed")
+
+    async def fail(self, *, generation_id, reason: str) -> None:
+        self.failed_reason = reason
+        self.statuses.append("failed")
 
 
 def remote_adapter(adapter_id: str = "pollinations.image", score: float = 90.0) -> ResolvedAdapter:

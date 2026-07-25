@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from app.domain.generation.execution import ExecutionConstraints, ExecutionTier
+from app.domain.resolver import Resolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,10 @@ class CapabilityResolution:
     candidates: tuple[ResolvedAdapter, ...]
     catalogue_version: str | None = None
     manifest_digest: str | None = None
+    # The underlying pure-resolver decision, carried for the Execution-plane
+    # resolution ledger (W8.5e.5 — full ranked list incl. filtered candidates).
+    # ``None`` when a fake/simple resolver is used (e.g. in unit tests).
+    resolution: Resolution | None = None
 
     @property
     def top(self) -> ResolvedAdapter | None:

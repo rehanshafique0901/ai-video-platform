@@ -22,6 +22,7 @@ from ._fakes import (
     FakeObjectStorage,
     FakeSlideshowRenderer,
     FakeVideoProbe,
+    RecordingExecutionRuntimeStore,
     local_adapter,
     remote_adapter,
 )
@@ -63,29 +64,33 @@ def _use_case(
     storage: FakeObjectStorage | None = None,
     generator: FakeImageGenerator | None = None,
     resolver: ICapabilityResolver | None = None,
+    store: RecordingExecutionRuntimeStore | None = None,
 ) -> tuple[GenerateVideo, dict[str, object]]:
     gen = generator or FakeImageGenerator()
     ext = extractor or FakeFeatureExtractor()
     rnd = FakeSlideshowRenderer()
     prb = probe or FakeVideoProbe(duration=18.0, width=720, height=1280)
-    store = storage or FakeObjectStorage()
+    obj = storage or FakeObjectStorage()
     res = resolver or FakeCapabilityResolver(candidates)
+    runtime_store = store or RecordingExecutionRuntimeStore()
     uc = GenerateVideo(
         resolver=res,
         image_generator=gen,
         feature_extractor=ext,
         renderer=rnd,
         video_probe=prb,
-        storage=store,
+        storage=obj,
         model_manager=model_manager,
+        store=runtime_store,
     )
     return uc, {
         "generator": gen,
         "extractor": ext,
         "renderer": rnd,
         "probe": prb,
-        "storage": store,
+        "storage": obj,
         "resolver": res,
+        "store": runtime_store,
     }
 
 
@@ -231,6 +236,61 @@ async def test_execution_mode_reaches_resolver_constraints() -> None:
     constraints = resolver.calls[0]["constraints"]
     # FREE_REMOTE_ONLY must not allow local or commercial tiers.
     assert constraints.allowed == (ExecutionTier.FREE_REMOTE,)  # type: ignore[union-attr]
+
+
+async def test_persists_full_lifecycle_to_store() -> None:
+    store = RecordingExecutionRuntimeStore()
+    uc, _ = _use_case(store=store)
+    result = await uc.execute(_request())
+
+    assert result.succeeded
+    assert store.began and store.completed
+    assert store.failed_reason is None
+    # Execution state machine advances through each persisted phase.
+    assert store.statuses == [
+        "planning",
+        "resolving",
+        "generating",
+        "rendering",
+        "exporting",
+        "completed",
+    ]
+    assert store.resolutions == ["success"]
+    # 6 frame assets + 1 video asset registered; every shot recorded + accepted.
+    frame_assets = [a for a in store.assets if a.asset_kind.value == "frame"]
+    video_assets = [a for a in store.assets if a.asset_kind.value == "video"]
+    assert len(frame_assets) == 6
+    assert len(video_assets) == 1
+    assert len(store.shots) == 6
+    assert all(s.accepted and s.asset_id is not None for s in store.shots)
+    # Artefacts carry storage coordinates + a checksum for provenance.
+    assert all(a.storage_backend == "memory" and a.checksum_sha256 for a in store.assets)
+
+
+async def test_no_eligible_provider_records_failure_to_store() -> None:
+    store = RecordingExecutionRuntimeStore()
+    uc, _ = _use_case(candidates=(), store=store)
+    result = await uc.execute(_request())
+
+    assert result.status is GenerationStatus.FAILED
+    assert store.began
+    assert not store.completed
+    assert store.resolutions == ["none"]
+    assert store.failed_reason is not None and "no eligible provider" in store.failed_reason
+
+
+async def test_shot_failure_records_failed_shot_to_store() -> None:
+    store = RecordingExecutionRuntimeStore()
+    uc, _ = _use_case(extractor=FakeFeatureExtractor(fail_first=99), store=store)
+    result = await uc.execute(_request(max_attempts=2))
+
+    assert result.status is GenerationStatus.FAILED
+    assert store.failed_reason is not None and "failed verification" in store.failed_reason
+    # The failed shot is persisted (not accepted) before the generation fails.
+    assert len(store.shots) == 1
+    assert store.shots[0].accepted is False
+    assert store.shots[0].asset_id is None
+    assert "failed" in store.statuses
 
 
 async def test_deterministic_result_shape() -> None:

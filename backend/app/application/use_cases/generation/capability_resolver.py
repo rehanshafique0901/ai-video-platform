@@ -120,6 +120,7 @@ class ResolverCapabilityResolver(ICapabilityResolver):
             candidates=tuple(candidates),
             catalogue_version=resolution.catalogue_version,
             manifest_digest=resolution.manifest_digest,
+            resolution=resolution,
         )
 
 
