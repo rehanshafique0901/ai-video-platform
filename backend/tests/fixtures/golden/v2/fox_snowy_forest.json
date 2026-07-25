@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden regression scenario for the generation pipeline (Increment 5). The 'storyboard' section is the deterministic Planner+Storyboard output and is asserted byte-for-byte by tests/unit/domain/generation/test_golden_scenario.py. The 'resolver' section is validated by the live end-to-end test (tests/integration/infrastructure/generation/test_generation_end_to_end.py), which also asserts run-to-run reproducibility of the full candidate ordering. Regenerate with: python -m tests.fixtures.golden.regen (or edit deliberately when the planner behaviour changes on purpose).",
+  "_comment": "ACTIVE golden \u2014 Golden V2 (Cinematic Planner, \u03b18.7). The 'storyboard' section is the deterministic Planner V2 + Storyboard output and is asserted byte-for-byte by tests/unit/domain/generation/test_golden_scenario.py (which also asserts the cinematic-diversity invariants: distinct shots, CS-7 adjacency). The 'resolver' section is validated by the live end-to-end test and is authored by hand. Regenerate with: python -m tests.fixtures.golden.regen. The frozen minimal-planner snapshot lives in ../v1/fox_snowy_forest.json.",
   "request": {
     "prompt": "A little red fox walking through a snowy forest at sunrise.",
     "seed": 70707,

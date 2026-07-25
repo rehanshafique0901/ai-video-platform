@@ -1,11 +1,15 @@
-"""The Increment 5 golden scenario — one canonical generation request.
+"""The golden scenario — one canonical generation request.
 
 A single source of truth for the "little red fox" scenario so the fast unit
 golden test (planner + storyboard determinism), the live end-to-end integration
 test (full pipeline + persistence + reproducibility), and the demo CLI all drive
-*identical* inputs. The expected outputs are frozen in ``fox_snowy_forest.json``
-next to this module; every future architecture change replays this scenario, the
-way a compiler keeps a golden test.
+*identical* inputs.
+
+Golden versions (see ``CINEMATIC_STORYBOARD_CONTRACT.md`` §15):
+  * ``v1/`` — FROZEN history: the α8.6 minimal planner (one prompt/seed per shot).
+    Never replayed by the live planner; kept only as an architectural snapshot.
+  * ``v2/`` — the ACTIVE regression suite: the α8.7 cinematic planner. Every future
+    architecture change replays this scenario, the way a compiler keeps a golden.
 
 The scenario pins ``FREE_REMOTE_ONLY`` so selection is deterministic regardless
 of what local/commercial adapters exist in the seeded catalogue at the time — the
@@ -21,7 +25,10 @@ from app.application.use_cases.generation.request import GenerateVideoRequest
 from app.domain.generation.execution import ExecutionMode
 from app.domain.generation.identity import Character, GlobalStyle, IdentityProfile, Location
 
-GOLDEN_JSON = Path(__file__).with_name("fox_snowy_forest.json")
+_HERE = Path(__file__).parent
+# The active golden is V2 (cinematic planner); V1 is a frozen historical artifact.
+GOLDEN_JSON = _HERE / "v2" / "fox_snowy_forest.json"
+GOLDEN_V1_JSON = _HERE / "v1" / "fox_snowy_forest.json"
 
 GOLDEN_PROMPT = "A little red fox walking through a snowy forest at sunrise."
 GOLDEN_SEED = 70707

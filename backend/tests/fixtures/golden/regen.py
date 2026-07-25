@@ -1,10 +1,11 @@
-"""Regenerate ``fox_snowy_forest.json`` from the current planner/storyboard.
+"""Regenerate the ACTIVE golden (``v2/fox_snowy_forest.json``) from the planner.
 
 Run deliberately (``python -m tests.fixtures.golden.regen``) only when the
 planner/storyboard behaviour changes *on purpose* — the golden file is a
 regression guard, so an accidental diff here should fail CI, not be blessed
 silently. The ``resolver`` section is authored by hand (it describes what the
-e2e test seeds), so it is preserved across regenerations.
+e2e test seeds), so it is preserved across regenerations. The V1 golden under
+``v1/`` is a frozen historical artifact and is never regenerated.
 """
 
 from __future__ import annotations
@@ -19,6 +20,16 @@ from tests.fixtures.golden.scenario import (
     GOLDEN_PROMPT,
     GOLDEN_SEED,
     fox_request,
+)
+
+_V2_COMMENT = (
+    "ACTIVE golden — Golden V2 (Cinematic Planner, α8.7). The 'storyboard' section "
+    "is the deterministic Planner V2 + Storyboard output and is asserted byte-for-byte "
+    "by tests/unit/domain/generation/test_golden_scenario.py (which also asserts the "
+    "cinematic-diversity invariants: distinct shots, CS-7 adjacency). The 'resolver' "
+    "section is validated by the live end-to-end test and is authored by hand. "
+    "Regenerate with: python -m tests.fixtures.golden.regen. The frozen minimal-planner "
+    "snapshot lives in ../v1/fox_snowy_forest.json."
 )
 
 
@@ -38,7 +49,7 @@ def build_document() -> dict[str, object]:
     )
     storyboard = build_storyboard(plan)
     return {
-        "_comment": existing.get("_comment", ""),
+        "_comment": _V2_COMMENT,
         "request": {
             "prompt": GOLDEN_PROMPT,
             "seed": GOLDEN_SEED,
