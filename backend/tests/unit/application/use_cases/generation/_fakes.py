@@ -114,7 +114,11 @@ class FakeSlideshowRenderer(ISlideshowRenderer):
         self.frame_count = 0
 
     async def render(
-        self, *, frames: tuple[SlideshowFrame, ...], spec: SlideshowSpec
+        self,
+        *,
+        frames: tuple[SlideshowFrame, ...],
+        spec: SlideshowSpec,
+        audio: bytes | None = None,
     ) -> RenderedVideo:
         self.rendered.append(spec)
         self.frame_count = len(frames)

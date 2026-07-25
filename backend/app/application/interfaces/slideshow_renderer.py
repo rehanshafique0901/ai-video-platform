@@ -26,10 +26,17 @@ class SlideshowFrame:
 
 @dataclass(frozen=True, slots=True)
 class SlideshowSpec:
+    """Output shape for the slideshow.
+
+    ``crossfade_seconds`` > 0 blends consecutive frames with a fade (each frame's
+    on-screen time still equals its ``duration_seconds``); 0 means hard cuts.
+    """
+
     width: int
     height: int
     fps: int = 30
     container: str = "mp4"
+    crossfade_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +52,15 @@ class RenderedVideo:
 class ISlideshowRenderer(ABC):
     @abstractmethod
     async def render(
-        self, *, frames: tuple[SlideshowFrame, ...], spec: SlideshowSpec
+        self,
+        *,
+        frames: tuple[SlideshowFrame, ...],
+        spec: SlideshowSpec,
+        audio: bytes | None = None,
     ) -> RenderedVideo:
-        """Assemble ``frames`` (in order) into a single video per ``spec``."""
+        """Assemble ``frames`` (in order) into a single video per ``spec``.
+
+        ``audio``, when supplied, is muxed as the soundtrack (trimmed/padded to the
+        video length). It is optional so the slice works with no audio provider.
+        """
         ...
