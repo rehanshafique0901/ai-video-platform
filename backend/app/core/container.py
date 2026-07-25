@@ -31,6 +31,7 @@ from datetime import timedelta
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.application.interfaces.catalogue_reader import ICatalogueReader
 from app.application.interfaces.clock import IClock
 from app.application.interfaces.download_delivery import IDownloadDelivery
 from app.application.interfaces.exporter import IExporter
@@ -170,6 +171,7 @@ from app.infrastructure.render import (
     FfmpegThumbnailer,
     FfmpegWaveformRenderer,
 )
+from app.infrastructure.repositories.catalogue_reader import CatalogueReader
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -556,6 +558,11 @@ def get_unit_of_work() -> IUnitOfWork:
 def get_user_repository(session: AsyncSession) -> IUserRepository:
     """Factory: a ``UserRepository`` over the supplied session."""
     return UserRepository(session)
+
+
+def get_catalogue_reader(session: AsyncSession) -> ICatalogueReader:
+    """Factory: a read-only ``CatalogueReader`` over the supplied session (α8.5e.3)."""
+    return CatalogueReader(session)
 
 
 # ---------------------------------------------------------------------
