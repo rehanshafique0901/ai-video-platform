@@ -3,8 +3,8 @@
 > The single source of truth for "what does *green* mean on this repo?"
 > Authority: **ADR-0028**.
 
-Every pull request and every push to `main` runs the same 13-stage pipeline
-(numbered 0–12). Local invocation produces byte-identical output via the same
+Every pull request and every push to `main` runs the same 14-stage pipeline
+(numbered 0–13). Local invocation produces byte-identical output via the same
 Python entrypoint so a contributor can reproduce CI on a laptop:
 
 ```bash
@@ -32,7 +32,8 @@ A red gate blocks merge. There are no opt-outs.
 | 9  | ERD comparison                       | `scripts/regenerate_erd.py` + `compare_erd.py` | **yes** | < 30 s |
 | 10 | Coverage threshold                   | `coverage report`      | no       | <  2 s   |
 | 11 | Provider-catalogue seed round-trip   | `scripts/verify_seed_roundtrip.py` | **yes** | < 60 s |
-| 12 | Runtime integration verification     | `pytest -m integration` (Decision-plane repos) | **yes** | < 30 s |
+| 12 | Runtime integration verification     | `pytest -m integration` (Decision-/Execution-plane repos) | **yes** | < 30 s |
+| 13 | Generation end-to-end slice          | `pytest -m integration` (full pipeline → MP4) | **yes** | < 60 s |
 
 Total wall-clock budget: **≤ 6 min** in CI; observed Phase 2C run on a warm runner ≈ **3 m 40 s**.
 
@@ -194,13 +195,34 @@ only on the live-DB stages.
 > integration tests (planner, generation runtime, verification, repair, FFmpeg,
 > export, providers, publishing) belong to their **feature slices**, not this
 > infrastructure gate. This keeps Stage 12 a fast, stable "does the DB drive the
-> runtime plumbing?" check instead of slowly becoming a kitchen sink.
+> runtime plumbing?" check instead of slowly becoming a kitchen sink. When a
+> feature slice needs its own live-DB e2e coverage it earns a **dedicated stage**
+> (the α8.6 generation slice is Stage 13, §2.9), preserving the one-stage/one-purpose rule.
 
 A companion permanent, offline guard lives in stage 4:
 `tests/unit/database/test_migration_reserved_identifiers.py` scans every Alembic
 migration and fails on any PostgreSQL reserved keyword (`window`, `user`,
 `order`, `group`, `table`, `constraint`, …) used as an **unquoted** identifier.
 Quoting (`"window"`) is the sanctioned escape hatch.
+
+### 2.9 Generation end-to-end slice (13)
+
+α8.6 Increment 5. The first **feature-slice** e2e in the gate: against a DB at
+head + seeded (stages 5–7 + 11) it drives the whole vertical slice —
+Prompt → Planner → Storyboard → Resolver → Image Generator → Verifier → Repair →
+Timeline → FFmpeg → MP4 → Execution-Runtime persistence — and asserts the five
+Increment-5 acceptance dimensions (functional, persistence, architectural,
+reproducibility, explainability) from the database alone. Image bytes come from a
+hermetic offline `IImageGenerator` (real PNGs, no provider network), so the stage
+is deterministic; it still exercises real ffmpeg/ffprobe and auto-skips when those
+binaries are absent. Unlike Stage 12 it **commits** (the Execution-Runtime store
+owns its own sessions) and **deletes the rows it created on teardown**, so it
+leaves the destructive-migration restoration guard untouched. It lives in its own
+stage — not Stage 12 — precisely because of that stage's scope freeze (§2.8).
+
+For **manual** inspection of a run (rows left intact) use `scripts/generate_demo.py`
+against a throwaway/ephemeral database; a gated live-provider variant of the e2e
+runs only when `AIVP_E2E_POLLINATIONS=1`.
 
 ---
 
@@ -284,7 +306,8 @@ checks anyway, so the hook is convenience, not authority.
 | 9 ERD diff    | design ERD claims a FK the implementation does not have | fix one side; add an ADR if intentional |
 | 10 coverage   | overall coverage below `fail_under`                | add tests, do not lower the floor |
 | 11 seed round-trip | seeder non-idempotent / wrong disable/delete / digest drift | re-read `verify_seed_roundtrip.py`; check `seed_providers.py` upsert + `_canon` |
-| 12 runtime integration | reader/resolver/ledger SQL breaks on a real DB; reserved keyword | re-read the failing test; a reserved identifier should have been caught by stage 4's guard |
+| 12 runtime integration | reader/resolver/ledger/exec-repo SQL breaks on a real DB; reserved keyword | re-read the failing test; a reserved identifier should have been caught by stage 4's guard |
+| 13 generation e2e | pipeline regression (planner/resolver/verify/repair/render/persist) or ffmpeg missing | read the failing assertion + `generation.*` logs; if skipped, install ffmpeg/ffprobe |
 
 ---
 
@@ -295,3 +318,4 @@ checks anyway, so the hook is convenience, not authority.
 | 2026-06-28 | curator | Initial — Phase 2C, ADR-0028. 10 stages, local + GH Actions runners, pre-commit subset, coverage floor 60 % (raised in Phase 3). |
 | 2026-07-24 | curator | §2.6 added — validation-DB isolation (`--ephemeral-db` / `VALIDATION_DATABASE_URL`) + self-healing restoration guard (bounded-retry `upgrade head` + head verification on every exit). Tooling-only; no stage changes, no version bump. |
 | 2026-07-25 | curator | Stage map updated to 13 stages (0–12): documented stage 11 (α8.5d provider-catalogue seed round-trip) and stage 12 (α8.5e runtime integration verification) in §2.7/§2.8, added the Stage 12 scope-freeze governance note and the reserved-identifier stage-4 guard, and extended the failure table. Docs-only. |
+| 2026-07-25 | curator | Stage map extended to 14 stages (0–13): added stage 13 (α8.6 Increment 5 generation end-to-end slice, §2.9) as the first feature-slice e2e — kept out of stage 12 to honour its scope freeze; clarified stage 12 now also covers the execution-runtime repos. Docs + `ci_gate.py`. |

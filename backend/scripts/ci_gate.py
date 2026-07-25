@@ -15,7 +15,8 @@ provider pre-flight):
     9. compare_erd               (generated vs design ERD)
    10. coverage                  (threshold enforcement)
    11. seed_roundtrip            (α8.5d — provider-catalogue seed idempotency)
-   12. runtime_integration       (α8.5e — readers + resolver + ledger on live DB)
+   12. runtime_integration       (α8.5e/α8.6 — readers + resolver + ledger + exec repos)
+   13. generation_e2e            (α8.6 Increment 5 — full Prompt→…→FFmpeg→MP4 slice)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -25,10 +26,16 @@ correct. Stage 11 (α8.5d seed round-trip) is likewise appended at the end — i
 needs the schema at head (post stage-7) and seeds only the eight catalogue
 tables, so it can never disturb the destructive-migration guard. Stage 12
 (α8.5e runtime integration) runs last: it needs the schema at head and the
-catalogue seeded (stage 11), then exercises the Decision-plane repositories
-(catalogue/runtime readers → resolver → resolution ledger) against the live DB
-so a "works locally, fails in CI" runtime regression cannot reach main. Its
-tests roll back inside a SAVEPOINT, so it too leaves the guard untouched.
+catalogue seeded (stage 11), then exercises the Decision- + Execution-plane
+repositories (catalogue/runtime readers → resolver → resolution ledger → exec
+runtime repos) against the live DB so a "works locally, fails in CI" runtime
+regression cannot reach main. Its tests roll back inside a SAVEPOINT, so it too
+leaves the guard untouched. Stage 13 (α8.6 Increment 5) then runs the generation
+feature slice end-to-end (Prompt→Planner→Resolver→Generate→Verify→Repair→
+Timeline→FFmpeg→MP4→persistence); it is kept OUT of Stage 12 to honour that
+stage's infrastructure-only scope freeze. It commits (its store owns its own
+sessions) and deletes the rows it created on teardown, and auto-skips when
+ffmpeg/ffprobe are absent — so it also leaves the restoration guard untouched.
 
 Stages 1–4 and 10 are cheap and run on every PR. Stages 5–9 require a
 live PostgreSQL with pgvector reachable via ``DATABASE_URL`` (in CI this
@@ -506,7 +513,8 @@ def _stages() -> list[Stage]:
         # round-trip (enum casts, jsonb, self-FK lineage, ON CONFLICT upserts).
         # Narrow, Decision- + Execution-plane repositories only, so it stays fast
         # and answers one question: "can a real DB support the runtime?" Each test
-        # runs inside a SAVEPOINT that rolls back on teardown.
+        # runs inside a SAVEPOINT that rolls back on teardown. Business-feature
+        # e2e tests do NOT belong here (Stage 12 scope freeze) — see Stage 13.
         Stage(
             number=12,
             title="runtime integration verification",
@@ -522,6 +530,30 @@ def _stages() -> list[Stage]:
                 # α8.6 Increment 4 — Execution Runtime ledger/asset/model-cache repos.
                 "tests/integration/infrastructure/repositories/"
                 "test_execution_runtime_repositories.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 13 (α8.6 Increment 5) — Generation feature-slice end-to-end. Kept
+        # OUT of Stage 12 to honour that stage's scope freeze (infrastructure /
+        # persistence boundaries only): this is a *business-feature* test that
+        # drives the whole vertical slice — Prompt → Planner → Resolver → Generate
+        # → Verify → Repair → Timeline → FFmpeg → MP4 → persistence — against a DB
+        # at head + seeded (stages 5-7 + 11). The offline image generator keeps it
+        # hermetic (no provider network); it still exercises real ffmpeg/ffprobe.
+        # Unlike Stage 12 it commits (the Execution-Runtime store owns its own
+        # sessions) and deletes the rows it created on teardown, so it too leaves
+        # the destructive-migration restoration guard untouched. Auto-skips if
+        # ffmpeg/ffprobe are absent.
+        Stage(
+            number=13,
+            title="generation end-to-end slice",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/generation/test_generation_end_to_end.py",
             ],
             requires_db=True,
         ),

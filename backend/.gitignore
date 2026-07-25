@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 log.txt
+
+# α8.6 — local object-storage root (generated frames/renders); never committed
+var/
