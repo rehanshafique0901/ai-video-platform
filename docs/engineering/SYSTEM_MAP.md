@@ -9,6 +9,19 @@ exist; this map shows *where a request goes*.
 If you are new to the generation pipeline, read this first, then follow the links
 into the governing documents for the stage you care about.
 
+> **SYSTEM_MAP is a navigation document.** It does not define architectural rules or
+> behavioural guarantees — those remain the responsibility of the **ADRs** (*why the
+> architecture exists*) and the **engineering contracts** (*what each subsystem must
+> do*). This map only shows *how everything connects*. Where this document and an
+> ADR/contract ever disagree, the ADR/contract is authoritative.
+>
+> ```
+> ADRs        → why the architecture exists
+>   Contracts → behavioural guarantees per subsystem
+>     SYSTEM_MAP → how everything connects
+>       Code
+> ```
+
 ---
 
 ## Architecture at a glance
