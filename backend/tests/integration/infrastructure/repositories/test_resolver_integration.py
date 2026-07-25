@@ -58,7 +58,8 @@ async def _seed(session: AsyncSession, *, tag: str) -> dict[str, str]:
             "INSERT INTO provider_registry_meta "
             "(id, manifest_digest, catalogue_version, generator_version, generated_at) "
             "VALUES (true, :digest, '2026.07', 'test/1.0', now()) "
-            "ON CONFLICT (id) DO UPDATE SET manifest_digest = EXCLUDED.manifest_digest"
+            "ON CONFLICT (id) DO UPDATE SET manifest_digest = EXCLUDED.manifest_digest, "
+            "catalogue_version = EXCLUDED.catalogue_version"
         ),
         {"digest": f"digest_{tag}"},
     )

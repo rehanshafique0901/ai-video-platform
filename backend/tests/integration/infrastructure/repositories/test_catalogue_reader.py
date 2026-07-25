@@ -29,25 +29,31 @@ pytestmark = pytest.mark.integration
 async def _seed_catalogue(session: AsyncSession, *, tag: str) -> dict[str, str]:
     """Insert a minimal, self-contained catalogue; return the natural keys used."""
     cap = f"imggen_{tag}"
+    # A provider may expose at most one adapter per capability
+    # (uq_provider_adapters_provider_capability), so the primary and its fallback
+    # live on two different providers — which is also the realistic cross-provider
+    # fallback scenario the resolver is built for.
     prov = f"prov_{tag}"
+    prov2 = f"prov2_{tag}"
     a1 = f"{prov}.primary"
-    a2 = f"{prov}.fallback"
+    a2 = f"{prov2}.fallback"
     dev = f"dev_{tag}"
 
     await session.execute(
         text("INSERT INTO capabilities (id, kind) VALUES (:id, 'image')"), {"id": cap}
     )
-    await session.execute(
-        text(
-            "INSERT INTO providers (id, name, pricing, score_quality, score_cost, "
-            "score_speed, score_reliability) "
-            "VALUES (:id, :name, 'free', 70, 100, 80, 75)"
-        ),
-        {"id": prov, "name": f"Provider {tag}"},
-    )
-    for aid, mode, runtime in (
-        (a1, "local", {"hardware": {"minimum_ram_gb": 16, "recommended_ram_gb": 32}}),
-        (a2, "cloud", {}),
+    for pid in (prov, prov2):
+        await session.execute(
+            text(
+                "INSERT INTO providers (id, name, pricing, score_quality, score_cost, "
+                "score_speed, score_reliability) "
+                "VALUES (:id, :name, 'free', 70, 100, 80, 75)"
+            ),
+            {"id": pid, "name": f"Provider {pid}"},
+        )
+    for aid, pid, mode, runtime in (
+        (a1, prov, "local", {"hardware": {"minimum_ram_gb": 16, "recommended_ram_gb": 32}}),
+        (a2, prov2, "cloud", {}),
     ):
         await session.execute(
             text(
@@ -58,7 +64,7 @@ async def _seed_catalogue(session: AsyncSession, *, tag: str) -> dict[str, str]:
             ),
             {
                 "id": aid,
-                "pid": prov,
+                "pid": pid,
                 "cap": cap,
                 "mode": mode,
                 "supports": json.dumps({"commercial": True}),
@@ -72,11 +78,14 @@ async def _seed_catalogue(session: AsyncSession, *, tag: str) -> dict[str, str]:
         ),
         {"a": a1, "b": a2},
     )
+    # Scope the policy to this test's capability (not the global "default" scope)
+    # so the suite is hermetic even when the real catalogue is already seeded.
     await session.execute(
         text(
             "INSERT INTO routing_policies (scope, strategy, fallback, selection) "
-            "VALUES ('default', 'free_first', 'automatic', 'best_available')"
-        )
+            "VALUES (:scope, 'free_first', 'automatic', 'best_available')"
+        ),
+        {"scope": cap},
     )
     await session.execute(
         text("INSERT INTO device_profiles (id, ram_gb, backend) VALUES (:id, 16, 'metal')"),
@@ -93,7 +102,7 @@ async def _seed_catalogue(session: AsyncSession, *, tag: str) -> dict[str, str]:
         {"digest": f"digest_{tag}"},
     )
     await session.flush()
-    return {"cap": cap, "prov": prov, "a1": a1, "a2": a2, "dev": dev}
+    return {"cap": cap, "prov": prov, "prov2": prov2, "a1": a1, "a2": a2, "dev": dev}
 
 
 @pytest.mark.integration

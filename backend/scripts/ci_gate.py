@@ -15,6 +15,7 @@ provider pre-flight):
     9. compare_erd               (generated vs design ERD)
    10. coverage                  (threshold enforcement)
    11. seed_roundtrip            (α8.5d — provider-catalogue seed idempotency)
+   12. runtime_integration       (α8.5e — readers + resolver + ledger on live DB)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -22,7 +23,12 @@ rather than renumbering 1-10 — precisely so the destructive-stage restoration
 guard, which keys on "stage 6 = downgrade" and the live-DB range 5-9, stays
 correct. Stage 11 (α8.5d seed round-trip) is likewise appended at the end — it
 needs the schema at head (post stage-7) and seeds only the eight catalogue
-tables, so it can never disturb the destructive-migration guard.
+tables, so it can never disturb the destructive-migration guard. Stage 12
+(α8.5e runtime integration) runs last: it needs the schema at head and the
+catalogue seeded (stage 11), then exercises the Decision-plane repositories
+(catalogue/runtime readers → resolver → resolution ledger) against the live DB
+so a "works locally, fails in CI" runtime regression cannot reach main. Its
+tests roll back inside a SAVEPOINT, so it too leaves the guard untouched.
 
 Stages 1–4 and 10 are cheap and run on every PR. Stages 5–9 require a
 live PostgreSQL with pgvector reachable via ``DATABASE_URL`` (in CI this
@@ -490,6 +496,28 @@ def _stages() -> list[Stage]:
             number=11,
             title="provider catalogue seed round-trip",
             cmd=[py, "scripts/verify_seed_roundtrip.py"],
+            requires_db=True,
+        ),
+        # Stage 12 (α8.5e) — Integration Runtime Verification. Proves a freshly
+        # migrated + seeded database (stages 5-7 + 11) can actually drive the
+        # runtime: the raw-SQL catalogue/runtime readers materialise snapshots,
+        # the resolver resolves against them, and the resolution ledger persists
+        # provenance. Deliberately narrow — only the Decision-plane repositories
+        # — so it stays fast and answers one question: "can a real DB support the
+        # runtime?" Each test runs inside a SAVEPOINT that rolls back on teardown.
+        Stage(
+            number=12,
+            title="runtime integration verification",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/repositories/test_catalogue_reader.py",
+                "tests/integration/infrastructure/repositories/test_runtime_state_reader.py",
+                "tests/integration/infrastructure/repositories/test_resolver_integration.py",
+            ],
             requires_db=True,
         ),
     ]
