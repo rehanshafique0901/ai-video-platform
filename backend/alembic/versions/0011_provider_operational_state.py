@@ -88,16 +88,18 @@ def upgrade() -> None:
     )
 
     # ---- provider_quota_state (operational; per provider + window) ---------
+    # NOTE: "window" is a reserved SQL keyword, so the column must always be
+    # double-quoted in DDL/DML (see runtime_state_reader._QUOTA_SQL).
     op.execute(
         """
         CREATE TABLE provider_quota_state (
             provider_id  text NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-            window       quota_window NOT NULL,
+            "window"     quota_window NOT NULL,
             used         integer NOT NULL DEFAULT 0,
             remaining    integer,
             resets_at    timestamptz,
             updated_at   timestamptz NOT NULL DEFAULT now(),
-            CONSTRAINT pk_provider_quota_state PRIMARY KEY (provider_id, window),
+            CONSTRAINT pk_provider_quota_state PRIMARY KEY (provider_id, "window"),
             CONSTRAINT ck_provider_quota_state_used_nonnegative CHECK (used >= 0),
             CONSTRAINT ck_provider_quota_state_remaining_nonnegative
                 CHECK (remaining IS NULL OR remaining >= 0)

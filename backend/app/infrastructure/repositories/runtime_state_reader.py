@@ -28,9 +28,10 @@ from app.domain.resolver.models import (
 )
 
 _HEALTH_SQL = text("SELECT provider_id, health_score, error_rate FROM provider_health")
+# "window" is a reserved SQL keyword — it must stay double-quoted in the query.
 _QUOTA_SQL = text(
-    "SELECT provider_id, window, remaining FROM provider_quota_state "
-    "ORDER BY provider_id, window"
+    'SELECT provider_id, "window", remaining FROM provider_quota_state '
+    'ORDER BY provider_id, "window"'
 )
 _METRICS_SQL = text("SELECT adapter_id, avg_latency_ms, success_rate FROM adapter_runtime_metrics")
 

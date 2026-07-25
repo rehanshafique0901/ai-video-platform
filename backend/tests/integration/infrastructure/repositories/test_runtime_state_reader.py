@@ -72,7 +72,7 @@ async def test_r2_seeded_operational_state_maps_correctly(session: AsyncSession)
     )
     await session.execute(
         text(
-            "INSERT INTO provider_quota_state (provider_id, window, remaining) VALUES "
+            'INSERT INTO provider_quota_state (provider_id, "window", remaining) VALUES '
             "(:pid, 'daily', 0), (:pid, 'monthly', 500)"
         ),
         {"pid": keys["prov"]},

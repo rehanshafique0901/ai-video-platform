@@ -1502,7 +1502,7 @@ metadata (W8.5d.10). FKs point *into* the catalogue (`providers`, `provider_adap
 `provider_id` (PK → `providers` ON DELETE CASCADE), `health_score` (numeric[0,1], DEFAULT 1.0), `last_success_at`, `last_failure_at`, `error_rate` (numeric[0,1]), `rate_limit_hits` (≥0), `updated_at`. "Is the provider up / behaving?" The resolver reads it as the `health_multiplier` and for the health hard-filter; it never writes it (W8.5e.3).
 
 ### 39.2 `provider_quota_state` — operational (per provider + window)
-PK `(provider_id, window)` where `window` ∈ `quota_window` (`daily`/`monthly`); `used` (≥0), `remaining` (nullable ⇒ unlimited, ≥0), `resets_at`, `updated_at`. "How much budget/quota is left right now?" — feeds the quota-exhausted eligibility filter.
+PK `(provider_id, window)` where `window` ∈ `quota_window` (`daily`/`monthly`); `used` (≥0), `remaining` (nullable ⇒ unlimited, ≥0), `resets_at`, `updated_at`. "How much budget/quota is left right now?" — feeds the quota-exhausted eligibility filter. Note: `window` is a reserved SQL keyword, so it is always double-quoted (`"window"`) in DDL/DML.
 
 ### 39.3 `adapter_runtime_metrics` — historical (per adapter)
 `adapter_id` (PK → `provider_adapters` ON DELETE CASCADE), `avg_latency_ms`, `p95_latency_ms`, `success_rate` (numeric[0,1]), `current_queue_depth` (≥0), `sample_window`, `updated_at`. Rolling latency/success trends that adjust the `speed` score component. **Kept independent** from 39.1/39.2 (different cadence/retention/consumers — never merged).
