@@ -14,12 +14,15 @@ provider pre-flight):
     8. validate_schema           (live structural checks)
     9. compare_erd               (generated vs design ERD)
    10. coverage                  (threshold enforcement)
+   11. seed_roundtrip            (α8.5d — provider-catalogue seed idempotency)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
 rather than renumbering 1-10 — precisely so the destructive-stage restoration
 guard, which keys on "stage 6 = downgrade" and the live-DB range 5-9, stays
-correct.
+correct. Stage 11 (α8.5d seed round-trip) is likewise appended at the end — it
+needs the schema at head (post stage-7) and seeds only the eight catalogue
+tables, so it can never disturb the destructive-migration guard.
 
 Stages 1–4 and 10 are cheap and run on every PR. Stages 5–9 require a
 live PostgreSQL with pgvector reachable via ``DATABASE_URL`` (in CI this
@@ -483,6 +486,12 @@ def _stages() -> list[Stage]:
             title="coverage report",
             func=_run_coverage_report,
         ),
+        Stage(
+            number=11,
+            title="provider catalogue seed round-trip",
+            cmd=[py, "scripts/verify_seed_roundtrip.py"],
+            requires_db=True,
+        ),
     ]
 
 
@@ -549,7 +558,7 @@ def main(argv: list[str]) -> int:
     # Precedence: --ephemeral-db  >  VALIDATION_DATABASE_URL  >  DATABASE_URL /
     # backend/.env.validation. The first two never touch the primary
     # DATABASE_URL, so destructive verification is isolated from any shared DB.
-    live_selected = any(s in selected for s in range(5, 10))
+    live_selected = any(s.requires_db and s.number in selected for s in stages)
     ephemeral_requested = args.ephemeral_db or os.environ.get(
         "CI_GATE_EPHEMERAL_DB", ""
     ).strip().lower() in {"1", "true", "yes"}

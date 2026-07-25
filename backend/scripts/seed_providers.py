@@ -34,6 +34,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -395,15 +396,31 @@ class TablePlan:
 class SeedPlan:
     digest: str
     changed: bool
+    revision: int = 0
     tables: list[TablePlan] = field(default_factory=list)
 
     @property
     def writes(self) -> int:
         return sum(t.writes for t in self.tables)
 
+    def table(self, name: str) -> TablePlan:
+        return next(t for t in self.tables if t.name == name)
+
+
+def _canon(value: Any) -> Any:
+    """Canonicalise for comparison: Decimal→float so DB round-trips (Numeric) match
+    the manifest's floats, and recurse into JSONB dicts/lists."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_canon(v) for v in value]
+    return value
+
 
 def _norm(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, default=str)
+    return json.dumps(_canon(value), sort_keys=True, default=str)
 
 
 def _differs(desired: dict[str, Any], current: dict[str, Any]) -> bool:
@@ -562,6 +579,32 @@ def _catalogue_metadata() -> Any:
     return md
 
 
+def plan_and_apply(
+    conn: Any,
+    md: Any,
+    desired: dict[str, Rows],
+    digest: str,
+    *,
+    force: bool,
+    dry_run: bool,
+    now: datetime | None = None,
+) -> SeedPlan:
+    """Compute the seed plan against the live DB and (unless dry-run) apply it.
+
+    The single DB code path shared by the CLI and the Phase 3 round-trip harness.
+    Honours the digest short-circuit (unchanged ⇒ empty plan, zero writes) unless
+    ``force`` is set. Must be called inside an open transaction (``engine.begin``).
+    """
+    stored_digest, revision = read_stored_digest(conn, md)
+    if stored_digest == digest and not force:
+        return SeedPlan(digest=digest, changed=False, revision=revision)
+    plan = build_plan(desired, snapshot(conn, md), digest, stored_digest)
+    plan.revision = revision + 1
+    if not dry_run:
+        apply_plan(conn, md, plan, plan.revision, now or datetime.now(UTC))
+    return plan
+
+
 def snapshot(conn: Any, md: Any) -> dict[str, Rows]:
     import sqlalchemy as sa
 
@@ -696,18 +739,16 @@ def seed(providers_dir: Path, database_url: str | None, *, dry_run: bool, force:
     engine = sa.create_engine(database_url, future=True)
     try:
         with engine.begin() as conn:
-            stored_digest, revision = read_stored_digest(conn, md)
-            if stored_digest == digest and not force:
-                print(f"[ OK ] catalogue already at digest {digest[:12]}… — no changes")
-                return 0
-            plan = build_plan(desired, snapshot(conn, md), digest, stored_digest)
-            _print_plan(plan)
-            if dry_run:
-                print(f"[dry-run] {plan.writes} write(s) would be applied; no changes made")
-                return 0
-            apply_plan(conn, md, plan, revision + 1, datetime.now(UTC))
+            plan = plan_and_apply(conn, md, desired, digest, force=force, dry_run=dry_run)
+        if not plan.changed and not force:
+            print(f"[ OK ] catalogue already at digest {digest[:12]}… — no changes")
+            return 0
+        _print_plan(plan)
+        if dry_run:
+            print(f"[dry-run] {plan.writes} write(s) would be applied; no changes made")
+            return 0
         print(
-            f"[ OK ] seeded catalogue — digest {digest[:12]}…, revision {revision + 1}, "
+            f"[ OK ] seeded catalogue — digest {digest[:12]}…, revision {plan.revision}, "
             f"{plan.writes} write(s), catalogue_version {CATALOGUE_VERSION}"
         )
         return 0

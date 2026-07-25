@@ -137,6 +137,21 @@ def test_removed_provider_is_disabled_not_deleted() -> None:
     assert ("comfyui.flux_schnell", "pollinations.image") in fallbacks.deletes
 
 
+def test_numeric_cost_from_db_does_not_count_as_change() -> None:
+    # DB Numeric columns round-trip as Decimal; the manifest carries floats.
+    # The diff must treat Decimal('0.02000000') == 0.02 (regression guard: the
+    # live round-trip once reported spurious adapter updates for this reason).
+    from decimal import Decimal
+
+    desired = _desired()
+    current = _snapshot(desired)
+    for row in current["provider_adapters"].values():
+        if row.get("cost_amount") is not None:
+            row["cost_amount"] = Decimal(str(row["cost_amount"])).quantize(Decimal("0.00000001"))
+    plan = sp.build_plan(desired, current, digest="same", stored_digest="same")
+    assert plan.writes == 0
+
+
 def test_already_disabled_row_is_not_rewritten() -> None:
     desired = _desired()
     current = _snapshot(desired)
