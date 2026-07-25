@@ -36,6 +36,8 @@ from app.application.interfaces.clock import IClock
 from app.application.interfaces.download_delivery import IDownloadDelivery
 from app.application.interfaces.exporter import IExporter
 from app.application.interfaces.gif_previewer import IGifPreviewer
+from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
+from app.application.interfaces.image_generator import IImageGenerator
 from app.application.interfaces.media_downloader import IMediaDownloader
 from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.preview_clipper import IPreviewClipper
@@ -47,9 +49,11 @@ from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.resolution_ledger import IResolutionLedger
 from app.application.interfaces.runtime_state_reader import IRuntimeStateReader
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
+from app.application.interfaces.slideshow_renderer import ISlideshowRenderer
 from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.thumbnailer import IThumbnailer
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.application.interfaces.video_probe import IVideoProbe
 from app.application.interfaces.waveform_renderer import IWaveformRenderer
 from app.application.interfaces.webhook_verifier import IWebhookVerifier
 from app.application.use_cases.auth.login_user import LoginUser
@@ -61,6 +65,8 @@ from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.export_worker import ExportWorker
 from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.export.process_export_job import ProcessExportJob
+from app.application.use_cases.generation.capability_resolver import ResolverCapabilityResolver
+from app.application.use_cases.generation.generate_video import GenerateVideo
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.enrich_generated_media import EnrichGeneratedMedia
 from app.application.use_cases.media.enrichers import (
@@ -165,6 +171,8 @@ from app.infrastructure.delivery import (
     S3RedirectDelivery,
 )
 from app.infrastructure.export import FfmpegExporter
+from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
+from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
 from app.infrastructure.render import (
@@ -174,6 +182,8 @@ from app.infrastructure.render import (
     FfmpegThumbnailer,
     FfmpegWaveformRenderer,
 )
+from app.infrastructure.render.ffmpeg_slideshow_renderer import FfmpegSlideshowRenderer
+from app.infrastructure.render.ffprobe_video_probe import FfprobeVideoProbe
 from app.infrastructure.repositories.catalogue_reader import CatalogueReader
 from app.infrastructure.repositories.resolution_ledger_writer import ResolutionLedgerWriter
 from app.infrastructure.repositories.runtime_state_reader import RuntimeStateReader
@@ -230,6 +240,15 @@ _preview_clipper: IPreviewClipper | None = None
 _gif_previewer: IGifPreviewer | None = None
 _waveform_renderer: IWaveformRenderer | None = None
 _media_download_client: httpx.AsyncClient | None = None
+# α8.6 Increment 3: generation-runtime adapters. The Pollinations image generator
+# owns a dedicated httpx client (closed in shutdown()); the Pillow extractor,
+# slideshow renderer and ffprobe probe are stateless. All built lazily so the
+# common test path opens no HTTP client and shells out to no binary at import.
+_image_generator: IImageGenerator | None = None
+_image_client: httpx.AsyncClient | None = None
+_feature_extractor: IImageFeatureExtractor | None = None
+_slideshow_renderer: ISlideshowRenderer | None = None
+_video_probe: IVideoProbe | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -361,6 +380,7 @@ async def shutdown() -> None:
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
+    global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -371,6 +391,8 @@ async def shutdown() -> None:
         await _fal_webhook_client.aclose()
     if _media_download_client is not None:
         await _media_download_client.aclose()
+    if _image_client is not None:
+        await _image_client.aclose()
     _engine = None
     _session_factory = None
     _provider_registry = None
@@ -391,6 +413,11 @@ async def shutdown() -> None:
     _storage_resolver = None
     _cloud_bundle = None
     _cloud_bundle_built = False
+    _image_generator = None
+    _image_client = None
+    _feature_extractor = None
+    _slideshow_renderer = None
+    _video_probe = None
     _settings = None
 
 
@@ -403,6 +430,7 @@ def reset() -> None:
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
+    global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
     _settings = None
     _engine = None
     _session_factory = None
@@ -433,6 +461,11 @@ def reset() -> None:
     _storage_resolver = None
     _cloud_bundle = None
     _cloud_bundle_built = False
+    _image_generator = None
+    _image_client = None
+    _feature_extractor = None
+    _slideshow_renderer = None
+    _video_probe = None
 
 
 def _require_init() -> None:
@@ -1213,6 +1246,87 @@ def get_process_render_job_use_case() -> ProcessRenderJob:
         renderer=_get_renderer(),
         workspace_dir=settings.render_workspace_dir,
         lease=timedelta(seconds=settings.render_timeout_seconds),
+    )
+
+
+# ---------------------------------------------------------------------
+# Generation-runtime adapters + use case (Slice α8.6 — Increment 3)
+# ---------------------------------------------------------------------
+# The image provider + the slideshow renderer + the Pillow extractor + the ffprobe
+# probe, composed with the capability resolver into ``GenerateVideo``. All adapters
+# are configuration-blind (W8.1.1); the resolver + readers are session-scoped, so
+# the use-case factory takes an ``AsyncSession``. No provider-specific branching
+# reaches the use case (ADR-0045) — it asks for a capability and executes the best
+# eligible candidate.
+
+
+def _get_image_generator() -> IImageGenerator:
+    """Lazily build + memoise the Pollinations image generator + its HTTP client."""
+    global _image_generator, _image_client
+    _require_init()
+    if _image_generator is None:
+        settings = _get_settings()
+        _image_client = httpx.AsyncClient(
+            base_url=settings.pollinations_base_url,
+            timeout=settings.pollinations_timeout_seconds,
+            follow_redirects=True,
+        )
+        _image_generator = PollinationsImageGenerator(
+            client=_image_client, model=settings.pollinations_model
+        )
+    return _image_generator
+
+
+def _get_feature_extractor() -> IImageFeatureExtractor:
+    """Lazily build + memoise the Pillow feature extractor (stateless)."""
+    global _feature_extractor
+    _require_init()
+    if _feature_extractor is None:
+        _feature_extractor = PillowFeatureExtractor()
+    return _feature_extractor
+
+
+def _get_slideshow_renderer() -> ISlideshowRenderer:
+    """Lazily build + memoise the ffmpeg slideshow renderer (configuration-blind)."""
+    global _slideshow_renderer
+    _require_init()
+    if _slideshow_renderer is None:
+        settings = _get_settings()
+        _slideshow_renderer = FfmpegSlideshowRenderer(
+            ffmpeg_path=settings.render_ffmpeg_path,
+            timeout_seconds=settings.render_timeout_seconds,
+        )
+    return _slideshow_renderer
+
+
+def _get_video_probe() -> IVideoProbe:
+    """Lazily build + memoise the ffprobe video probe (configuration-blind)."""
+    global _video_probe
+    _require_init()
+    if _video_probe is None:
+        settings = _get_settings()
+        _video_probe = FfprobeVideoProbe(ffprobe_path=settings.render_ffprobe_path)
+    return _video_probe
+
+
+def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
+    """Factory: the α8.6 end-to-end generation use case over the supplied session.
+
+    The capability resolver reads the catalogue + runtime snapshots through the
+    session; the image generator / extractor / renderer / probe are process-wide
+    (memoised). Frames + the final video land in local object storage for now
+    (real asset-storage backends + a resolution ledger arrive in Increment 4). The
+    Model Cache is not wired yet (no local adapter until Increment 6), so
+    ``model_manager`` is omitted.
+    """
+    resolver = ResolverCapabilityResolver(CatalogueReader(session), RuntimeStateReader(session))
+    return GenerateVideo(
+        resolver=resolver,
+        image_generator=_get_image_generator(),
+        feature_extractor=_get_feature_extractor(),
+        renderer=_get_slideshow_renderer(),
+        video_probe=_get_video_probe(),
+        storage=_get_object_storage(),
     )
 
 

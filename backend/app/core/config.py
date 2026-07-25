@@ -101,6 +101,28 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # ---- Generation · Pollinations image (Slice α8.6, Increment 3) -------
+    # The free image provider for the generation runtime's ``IImageGenerator``.
+    # No API key (Pollinations' simple GET endpoint is keyless); the container
+    # injects base_url + timeout into the adapter's shared httpx client
+    # (W8.1.1 — the adapter is configuration-blind). Network egress only happens
+    # when the runtime actually resolves to this adapter.
+    pollinations_base_url: str = Field(
+        default="https://image.pollinations.ai",
+        description="Base URL for the Pollinations image endpoint.",
+        min_length=1,
+    )
+    pollinations_timeout_seconds: float = Field(
+        default=120.0,
+        description="Per-request timeout for a Pollinations image generation (one attempt).",
+        gt=0,
+    )
+    pollinations_model: str = Field(
+        default="flux",
+        description="Default Pollinations model used for image generation.",
+        min_length=1,
+    )
+
     # ---- Completion engine · async job completion (Slice α8.3) ----------
     # The α8.3 completion engine resolves in-flight provider jobs for ``paused``
     # runs and resumes the terminal ones. Library-only: a test loop / trigger
