@@ -882,6 +882,166 @@ erDiagram
 
 ---
 
+## Cluster 11 — Provider Capability Catalogue & Operational State (α8.5d / α8.5e)
+
+> **Design-time metadata + runtime operational state, intentionally ORM-less.** These
+> tables are created by migrations `0010_provider_catalogue` (catalogue) and
+> `0011_provider_operational_state` (operational). They are **not** SQLAlchemy models:
+> the catalogue is seeded from `backend/providers/*.yaml` by `scripts/seed_providers.py`
+> and read at runtime via raw-SQL repositories (`catalogue_reader`, `runtime_state_reader`).
+> Per **ADR-0045** and invariant **W8.5d.10**, catalogue tables hold only static/seeded
+> metadata while operational state (health, quota, metrics, local runtime, resolution
+> ledger) lives in separate runtime-owned tables. `validate_schema.py` lists them as
+> ORM-less extras rather than treating them as drift.
+
+```mermaid
+erDiagram
+    capabilities        ||--o{ capability_dependencies : capability_id
+    capabilities        ||--o{ capability_dependencies : depends_on_id
+    capabilities        ||--o{ provider_adapters : capability_id
+    providers           ||--o{ provider_adapters : provider_id
+    provider_adapters   ||--o{ adapter_fallbacks : adapter_id
+    provider_adapters   ||--o{ adapter_fallbacks : fallback_adapter_id
+    providers           ||--o{ provider_health : provider_id
+    providers           ||--o{ provider_quota_state : provider_id
+    provider_adapters   ||--o{ adapter_runtime_metrics : adapter_id
+    device_profiles     ||--o{ local_runtime_state : device_profile_id
+
+    capabilities {
+        text id PK
+        plugin_kind kind
+        text_array inputs
+        text_array outputs
+        text_array requires
+        text_array optional
+    }
+    capability_dependencies {
+        text capability_id FK
+        text depends_on_id FK
+        capability_dep_kind kind
+    }
+    providers {
+        text id PK
+        text name
+        boolean commercial
+        provider_auth authentication
+        boolean requires_login
+        provider_pricing pricing
+        int quota_daily "nullable"
+        int quota_monthly "nullable"
+        smallint score_quality
+        smallint score_cost
+        smallint score_speed
+        smallint score_reliability
+        boolean enabled
+        jsonb extra
+    }
+    provider_adapters {
+        text id PK
+        text provider_id FK
+        text capability_id FK
+        adapter_status status
+        adapter_execution_mode execution_mode "nullable"
+        boolean implemented
+        boolean enabled
+        text import_path "nullable"
+        cost_unit cost_unit "nullable"
+        numeric cost_amount "nullable"
+        numeric estimated_generation_cost "nullable"
+        numeric estimated_gpu_minutes "nullable"
+        jsonb supports
+        jsonb runtime
+        jsonb features
+        jsonb outputs
+    }
+    adapter_fallbacks {
+        text adapter_id FK
+        text fallback_adapter_id FK
+        text reason "nullable"
+        int ordinal
+    }
+    routing_policies {
+        text scope PK
+        routing_strategy strategy
+        fallback_mode fallback
+        selection_mode selection
+    }
+    device_profiles {
+        text id PK
+        int ram_gb "nullable"
+        text gpu "nullable"
+        gpu_backend backend
+        boolean unified_memory
+        generation_mode preferred_mode
+        jsonb extra
+    }
+    provider_registry_meta {
+        boolean id PK "singleton"
+        text manifest_digest
+        int manifest_revision
+        text catalogue_version
+        text generator_version
+        timestamptz generated_at
+        timestamptz seeded_at
+    }
+    provider_health {
+        text provider_id PK
+        numeric health_score
+        timestamptz last_success_at "nullable"
+        timestamptz last_failure_at "nullable"
+        numeric error_rate
+        int rate_limit_hits
+        timestamptz updated_at
+    }
+    provider_quota_state {
+        text provider_id FK
+        quota_window window
+        int used
+        int remaining "nullable"
+        timestamptz resets_at "nullable"
+        timestamptz updated_at
+    }
+    adapter_runtime_metrics {
+        text adapter_id PK
+        int avg_latency_ms "nullable"
+        int p95_latency_ms "nullable"
+        numeric success_rate "nullable"
+        int current_queue_depth
+        text sample_window "nullable"
+        timestamptz updated_at
+    }
+    local_runtime_state {
+        text device_profile_id PK
+        boolean gpu_available
+        text_array loaded_models
+        numeric free_vram_gb "nullable"
+        timestamptz updated_at
+    }
+    generation_resolution_ledger {
+        uuid id PK
+        uuid generation_id
+        text capability
+        text catalogue_version
+        text manifest_digest
+        text resolver_version
+        routing_strategy routing_strategy
+        jsonb candidate_list
+        text chosen_adapter "nullable"
+        timestamptz start_time "nullable"
+        timestamptz end_time "nullable"
+        execution_result execution_result "nullable"
+        timestamptz created_at
+    }
+```
+
+> **Reconciliation note (α8.5e).** Catalogue provenance in
+> `generation_resolution_ledger` (`catalogue_version`, `manifest_digest`,
+> `chosen_adapter`, …) is stored as historical **values**, not foreign keys, so a
+> recorded resolution stays reproducible even after the catalogue is re-seeded.
+> `generation_id` will gain a real FK when the Generation Runtime lands (α8.5x).
+
+---
+
 ## Cross-Cluster Foreign-Key Summary
 
 These FKs span clusters and are easy to miss; documented here for review:

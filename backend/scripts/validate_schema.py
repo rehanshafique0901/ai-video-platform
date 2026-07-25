@@ -140,6 +140,34 @@ def check_extensions(engine: Engine) -> CheckResult:
 
 ALLOWED_EXTRA_TABLES = {"alembic_version"}
 
+# Provider capability catalogue (α8.5d, migration 0010) and provider operational
+# state (α8.5e, migration 0011) are intentionally NOT ORM-mapped. They are seeded
+# from YAML by ``scripts/seed_providers.py`` and read at runtime through raw-SQL
+# repositories (catalogue_reader / runtime_state_reader). Per ADR-0045 and W8.5d.10
+# these tables live outside the SQLAlchemy models by design, so the ORM-vs-DB table
+# check must treat them as known Alembic-managed extras rather than schema drift.
+ORMLESS_CATALOGUE_TABLES = {
+    # migration 0010 — provider capability catalogue (design-time metadata)
+    "capabilities",
+    "capability_dependencies",
+    "providers",
+    "provider_adapters",
+    "adapter_fallbacks",
+    "routing_policies",
+    "device_profiles",
+    "provider_registry_meta",
+    # migration 0011 — provider operational state (runtime-owned)
+    "provider_health",
+    "provider_quota_state",
+    "adapter_runtime_metrics",
+    "local_runtime_state",
+    "generation_resolution_ledger",
+}
+
+# Every table the ORM-vs-DB drift check should ignore: present in the database by
+# design but deliberately never declared as a SQLAlchemy model.
+IGNORED_EXTRA_TABLES = ALLOWED_EXTRA_TABLES | ORMLESS_CATALOGUE_TABLES
+
 # ---------------------------------------------------------------------------
 # Bulk pg_catalog snapshot
 #
@@ -213,7 +241,7 @@ def load_snapshot(engine: Engine) -> CatalogSnapshot:
         all_tables: set[str] = {r[0] for r in rows}
         partition_children = {r[0] for r in rows if r[2]}
         partitioned_parents = {r[0] for r in rows if r[1] == "p"}
-        base_tables = all_tables - partition_children - ALLOWED_EXTRA_TABLES
+        base_tables = all_tables - partition_children - IGNORED_EXTRA_TABLES
 
         children_by_parent = {
             r[0]: r[1]
@@ -327,7 +355,7 @@ def check_tables(snap: CatalogSnapshot) -> CheckResult:
     if not missing and not extra:
         details.append(
             f"All {len(expected)} ORM-declared tables present "
-            f"(Alembic-managed extras ignored: {sorted(ALLOWED_EXTRA_TABLES)})."
+            f"(Alembic-managed / ORM-less extras ignored: {sorted(IGNORED_EXTRA_TABLES)})."
         )
     return CheckResult(
         name="Tables match ORM metadata",
