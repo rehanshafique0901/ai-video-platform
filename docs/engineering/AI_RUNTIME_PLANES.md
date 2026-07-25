@@ -9,6 +9,11 @@ invariants**. Understanding *why* the boundaries exist matters as much as *how* 
 is organised: each plane changes at a different cadence and must not absorb another's
 responsibilities.
 
+> For the end-to-end request flow — *how one prompt becomes one exported video*, with
+> each stage linked to its governing ADR/contract — see the companion
+> [`SYSTEM_MAP.md`](./SYSTEM_MAP.md). This document explains the planes; that one maps
+> the pipeline through them.
+
 ```
         KNOWLEDGE                 DECISION                    EXECUTION
    (what CAN exist)          (what SHOULD happen)         (what DID happen)
