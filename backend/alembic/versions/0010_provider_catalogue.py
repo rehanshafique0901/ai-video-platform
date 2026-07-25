@@ -259,6 +259,7 @@ def upgrade() -> None:
             id                 boolean PRIMARY KEY DEFAULT true,
             manifest_digest    text NOT NULL,
             manifest_revision  integer NOT NULL DEFAULT 1,
+            catalogue_version  text NOT NULL,
             generator_version  text NOT NULL,
             generated_at       timestamptz NOT NULL,
             seeded_at          timestamptz NOT NULL DEFAULT now(),
