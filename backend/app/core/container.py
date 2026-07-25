@@ -44,6 +44,7 @@ from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
+from app.application.interfaces.resolution_ledger import IResolutionLedger
 from app.application.interfaces.runtime_state_reader import IRuntimeStateReader
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.storage_resolver import IStorageResolver
@@ -109,6 +110,7 @@ from app.application.use_cases.render.get_render_job import GetRenderJob
 from app.application.use_cases.render.list_render_jobs import ListRenderJobs
 from app.application.use_cases.render.process_render_job import ProcessRenderJob
 from app.application.use_cases.render.render_worker import RenderWorker
+from app.application.use_cases.resolver.resolver_service import ResolverService
 from app.application.use_cases.scenes.create_scene import CreateScene
 from app.application.use_cases.scenes.delete_scene import DeleteScene
 from app.application.use_cases.scenes.get_scene import GetScene
@@ -173,6 +175,7 @@ from app.infrastructure.render import (
     FfmpegWaveformRenderer,
 )
 from app.infrastructure.repositories.catalogue_reader import CatalogueReader
+from app.infrastructure.repositories.resolution_ledger_writer import ResolutionLedgerWriter
 from app.infrastructure.repositories.runtime_state_reader import RuntimeStateReader
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
@@ -570,6 +573,16 @@ def get_catalogue_reader(session: AsyncSession) -> ICatalogueReader:
 def get_runtime_state_reader(session: AsyncSession) -> IRuntimeStateReader:
     """Factory: a read-only ``RuntimeStateReader`` over the supplied session (α8.5e.4)."""
     return RuntimeStateReader(session)
+
+
+def get_resolver_service(session: AsyncSession) -> ResolverService:
+    """Factory: a ``ResolverService`` (catalogue + runtime readers) over the session (α8.5e.5)."""
+    return ResolverService(CatalogueReader(session), RuntimeStateReader(session))
+
+
+def get_resolution_ledger(session: AsyncSession) -> IResolutionLedger:
+    """Factory: the resolution-ledger writer over the supplied session (α8.5e.5)."""
+    return ResolutionLedgerWriter(session)
 
 
 # ---------------------------------------------------------------------
