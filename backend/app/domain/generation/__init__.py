@@ -57,9 +57,12 @@ from app.domain.generation.shot_intent import (
     TemplateBeat,
     Transition,
     adjacent_ok,
+    assign_shot_ids,
+    derive_shot_seed,
     differs_primary,
     differs_secondary,
     select_arc,
+    shot_id_for,
 )
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
 from app.domain.generation.timeline_verification import (
@@ -110,9 +113,12 @@ __all__ = [
     "TemplateBeat",
     "Transition",
     "adjacent_ok",
+    "assign_shot_ids",
+    "derive_shot_seed",
     "differs_primary",
     "differs_secondary",
     "select_arc",
+    "shot_id_for",
     # storyboard
     "ShotPrompt",
     "build_storyboard",

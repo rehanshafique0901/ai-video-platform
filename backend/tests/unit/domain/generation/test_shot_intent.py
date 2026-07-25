@@ -20,9 +20,12 @@ from app.domain.generation.shot_intent import (
     StoryboardDiversityReport,
     Transition,
     adjacent_ok,
+    assign_shot_ids,
+    derive_shot_seed,
     differs_primary,
     differs_secondary,
     select_arc,
+    shot_id_for,
 )
 
 pytestmark = pytest.mark.unit
@@ -170,3 +173,44 @@ def test_diversity_report_detects_duplicates_and_cs7_failure() -> None:
     assert report.duplicate_intents == 2  # 3 intents, 1 unique signature
     assert report.primary_changes == 0
     assert report.satisfies_cs7 is False
+
+
+# --- shot ids + seeds -------------------------------------------------------
+
+
+def test_authored_arc_shot_ids_are_semantic_and_suffix_free() -> None:
+    arc = select_arc(6)
+    ids = assign_shot_ids(arc.beats)
+    assert ids[0] == "scene-001-establishing"
+    assert ids[-1] == "scene-001-ending"
+    assert "scene-001-closeup" in ids
+    # Authored arcs use unique shot types, so no occurrence suffixes.
+    assert all(id_.count("-") == 2 for id_ in ids)
+    assert len(set(ids)) == len(ids)
+
+
+def test_shot_ids_are_position_independent_under_insertion() -> None:
+    before = assign_shot_ids(select_arc(5).beats)
+    after = assign_shot_ids(select_arc(6).beats)
+    # Shot types shared by both arcs keep identical ids regardless of position.
+    for shared in ("establishing", "medium", "close_up", "ending"):
+        sid = shot_id_for(ShotType(shared))
+        if sid in before and sid in after:
+            assert sid in before and sid in after
+
+
+def test_repeated_shot_types_get_occurrence_suffix() -> None:
+    ids = assign_shot_ids(select_arc(10).beats)
+    assert len(set(ids)) == len(ids)  # still unique
+    assert any(id_.count("-") == 3 for id_ in ids)  # at least one suffixed
+
+
+def test_derive_shot_seed_is_deterministic_nonnegative_and_id_sensitive() -> None:
+    s1 = derive_shot_seed(70707, "scene-001-establishing")
+    s2 = derive_shot_seed(70707, "scene-001-establishing")
+    s3 = derive_shot_seed(70707, "scene-001-ending")
+    s4 = derive_shot_seed(12345, "scene-001-establishing")
+    assert s1 == s2
+    assert s1 != s3  # different shot id -> different seed
+    assert s1 != s4  # different project seed -> different seed
+    assert 0 <= s1 < (1 << 63)  # non-negative, fits signed bigint

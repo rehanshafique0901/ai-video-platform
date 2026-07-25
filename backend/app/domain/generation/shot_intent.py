@@ -17,9 +17,14 @@ Nothing in this module performs I/O, chooses providers, or emits prompt text.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class ShotType(StrEnum):
@@ -367,6 +372,48 @@ def select_arc(shot_count: int, *, kind: str = "cinematic") -> StoryArcTemplate:
     if shot_count < 1:
         raise ValueError("shot_count must be >= 1")
     return _CINEMATIC_ARCS.get(shot_count) or _synthesize_arc(shot_count)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic, position-independent shot ids + seeds (CS-4 / Q4)
+# ---------------------------------------------------------------------------
+
+_SEED_BITS = 63  # non-negative and always fits a signed 64-bit (bigint) column
+
+
+def shot_id_for(shot_type: ShotType, *, scene: int = 1, occurrence: int = 1) -> str:
+    """A stable, semantic shot id — e.g. ``scene-001-establishing``.
+
+    The id is derived from *meaning* (scene + shot type), never array position, so
+    it stays stable when another shot is inserted or the arc is reshaped. A repeated
+    shot type within one arc gets a 1-based ``occurrence`` suffix; authored arcs use
+    unique shot types, so their ids carry no suffix.
+    """
+    slug = shot_type.value.replace("_", "")
+    base = f"scene-{scene:03d}-{slug}"
+    return base if occurrence == 1 else f"{base}-{occurrence}"
+
+
+def assign_shot_ids(beats: Sequence[TemplateBeat], *, scene: int = 1) -> tuple[str, ...]:
+    """Assign a stable shot id to each beat, disambiguating repeated shot types."""
+    counts: dict[ShotType, int] = {}
+    ids: list[str] = []
+    for beat in beats:
+        counts[beat.shot_type] = counts.get(beat.shot_type, 0) + 1
+        ids.append(shot_id_for(beat.shot_type, scene=scene, occurrence=counts[beat.shot_type]))
+    return tuple(ids)
+
+
+def derive_shot_seed(project_seed: int, shot_id: str) -> int:
+    """``shot_seed = H(project_seed, shot_id)`` — deterministic per-shot seed (CS-4).
+
+    Uses blake2b over ``"{project_seed}|{shot_id}"`` and keeps the low 63 bits, so
+    the value is reproducible, non-negative, and fits a signed 64-bit column. Hashing
+    (not ``project_seed + index``) keeps a shot's seed stable under reordering because
+    the seed follows the *identity* of the shot, not its position.
+    """
+    digest = hashlib.blake2b(f"{project_seed}|{shot_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & ((1 << _SEED_BITS) - 1)
 
 
 # ---------------------------------------------------------------------------

@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
-from app.domain.generation.identity import Character, GlobalStyle, IdentityProfile
+from app.domain.generation.identity import Character, GlobalStyle, IdentityProfile, Location
 from app.domain.generation.planner import (
     MAX_DURATION_SECONDS,
     MIN_DURATION_SECONDS,
     PlanningError,
     PlanRequest,
     plan_from_prompt,
+)
+from app.domain.generation.shot_intent import (
+    ShotType,
+    StoryboardDiversityReport,
+    adjacent_ok,
 )
 
 pytestmark = pytest.mark.unit
@@ -21,6 +28,7 @@ def _identity() -> IdentityProfile:
         seed=7,
         global_style=GlobalStyle.ANIME,
         characters=(Character(id="a", name="Mia"),),
+        locations=(Location(id="park", name="a sunny park"),),
     )
 
 
@@ -107,3 +115,71 @@ def test_empty_prompt_raises() -> None:
 def test_non_positive_per_shot_raises() -> None:
     with pytest.raises(PlanningError):
         plan_from_prompt(PlanRequest(prompt="hi", identity=_identity(), per_shot_seconds=0))
+
+
+# --- Planner V2 (α8.7): cinematic intent, ids, seeds ------------------------
+
+
+def test_v2_attaches_cinematic_intent_arc_to_every_shot() -> None:
+    plan = plan_from_prompt(
+        PlanRequest(
+            prompt="A fox explores a forest.",
+            identity=_identity(),
+            target_duration_seconds=18.0,
+            per_shot_seconds=3.0,
+        )
+    )
+    assert plan.shot_count == 6
+    assert all(shot.intent is not None for shot in plan.shots)
+    # A deliberate arc: establishing first, ending last, never a repeated scene.
+    assert plan.shots[0].intent.shot_type is ShotType.ESTABLISHING  # type: ignore[union-attr]
+    assert plan.shots[-1].intent.shot_type is ShotType.ENDING  # type: ignore[union-attr]
+
+
+def test_v2_adjacent_shots_satisfy_cs7() -> None:
+    plan = plan_from_prompt(PlanRequest(prompt="A fox in a forest.", identity=_identity()))
+    intents = tuple(s.intent for s in plan.shots)
+    for a, b in pairwise(intents):
+        assert a is not None and b is not None
+        assert adjacent_ok(a, b)
+
+
+def test_v2_diversity_report_is_healthy() -> None:
+    plan = plan_from_prompt(PlanRequest(prompt="A fox in a forest.", identity=_identity()))
+    intents = tuple(s.intent for s in plan.shots if s.intent is not None)
+    report = StoryboardDiversityReport.from_intents(intents)
+    assert report.duplicate_intents == 0
+    assert report.unique_shot_types >= 3
+    assert report.satisfies_cs7 is True
+
+
+def test_v2_shot_ids_are_semantic_and_seeds_are_derived() -> None:
+    identity = _identity()
+    plan = plan_from_prompt(PlanRequest(prompt="A fox in a forest.", identity=identity))
+    assert plan.shots[0].shot_id == "scene-001-establishing"
+    assert plan.shots[-1].shot_id == "scene-001-ending"
+    # Per-shot seeds are distinct (no more single-seed duplicate scenes) and derived.
+    seeds = [s.seed for s in plan.shots]
+    assert all(s is not None for s in seeds)
+    assert len(set(seeds)) == len(seeds)
+    assert identity.seed not in seeds  # not just reusing the project seed
+
+
+def test_v2_focus_resolves_to_identity_ids() -> None:
+    plan = plan_from_prompt(PlanRequest(prompt="A fox in a forest.", identity=_identity()))
+    foci = {s.intent.subject_focus for s in plan.shots if s.intent is not None}
+    # Establishing/ending focus the environment; middle beats focus the subject.
+    assert "park" in foci
+    assert "a" in foci
+
+
+def test_v2_is_fully_deterministic() -> None:
+    req = PlanRequest(prompt="A fox in a forest.", identity=_identity())
+    assert plan_from_prompt(req) == plan_from_prompt(req)
+
+
+def test_v2_bookend_shots_focus_the_environment() -> None:
+    plan = plan_from_prompt(PlanRequest(prompt="A fox in a forest.", identity=_identity()))
+    # Bookend beats declared ENVIRONMENT focus in the authored arc.
+    assert plan.shots[0].intent.subject_focus == "park"  # type: ignore[union-attr]
+    assert plan.shots[-1].intent.subject_focus == "park"  # type: ignore[union-attr]
