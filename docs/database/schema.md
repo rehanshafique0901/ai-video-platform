@@ -60,6 +60,8 @@ Defined once, used widely:
 | `gpu_backend` *(α8.5d)* | `metal, cuda, rocm, cpu` |
 | `generation_mode` *(α8.5d)* | `quick, balanced, quality, ultra` |
 | `capability_dep_kind` *(α8.5d)* | `requires, optional` |
+| `quota_window` *(α8.5e)* | `daily, monthly` |
+| `execution_result` *(α8.5e)* | `success, failure, fallback, none` |
 
 > α8.5d catalogue enums mirror the Pydantic StrEnums in `backend/scripts/provider_manifest.py` one-to-one (created by migration `0010`; see §38). `kind` on catalogue tables reuses the existing `plugin_kind` enum.
 
@@ -1486,3 +1488,27 @@ Typed: `id` PK (`provider.suffix`), `provider_id` FK→providers CASCADE, `capab
 
 ### 38.8 `provider_registry_meta` — singleton provenance
 Single row (`id boolean PK DEFAULT true`, CHECK `id IS TRUE`): `manifest_digest` (SHA-256 of the canonicalised manifests), `manifest_revision` (monotonic seed-change counter, CHECK `>0`), `catalogue_version` (declared human date-version, e.g. `2026.07`), `generator_version` (seeder version), `generated_at`, `seeded_at`. Powers idempotency (unchanged digest ⇒ no-op, W8.5d.2) and answers "which catalogue version / manifest digest populated this DB, and are two environments in sync?". The α8.5e resolver logs `catalogue_version` + `manifest_digest` per generation request for provenance.
+
+---
+
+## 39. Provider Operational State (α8.5e)
+
+The **runtime-owned** counterpart to the §38 catalogue (migration `0011`). Written by
+the Execution Runtime / Health Worker, read by the resolver; **never** catalogue
+metadata (W8.5d.10). FKs point *into* the catalogue (`providers`, `provider_adapters`,
+`device_profiles`), never the reverse. Grounded in `RESOLVER_RUNTIME_CONTRACT.md` §7.
+
+### 39.1 `provider_health` — observational (one row per provider)
+`provider_id` (PK → `providers` ON DELETE CASCADE), `health_score` (numeric[0,1], DEFAULT 1.0), `last_success_at`, `last_failure_at`, `error_rate` (numeric[0,1]), `rate_limit_hits` (≥0), `updated_at`. "Is the provider up / behaving?" The resolver reads it as the `health_multiplier` and for the health hard-filter; it never writes it (W8.5e.3).
+
+### 39.2 `provider_quota_state` — operational (per provider + window)
+PK `(provider_id, window)` where `window` ∈ `quota_window` (`daily`/`monthly`); `used` (≥0), `remaining` (nullable ⇒ unlimited, ≥0), `resets_at`, `updated_at`. "How much budget/quota is left right now?" — feeds the quota-exhausted eligibility filter.
+
+### 39.3 `adapter_runtime_metrics` — historical (per adapter)
+`adapter_id` (PK → `provider_adapters` ON DELETE CASCADE), `avg_latency_ms`, `p95_latency_ms`, `success_rate` (numeric[0,1]), `current_queue_depth` (≥0), `sample_window`, `updated_at`. Rolling latency/success trends that adjust the `speed` score component. **Kept independent** from 39.1/39.2 (different cadence/retention/consumers — never merged).
+
+### 39.4 `local_runtime_state` — operational (per device profile)
+`device_profile_id` (PK → `device_profiles` ON DELETE CASCADE), `gpu_available`, `loaded_models` (text[]), `free_vram_gb` (≥0), `updated_at`. Local-first execution readiness (AR7).
+
+### 39.5 `generation_resolution_ledger` — provenance (one row per resolution)
+`id` (uuid PK), `generation_id` (uuid, indexed, no FK yet — Generation Runtime lands α8.5x), `capability`, `catalogue_version`, `manifest_digest`, `resolver_version`, `routing_strategy` (reuses the `routing_strategy` enum), `candidate_list` (JSONB — the **full ranked list**, not just the winner, W8.5e.5), `chosen_adapter` (historical value, no FK), `start_time`, `end_time`, `execution_result` (`execution_result` enum), `created_at`. Complete replay of *why* a provider was selected (AR18); catalogue provenance stored as values so it survives catalogue changes.
