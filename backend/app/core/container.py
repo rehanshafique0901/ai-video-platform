@@ -44,6 +44,7 @@ from app.application.interfaces.providers import Capability
 from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
+from app.application.interfaces.runtime_state_reader import IRuntimeStateReader
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.thumbnailer import IThumbnailer
@@ -172,6 +173,7 @@ from app.infrastructure.render import (
     FfmpegWaveformRenderer,
 )
 from app.infrastructure.repositories.catalogue_reader import CatalogueReader
+from app.infrastructure.repositories.runtime_state_reader import RuntimeStateReader
 from app.infrastructure.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt import JWTService
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -563,6 +565,11 @@ def get_user_repository(session: AsyncSession) -> IUserRepository:
 def get_catalogue_reader(session: AsyncSession) -> ICatalogueReader:
     """Factory: a read-only ``CatalogueReader`` over the supplied session (α8.5e.3)."""
     return CatalogueReader(session)
+
+
+def get_runtime_state_reader(session: AsyncSession) -> IRuntimeStateReader:
+    """Factory: a read-only ``RuntimeStateReader`` over the supplied session (α8.5e.4)."""
+    return RuntimeStateReader(session)
 
 
 # ---------------------------------------------------------------------
