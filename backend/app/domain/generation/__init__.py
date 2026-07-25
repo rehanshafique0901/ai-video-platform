@@ -15,22 +15,34 @@ Per ADR-0045 (AI runtime core freeze):
     never looks at raw bytes.
 
 The **Identity Runtime** (`identity`) is the consistency backbone: a single
-immutable ``IdentityProfile`` (characters, scene, objects, global style, stable
-seed) that every shot's prompt references, so generation extends a fixed
-identity instead of re-inventing one per frame.
+immutable ``IdentityProfile`` — the project *world state* of characters,
+locations, props, and the project-wide look (camera, lighting, colour palette,
+global style) plus a stable seed. Every shot's prompt is composed from it via the
+**Prompt Builder** (`prompt_builder`), so generation extends a fixed identity
+instead of re-inventing one per frame. Execution modes (`execution`) express the
+capability-first selection policy (local / free-remote / commercial) without
+naming any machine or vendor.
 """
 
 from __future__ import annotations
 
+from app.domain.generation.execution import (
+    ExecutionConstraints,
+    ExecutionMode,
+    ExecutionTier,
+    constraints_for,
+)
 from app.domain.generation.identity import (
     Character,
     GlobalStyle,
     IdentityProfile,
-    ObjectAsset,
-    SceneStyle,
+    Location,
+    Prop,
+    join_fragments,
 )
 from app.domain.generation.plan import GenerationPlan, Shot
 from app.domain.generation.planner import PlanRequest, plan_from_prompt
+from app.domain.generation.prompt_builder import build_prompt
 from app.domain.generation.repair import RepairAction, RepairDecision, decide_repair
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
 from app.domain.generation.verification import (
@@ -47,8 +59,16 @@ __all__ = [
     "Character",
     "GlobalStyle",
     "IdentityProfile",
-    "ObjectAsset",
-    "SceneStyle",
+    "Location",
+    "Prop",
+    "join_fragments",
+    # prompt builder
+    "build_prompt",
+    # execution modes
+    "ExecutionConstraints",
+    "ExecutionMode",
+    "ExecutionTier",
+    "constraints_for",
     # plan
     "GenerationPlan",
     "Shot",

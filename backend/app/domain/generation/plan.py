@@ -15,11 +15,12 @@ from app.domain.generation.identity import IdentityProfile
 
 @dataclass(frozen=True, slots=True)
 class Shot:
-    """One beat of the video: what to show, who is in it, for how long."""
+    """One beat of the video: what to show, who is in it, where, for how long."""
 
     index: int
     description: str
     character_ids: tuple[str, ...] = ()
+    location_id: str | None = None
     duration_seconds: float = 3.0
 
 

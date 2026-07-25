@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.domain.generation.plan import GenerationPlan
+from app.domain.generation.prompt_builder import build_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,20 +22,21 @@ class ShotPrompt:
     seed: int
 
 
-def _compose(description: str, suffix: str) -> str:
-    description = description.strip()
-    return f"{description}, {suffix}" if suffix else description
-
-
 def build_storyboard(plan: GenerationPlan) -> tuple[ShotPrompt, ...]:
-    """Turn a plan's shots into identity-anchored prompts (ordered by shot index)."""
+    """Turn a plan's shots into identity-anchored prompts (ordered by shot index).
+
+    Each shot's prompt is composed through the Prompt Builder so it is anchored to
+    the project's world state (Identity Runtime -> Prompt Builder -> Generator).
+    """
     seed = plan.identity.seed
     return tuple(
         ShotPrompt(
             index=shot.index,
-            prompt_text=_compose(
-                shot.description,
-                plan.identity.style_suffix(character_ids=shot.character_ids),
+            prompt_text=build_prompt(
+                plan.identity,
+                description=shot.description,
+                character_ids=shot.character_ids,
+                location_id=shot.location_id,
             ),
             duration_seconds=shot.duration_seconds,
             seed=seed,

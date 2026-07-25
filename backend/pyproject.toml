@@ -31,6 +31,11 @@ dependencies = [
     # Import is confined to app/infrastructure/{storage,delivery} (import-linter contract);
     # R2 reuses the same S3-compatible client with a different injected endpoint.
     "boto3>=1.35.0",
+    # Generation slice (α8.6) — image feature extraction for the verification
+    # runtime (dimensions, blank/near-uniform detection, perceptual-hash
+    # cross-frame consistency) and image normalisation before ffmpeg assembly.
+    # Import is confined to app/infrastructure adapters, never the domain.
+    "pillow>=11.0.0",
 ]
 
 # Two dev groups so CI installs only what it needs.

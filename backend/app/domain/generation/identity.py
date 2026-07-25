@@ -1,13 +1,19 @@
-"""Identity Runtime — everything-consistency for a generation project.
+"""Identity Runtime — the persistent *world state* of a generation project.
 
-The single biggest cause of "different face every frame" is that each generation
-starts from scratch. The Identity Runtime fixes that by holding one immutable
-description of *who and what* appears — characters, the scene, recurring objects,
-the global art style — plus a **stable seed**. Every shot prompt is composed by
-appending this identity's deterministic fragment, so the generator is always
-extending the same identity rather than inventing a new one.
+The Identity Runtime is far more than a prompt suffix: it is the single source of
+truth for *who and what* exists across an entire video — characters (with their
+stable appearance, clothing, accessories, expression/pose catalogues, voice and
+reference images), locations, recurring props, and the project-wide look (camera,
+lighting, colour palette, global art style, plus music/subtitle style carried for
+later slices). A stable ``seed`` biases the generator toward visual consistency.
 
-Everything here is a pure value object: no I/O, deterministic serialisation.
+Every generation flows Identity Runtime -> Prompt Builder -> Generator (see
+``prompt_builder``); a shot never prompts from scratch. That is what stops faces,
+clothing, and scenes drifting across a long video.
+
+Everything here is a pure, immutable value object with deterministic
+serialisation — no I/O, no embeddings computed here (reference *images* are held
+as storage refs; derived embeddings belong to a later runtime identity-state).
 """
 
 from __future__ import annotations
@@ -30,73 +36,94 @@ class GlobalStyle(StrEnum):
         return f"{self.value} style"
 
 
-def _join(parts: tuple[str, ...]) -> str:
+def join_fragments(parts: tuple[str, ...]) -> str:
     """Join non-empty, stripped fragments with ', ' — deterministic and stable."""
     return ", ".join(p.strip() for p in parts if p and p.strip())
 
 
 @dataclass(frozen=True, slots=True)
 class Character:
-    """A consistent character: identity descriptors carried into every shot.
+    """A consistent character carried, unchanged, into every shot it appears in.
 
-    ``descriptors`` is an ordered tuple of appearance facts (face, age, hairstyle,
-    clothing, accessories). ``voice`` / ``personality`` are carried for downstream
-    narration/lip-sync slices and do not affect the image prompt.
+    ``appearance`` holds the *stable* visual identity (face, hair, build).
+    ``expressions`` / ``poses`` are catalogues a shot may draw from — they are
+    per-shot variation, so they are NOT part of the stable identity fragment.
+    ``reference_image_refs`` are storage keys of anchor images for future
+    image-conditioned generation; ``voice`` / ``personality`` feed later
+    narration / lip-sync slices and never enter the image prompt.
     """
 
     id: str
     name: str
-    descriptors: tuple[str, ...] = ()
+    age: str | None = None
+    appearance: tuple[str, ...] = ()
+    clothing: str | None = None
+    accessories: tuple[str, ...] = ()
+    expressions: tuple[str, ...] = ()
+    poses: tuple[str, ...] = ()
     voice: str | None = None
     personality: str | None = None
+    reference_image_refs: tuple[str, ...] = ()
 
     def prompt_fragment(self) -> str:
-        descriptors = _join(self.descriptors)
-        return f"{self.name} ({descriptors})" if descriptors else self.name
+        parts: list[str] = []
+        if self.age:
+            parts.append(self.age)
+        parts.extend(self.appearance)
+        if self.clothing:
+            parts.append(f"wearing {self.clothing}")
+        if self.accessories:
+            parts.append("with " + ", ".join(a.strip() for a in self.accessories if a.strip()))
+        detail = join_fragments(tuple(parts))
+        return f"{self.name} ({detail})" if detail else self.name
 
 
 @dataclass(frozen=True, slots=True)
-class SceneStyle:
-    """The recurring environment: setting, lighting, weather, camera."""
-
-    setting: str | None = None
-    lighting: str | None = None
-    weather: str | None = None
-    camera: str | None = None
-
-    def prompt_fragment(self) -> str:
-        return _join(
-            (self.setting or "", self.lighting or "", self.weather or "", self.camera or "")
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ObjectAsset:
-    """A recurring prop that must stay consistent across shots (teddy bear, toy car)."""
+class Location:
+    """A recurring place (a room, a park) kept consistent across shots."""
 
     id: str
     name: str
     descriptors: tuple[str, ...] = ()
 
     def prompt_fragment(self) -> str:
-        descriptors = _join(self.descriptors)
-        return f"{self.name} ({descriptors})" if descriptors else self.name
+        detail = join_fragments(self.descriptors)
+        return f"{self.name} ({detail})" if detail else self.name
+
+
+@dataclass(frozen=True, slots=True)
+class Prop:
+    """A recurring object that must stay consistent (teddy bear, toy car, balloon)."""
+
+    id: str
+    name: str
+    descriptors: tuple[str, ...] = ()
+
+    def prompt_fragment(self) -> str:
+        detail = join_fragments(self.descriptors)
+        return f"{self.name} ({detail})" if detail else self.name
 
 
 @dataclass(frozen=True, slots=True)
 class IdentityProfile:
-    """Immutable identity a whole project references.
+    """Immutable project world state that every shot references.
 
-    ``seed`` is the stable random seed reused across shots to bias the generator
-    toward visual consistency. Repair may derive a *new* seed to escape a bad
-    generation, but the profile's seed itself never changes.
+    ``seed`` is the stable seed reused across shots for consistency; repair may
+    derive a *new* seed to escape a bad generation, but this profile never
+    changes. ``music_style`` / ``subtitle_style`` are carried for later audio /
+    subtitle slices and are intentionally excluded from the image prompt.
     """
 
     seed: int
     global_style: GlobalStyle = GlobalStyle.PIXAR
     characters: tuple[Character, ...] = ()
-    scene: SceneStyle | None = None
-    objects: tuple[ObjectAsset, ...] = ()
+    locations: tuple[Location, ...] = ()
+    props: tuple[Prop, ...] = ()
+    camera_style: str | None = None
+    lighting: str | None = None
+    color_palette: str | None = None
+    music_style: str | None = None
+    subtitle_style: str | None = None
 
     def character(self, character_id: str) -> Character | None:
         for character in self.characters:
@@ -104,23 +131,8 @@ class IdentityProfile:
                 return character
         return None
 
-    def style_suffix(self, *, character_ids: tuple[str, ...] = ()) -> str:
-        """Deterministic identity fragment appended to a shot's prompt.
-
-        Includes only the characters named in ``character_ids`` (a shot rarely
-        features everyone), then the scene, recurring objects, and finally the
-        global style. Given the same profile + ids the output is byte-identical.
-        """
-        fragments: list[str] = []
-        for cid in character_ids:
-            character = self.character(cid)
-            if character is not None:
-                fragments.append(character.prompt_fragment())
-        if self.scene is not None:
-            scene_fragment = self.scene.prompt_fragment()
-            if scene_fragment:
-                fragments.append(scene_fragment)
-        for obj in self.objects:
-            fragments.append(obj.prompt_fragment())
-        fragments.append(self.global_style.prompt_fragment())
-        return _join(tuple(fragments))
+    def location(self, location_id: str) -> Location | None:
+        for location in self.locations:
+            if location.id == location_id:
+                return location
+        return None

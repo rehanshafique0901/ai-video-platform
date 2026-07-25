@@ -1,4 +1,4 @@
-"""Unit tests for the Identity Runtime (pure value objects)."""
+"""Unit tests for the Identity Runtime world state (pure value objects)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from app.domain.generation.identity import (
     Character,
     GlobalStyle,
     IdentityProfile,
-    ObjectAsset,
-    SceneStyle,
+    Location,
+    Prop,
+    join_fragments,
 )
 
 pytestmark = pytest.mark.unit
@@ -20,54 +21,65 @@ def _profile() -> IdentityProfile:
         seed=42,
         global_style=GlobalStyle.PIXAR,
         characters=(
-            Character(id="a", name="Mia", descriptors=("age 6", "curly red hair", "yellow dress")),
-            Character(id="b", name="Rex", descriptors=("green dinosaur",)),
+            Character(
+                id="a",
+                name="Mia",
+                age="6 years old",
+                appearance=("curly red hair",),
+                clothing="yellow dress",
+                accessories=("blue backpack",),
+                expressions=("smiling", "surprised"),
+                poses=("running",),
+                voice="cheerful child",
+                reference_image_refs=("assets/mia-01.png",),
+            ),
+            Character(id="b", name="Rex", appearance=("green dinosaur",)),
         ),
-        scene=SceneStyle(setting="sunny park", lighting="golden hour", camera="wide shot"),
-        objects=(ObjectAsset(id="o1", name="red balloon"),),
+        locations=(Location(id="park", name="sunny park", descriptors=("autumn leaves",)),),
+        props=(Prop(id="o1", name="red balloon"),),
+        camera_style="wide shot",
+        lighting="golden hour",
+        color_palette="warm pastel palette",
+        music_style="upbeat ukulele",
+        subtitle_style="bold yellow captions",
     )
 
 
-def test_character_prompt_fragment_includes_descriptors() -> None:
-    c = Character(id="a", name="Mia", descriptors=("age 6", "yellow dress"))
-    assert c.prompt_fragment() == "Mia (age 6, yellow dress)"
+def test_character_prompt_fragment_uses_stable_identity_only() -> None:
+    c = _profile().character("a")
+    assert c is not None
+    fragment = c.prompt_fragment()
+    assert fragment == "Mia (6 years old, curly red hair, wearing yellow dress, with blue backpack)"
+    # Expressions/poses are per-shot variation and must NOT leak into identity.
+    assert "smiling" not in fragment
+    assert "running" not in fragment
 
 
-def test_character_prompt_fragment_without_descriptors() -> None:
+def test_character_prompt_fragment_without_details() -> None:
     assert Character(id="a", name="Mia").prompt_fragment() == "Mia"
 
 
-def test_scene_fragment_skips_empty_fields() -> None:
-    assert SceneStyle(setting="park", camera="wide").prompt_fragment() == "park, wide"
+def test_location_and_prop_fragments() -> None:
+    loc = Location(id="p", name="park", descriptors=("autumn leaves",))
+    assert loc.prompt_fragment() == "park (autumn leaves)"
+    assert Prop(id="x", name="red balloon").prompt_fragment() == "red balloon"
 
 
-def test_style_suffix_filters_to_named_characters() -> None:
-    profile = _profile()
-    suffix = profile.style_suffix(character_ids=("a",))
-    assert "Mia" in suffix
-    assert "Rex" not in suffix  # not named in this shot
-    # Scene, object, and global style always included.
-    assert "sunny park" in suffix
-    assert "red balloon" in suffix
-    assert "pixar style" in suffix
+def test_join_fragments_skips_empty() -> None:
+    assert join_fragments(("a", "", "  ", "b")) == "a, b"
 
 
-def test_style_suffix_is_deterministic() -> None:
-    profile = _profile()
-    a = profile.style_suffix(character_ids=("a", "b"))
-    b = profile.style_suffix(character_ids=("a", "b"))
-    assert a == b
-    assert a.endswith("pixar style")
-
-
-def test_style_suffix_ignores_unknown_character_ids() -> None:
-    profile = _profile()
-    assert profile.character("missing") is None
-    suffix = profile.style_suffix(character_ids=("missing",))
-    # Unknown ids contribute nothing; scene/object/style still present.
-    assert "sunny park" in suffix and "pixar style" in suffix
-
-
-def test_character_lookup() -> None:
+def test_character_and_location_lookup() -> None:
     profile = _profile()
     assert profile.character("b").name == "Rex"  # type: ignore[union-attr]
+    assert profile.location("park").name == "sunny park"  # type: ignore[union-attr]
+    assert profile.character("missing") is None
+    assert profile.location("missing") is None
+
+
+def test_music_and_subtitle_style_are_carried_but_not_visual() -> None:
+    # These belong to later audio/subtitle slices; the profile carries them but
+    # they must never appear in a character's visual fragment.
+    profile = _profile()
+    assert profile.music_style == "upbeat ukulele"
+    assert profile.subtitle_style == "bold yellow captions"

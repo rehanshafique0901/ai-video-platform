@@ -90,12 +90,16 @@ def plan_from_prompt(request: PlanRequest) -> GenerationPlan:
     per_shot = round(target / shot_count, 2)
 
     character_ids = tuple(c.id for c in request.identity.characters)
+    # Anchor every shot to the project's primary location when one is defined so
+    # the setting stays consistent; richer planners can vary this per shot.
+    location_id = request.identity.locations[0].id if request.identity.locations else None
     beats = _beats(prompt, shot_count)
     shots = tuple(
         Shot(
             index=i,
             description=beat,
             character_ids=character_ids,
+            location_id=location_id,
             duration_seconds=per_shot,
         )
         for i, beat in enumerate(beats)
