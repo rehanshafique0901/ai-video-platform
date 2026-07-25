@@ -69,7 +69,12 @@ columns onto catalogue tables. They land with α8.5e+ (or already exist), never 
 | `provider_health` *(future)* | Runtime | **Health Worker** | Resolver | health score, last_success, 429 frequency |
 | `adapter_runtime_metrics` *(future)* | Runtime | Runtime | Resolver | avg latency, success rate, current queue |
 | `provider_quota_state` *(future)* | Runtime | Runtime | Resolver | quota *remaining*, window reset |
+| `local_runtime_state` *(future)* | Runtime | Execution / device agent | Resolver | GPU availability, loaded models, free VRAM |
+| `generation_resolution_ledger` *(future)* | Runtime | Execution (resolver caller) | Analytics, Memory Runtime | per-request provenance: catalogue_version, digest, resolver_version, ordered candidates, chosen adapter |
 | `usage_records` (existing) | Runtime | Runtime | Cost Estimator, Billing | authoritative spend |
+
+> These operational tables are **grounded in detail** (columns, cadence, writers) in
+> `RESOLVER_RUNTIME_CONTRACT.md` §7 and land with α8.5e (migration `0011+`), never here.
 
 ### A.3 Ownership rules (normative)
 
@@ -255,4 +260,5 @@ the bulk of α8.5d. Therefore:
 
 | Date | Change |
 | --- | --- |
+| 2026-07-25 | α8.5d complete (schema + seeder + live-PG round-trip). Grounded two more §A.2 operational tables (`local_runtime_state`, `generation_resolution_ledger`) ahead of α8.5e; full column-level grounding + the resolver selection contract now live in `RESOLVER_RUNTIME_CONTRACT.md`. No runtime change. |
 | 2026-07-25 | Initial blueprint — ownership matrix (§A), runtime flow (§B), invariant **W8.5d.10** (§C), reserved bounded contexts (§D), implementation order (§E), local-env note (§F). Pairs with the SIGNED-OFF α8.5d pre-flight; no runtime change. |
