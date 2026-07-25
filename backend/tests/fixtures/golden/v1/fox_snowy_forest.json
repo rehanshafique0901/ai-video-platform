@@ -1,0 +1,74 @@
+{
+  "_comment": "FROZEN HISTORICAL ARTIFACT — Golden V1 (Minimal Planner, α8.6). This snapshot is NOT replayed by the live planner; it is kept only as architectural history. It records the minimal planner's output, where every shot shared one prompt and one seed — the duplicate-scene weakness the α8.6 Increment 5 timeline gate correctly rejected and that α8.7 (Planner V2, cinematic storyboard) exists to fix. The active regression suite lives in ../v2/fox_snowy_forest.json. See docs/engineering/CINEMATIC_STORYBOARD_CONTRACT.md.",
+  "request": {
+    "prompt": "A little red fox walking through a snowy forest at sunrise.",
+    "seed": 70707,
+    "global_style": "pixar",
+    "execution_mode": "free_remote_only",
+    "aspect_ratio": "9:16",
+    "target_platform": "reel",
+    "target_duration_seconds": 18.0,
+    "per_shot_seconds": 3.0
+  },
+  "storyboard": {
+    "title": "A little red fox walking through",
+    "shot_count": 6,
+    "shots": [
+      {
+        "index": 0,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 1,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 2,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 3,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 4,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      },
+      {
+        "index": 5,
+        "seed": 70707,
+        "duration_seconds": 3.0,
+        "prompt_text": "A little red fox walking through a snowy forest at sunrise, a little red fox, a snowy forest at sunrise, wide cinematic shot, pixar style",
+        "negative_prompt": null,
+        "reference_image_refs": []
+      }
+    ]
+  },
+  "resolver": {
+    "capability": "image_generation",
+    "expected_execution_mode": "free_remote_only",
+    "expected_top_provider": "golden_provider",
+    "expected_top_adapter": "golden_provider.image",
+    "expected_execution_tier": "free_remote"
+  }
+}

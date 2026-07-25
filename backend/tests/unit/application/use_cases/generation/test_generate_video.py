@@ -131,10 +131,13 @@ async def test_prompts_are_identity_anchored() -> None:
     # World state flows Identity Runtime -> Prompt Builder -> Generator.
     assert "Mia (wearing yellow dress)" in first_prompt
     assert "sunny park" in first_prompt
-    assert "wide shot" in first_prompt
+    # Planner V2: the opening beat is an establishing shot (per-shot cinematic intent).
+    assert "establishing shot" in first_prompt
     assert first_prompt.endswith("pixar style")
-    # Stable seed carried into generation for consistency.
-    assert all(call["seed"] == 1234 for call in gen.calls)
+    # Planner V2 derives a distinct per-shot seed (no more single-seed duplicate scene).
+    seeds = [call["seed"] for call in gen.calls]
+    assert len(set(seeds)) == len(seeds)
+    assert 1234 not in seeds
 
 
 async def test_no_eligible_provider_fails_gracefully() -> None:

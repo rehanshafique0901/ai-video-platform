@@ -41,9 +41,12 @@ def build_storyboard(plan: GenerationPlan) -> tuple[ShotPrompt, ...]:
                 description=shot.description,
                 character_ids=shot.character_ids,
                 location_id=shot.location_id,
+                intent=shot.intent,
             ),
             duration_seconds=shot.duration_seconds,
-            seed=identity.seed,
+            # Planner V2 derives a per-shot seed (H(project_seed, shot_id)); fall
+            # back to the project seed for any pre-V2 shot that has none.
+            seed=shot.seed if shot.seed is not None else identity.seed,
             negative_prompt=identity.negative_prompt,
             reference_image_refs=identity.reference_refs_for(shot.character_ids),
         )

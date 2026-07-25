@@ -28,13 +28,18 @@ GOLDEN_SEED = 70707
 
 
 def fox_identity() -> IdentityProfile:
-    """The frozen identity/world-state for the golden scenario."""
+    """The frozen identity/world-state for the golden scenario.
+
+    Planner V2 (α8.7) governs framing per shot via ``ShotIntent``, so the project
+    look no longer hardcodes a framing-specific ``camera_style`` (which would fight
+    a per-shot close-up); it contributes only non-framing atmosphere.
+    """
     return IdentityProfile(
         seed=GOLDEN_SEED,
         global_style=GlobalStyle.PIXAR,
         characters=(Character(id="fox", name="a little red fox", clothing=""),),
         locations=(Location(id="forest", name="a snowy forest at sunrise"),),
-        camera_style="wide cinematic shot",
+        lighting="soft sunrise light",
     )
 
 
