@@ -270,6 +270,31 @@ exist. See [`ADR-0041` §Event projection pattern](../decisions/ADR-0041-provide
 
 ---
 
+## Deferred architecture guards
+
+Architectural invariants that are **currently upheld by design** — no code path can
+violate them today — but whose **automated enforcement is intentionally deferred**
+until the corresponding risk actually appears. Recording them here converts
+"currently true because of the design" into a conscious, tracked decision, so a
+future contributor knows the guard was *deferred, not forgotten*.
+
+Every architectural rule aims for three artefacts: **documentation** (ADR/contract),
+**implementation** (the code follows it), and **enforcement** (CI / import-linter /
+test that prevents regression). The guards below have the first two; the third
+ships as part of the slice named under **Trigger** — proportional to the risk,
+rather than guarding against code that does not yet exist.
+
+| Guard | Reason deferred | Trigger |
+|---|---|---|
+| **The resolver must not consume verification output** (verification cannot influence routing / candidate ranking) | The resolver takes only immutable catalogue + runtime snapshots; verification output has no path into `resolve()`. Documented by ADR-0045 resolver purity and structurally impossible today (domain-isolation import contract). A guard now would defend against code that does not exist. | **Verification V2** — when verification gains richer confidence signals that someone might reasonably want to bias routing with. Ship an import-linter contract (`app.domain.resolver` must not import `app.domain.generation.verification`) **plus** a resolver regression test proving verification output cannot affect ranking. |
+| **A dedicated "no provider-specific branching" semantic assertion in the planner** | Structural isolation already makes it impossible for the planner (`app.domain`) to import providers, and CS-8 bans provider *language* in planner output — the two existing guards cover the realistic failure modes. No observed pressure. | **First provider that requires planner changes** — if a provider ever motivates planner-side logic, add the explicit semantic assertion at that point. |
+
+> This table is descriptive governance, not an invariant registry: an entry graduates
+> out of it (and into an enforced import-linter contract / test) the moment its
+> trigger slice lands.
+
+---
+
 ## Remaining roadmap
 
 | Slice | Scope |
