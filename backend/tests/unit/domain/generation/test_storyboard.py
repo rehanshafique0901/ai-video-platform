@@ -61,3 +61,34 @@ def test_prompt_text_anchors_identity_and_seed() -> None:
 
 def test_deterministic() -> None:
     assert build_storyboard(_plan()) == build_storyboard(_plan())
+
+
+def test_shot_prompts_carry_negative_prompt_and_reference_refs() -> None:
+    from app.domain.generation.identity import ReferenceImage, ReferenceKind
+
+    identity = IdentityProfile(
+        seed=99,
+        global_style=GlobalStyle.PIXAR,
+        characters=(
+            Character(
+                id="a",
+                name="Mia",
+                clothing="yellow dress",
+                references=(ReferenceImage(ReferenceKind.FACE, "refs/mia.png"),),
+            ),
+        ),
+        locations=(Location(id="park", name="sunny park"),),
+        references=(ReferenceImage(ReferenceKind.STYLE, "refs/style.png"),),
+        negative_prompt="blurry, watermark, text",
+    )
+    plan = GenerationPlan(
+        title="t",
+        prompt="p",
+        aspect_ratio="9:16",
+        target_platform="reel",
+        identity=identity,
+        shots=(Shot(index=0, description="Mia waves", character_ids=("a",), location_id="park"),),
+    )
+    board = build_storyboard(plan)
+    assert board[0].negative_prompt == "blurry, watermark, text"
+    assert board[0].reference_image_refs == ("refs/style.png", "refs/mia.png")

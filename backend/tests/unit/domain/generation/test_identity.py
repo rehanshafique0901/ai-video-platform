@@ -10,6 +10,8 @@ from app.domain.generation.identity import (
     IdentityProfile,
     Location,
     Prop,
+    ReferenceImage,
+    ReferenceKind,
     join_fragments,
 )
 
@@ -83,3 +85,46 @@ def test_music_and_subtitle_style_are_carried_but_not_visual() -> None:
     profile = _profile()
     assert profile.music_style == "upbeat ukulele"
     assert profile.subtitle_style == "bold yellow captions"
+
+
+def test_reference_refs_collect_project_and_named_character_assets() -> None:
+    profile = IdentityProfile(
+        seed=1,
+        characters=(
+            Character(
+                id="mia",
+                name="Mia",
+                references=(
+                    ReferenceImage(ReferenceKind.FACE, "refs/mia-face.png"),
+                    ReferenceImage(ReferenceKind.CLOTHING, "refs/mia-dress.png"),
+                ),
+            ),
+            Character(
+                id="rex",
+                name="Rex",
+                references=(ReferenceImage(ReferenceKind.BODY, "refs/rex-body.png"),),
+            ),
+        ),
+        references=(
+            ReferenceImage(ReferenceKind.STYLE, "refs/style.png"),
+            ReferenceImage(ReferenceKind.ENVIRONMENT, "refs/park.png"),
+        ),
+    )
+    refs = profile.reference_refs_for(("mia",))
+    # Project refs always included; only named character's refs; Rex excluded.
+    assert refs == ("refs/style.png", "refs/park.png", "refs/mia-face.png", "refs/mia-dress.png")
+    assert "refs/rex-body.png" not in refs
+
+
+def test_reference_refs_dedupe_and_stable() -> None:
+    shared = ReferenceImage(ReferenceKind.STYLE, "refs/shared.png")
+    profile = IdentityProfile(
+        seed=1,
+        characters=(Character(id="a", name="A", references=(shared,)),),
+        references=(shared,),
+    )
+    assert profile.reference_refs_for(("a",)) == ("refs/shared.png",)
+
+
+def test_reference_refs_empty_when_no_assets() -> None:
+    assert _profile().reference_refs_for(("a",)) == ()

@@ -41,6 +41,13 @@ class ObservedImage:
     silent pass). ``similarity_to_reference`` is a 0..1 perceptual similarity to
     the previously accepted frame (identity consistency); ``None`` for the first
     shot (no reference yet).
+
+    The first block is what the current policy checks. The second block is the
+    richer, cheap-to-compute feature set produced from day one (Increment 3):
+    it is carried for telemetry and future verification/repair (blur/brightness/
+    watermark thresholds, colour-drift detection, …) without changing today's
+    decision logic. ``perceptual_hash`` also backs ``similarity_to_reference`` and
+    the timeline duplicate/consistency checks.
     """
 
     produced: bool
@@ -49,6 +56,16 @@ class ObservedImage:
     is_blank: bool | None = None
     similarity_to_reference: float | None = None
     has_watermark: bool | None = None
+    # Richer features (all 0..1 unless noted); None == not measured.
+    aspect_ratio: float | None = None
+    average_brightness: float | None = None
+    average_saturation: float | None = None
+    perceptual_hash: str | None = None
+    colour_histogram: tuple[int, ...] | None = None
+    edge_density: float | None = None
+    blank_probability: float | None = None
+    blur_score: float | None = None
+    watermark_probability: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

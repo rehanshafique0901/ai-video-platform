@@ -49,13 +49,24 @@ class FakeImageGenerator(IImageGenerator):
         self.calls: list[dict[str, object]] = []
 
     async def generate(
-        self, *, adapter_id, prompt, seed, width, height, local_model_path=None
+        self,
+        *,
+        adapter_id,
+        prompt,
+        seed,
+        width,
+        height,
+        negative_prompt=None,
+        reference_image_refs=(),
+        local_model_path=None,
     ) -> GeneratedImage:
         self.calls.append(
             {
                 "adapter_id": adapter_id,
                 "prompt": prompt,
                 "seed": seed,
+                "negative_prompt": negative_prompt,
+                "reference_image_refs": reference_image_refs,
                 "local_model_path": local_model_path,
             }
         )

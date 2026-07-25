@@ -41,6 +41,33 @@ def join_fragments(parts: tuple[str, ...]) -> str:
     return ", ".join(p.strip() for p in parts if p and p.strip())
 
 
+class ReferenceKind(StrEnum):
+    """What a reference image anchors — the Reference Asset Store vocabulary.
+
+    Character-scoped (FACE/BODY/CLOTHING) live on a ``Character``; project-scoped
+    (ENVIRONMENT/OBJECT/STYLE) live on the ``IdentityProfile``. A reference is an
+    *image input* (a storage ref), not prompt text — providers that support image
+    conditioning (ComfyUI, Flux, SDXL, FLUX Kontext, …) consume them; providers
+    that don't simply ignore them.
+    """
+
+    FACE = "face"
+    BODY = "body"
+    CLOTHING = "clothing"
+    ENVIRONMENT = "environment"
+    OBJECT = "object"
+    STYLE = "style"
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceImage:
+    """One reference asset: an image ``ref`` (storage key/URL) of a given kind."""
+
+    kind: ReferenceKind
+    ref: str
+    label: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Character:
     """A consistent character carried, unchanged, into every shot it appears in.
@@ -64,6 +91,7 @@ class Character:
     voice: str | None = None
     personality: str | None = None
     reference_image_refs: tuple[str, ...] = ()
+    references: tuple[ReferenceImage, ...] = ()
 
     def prompt_fragment(self) -> str:
         parts: list[str] = []
@@ -124,6 +152,8 @@ class IdentityProfile:
     color_palette: str | None = None
     music_style: str | None = None
     subtitle_style: str | None = None
+    references: tuple[ReferenceImage, ...] = ()
+    negative_prompt: str | None = None
 
     def character(self, character_id: str) -> Character | None:
         for character in self.characters:
@@ -136,3 +166,24 @@ class IdentityProfile:
             if location.id == location_id:
                 return location
         return None
+
+    def reference_refs_for(self, character_ids: tuple[str, ...] = ()) -> tuple[str, ...]:
+        """Collect applicable reference image refs for a shot.
+
+        Includes every project-scoped reference (environment/object/style) plus
+        the character-scoped references (face/body/clothing) of the named
+        characters, de-duplicated while preserving order. These are candidate
+        image inputs; a provider uses them only if it supports image conditioning.
+        """
+        refs: list[str] = [r.ref for r in self.references]
+        for cid in character_ids:
+            character = self.character(cid)
+            if character is not None:
+                refs.extend(r.ref for r in character.references)
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ref in refs:
+            if ref and ref not in seen:
+                seen.add(ref)
+                ordered.append(ref)
+        return tuple(ordered)

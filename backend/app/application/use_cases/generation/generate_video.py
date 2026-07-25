@@ -47,6 +47,7 @@ from app.domain.generation.execution import ExecutionTier, constraints_for
 from app.domain.generation.planner import PlanningError, PlanRequest, plan_from_prompt
 from app.domain.generation.repair import RepairAction, decide_repair
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
+from app.domain.generation.timeline_verification import TimelineFrame, verify_timeline
 from app.domain.generation.verification import (
     ObservedImage,
     VerificationExpectation,
@@ -131,6 +132,7 @@ class GenerateVideo:
 
         shot_results: list[ShotResult] = []
         frames: list[SlideshowFrame] = []
+        timeline_frames: list[TimelineFrame] = []
         reference_bytes: bytes | None = None
 
         for shot in storyboard:
@@ -158,8 +160,38 @@ class GenerateVideo:
             frames.append(
                 SlideshowFrame(data=outcome.image.data, duration_seconds=shot.duration_seconds)
             )
+            obs = outcome.observed
+            timeline_frames.append(
+                TimelineFrame(
+                    index=shot.index,
+                    duration_seconds=shot.duration_seconds,
+                    width=obs.width if obs else None,
+                    height=obs.height if obs else None,
+                    content_hash=obs.perceptual_hash if obs else None,
+                )
+            )
             if reference_bytes is None:
                 reference_bytes = outcome.image.data  # anchor consistency to first accepted frame
+
+        # Timeline gate — catch missing/duplicate/out-of-order/duration/aspect issues
+        # cheaply, before spending an ffmpeg render on a broken timeline.
+        timeline = verify_timeline(
+            tuple(timeline_frames),
+            expected_count=len(storyboard),
+            aspect_ratio=request.aspect_ratio,
+            aspect_ratio_tolerance=_ASPECT_TOLERANCE,
+        )
+        if not timeline.passed:
+            reasons = [f"{c.name}: {c.detail}" for c in timeline.failures]
+            log.warning("generation.timeline_verification_failed", checks=reasons)
+            return _failed(
+                generation_id,
+                plan.title,
+                provenance,
+                shots=tuple(shot_results),
+                reason="; ".join(reasons),
+                checks=tuple(reasons),
+            )
 
         spec = SlideshowSpec(width=request.width, height=request.height, fps=request.fps)
         rendered = await self._renderer.render(frames=tuple(frames), spec=spec)
@@ -228,6 +260,8 @@ class GenerateVideo:
                 seed=seed,
                 width=request.width,
                 height=request.height,
+                negative_prompt=shot.negative_prompt,
+                reference_image_refs=shot.reference_image_refs,
                 local_model_path=local_path,
             )
             observed: ObservedImage = await self._features.extract(image.data, reference=reference)
@@ -254,6 +288,7 @@ class GenerateVideo:
                         attempts=tuple(attempts),
                     ),
                     image=image,
+                    observed=observed,
                 )
             if decision.action is RepairAction.RETRY and decision.next_seed is not None:
                 seed = decision.next_seed
@@ -270,6 +305,7 @@ class GenerateVideo:
                 reason=attempts[-1].reason if attempts else "no attempt",
             ),
             image=None,
+            observed=None,
         )
 
     async def _ensure_model(self, chosen: ResolvedAdapter) -> str | None:
@@ -285,11 +321,18 @@ class GenerateVideo:
 
 
 class _ShotOutcome:
-    __slots__ = ("result", "image")
+    __slots__ = ("result", "image", "observed")
 
-    def __init__(self, *, result: ShotResult, image: GeneratedImage | None) -> None:
+    def __init__(
+        self,
+        *,
+        result: ShotResult,
+        image: GeneratedImage | None,
+        observed: ObservedImage | None,
+    ) -> None:
         self.result = result
         self.image = image
+        self.observed = observed
 
 
 def _provenance(

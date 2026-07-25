@@ -38,11 +38,16 @@ class IImageGenerator(ABC):
         seed: int,
         width: int,
         height: int,
+        negative_prompt: str | None = None,
+        reference_image_refs: tuple[str, ...] = (),
         local_model_path: str | None = None,
     ) -> GeneratedImage:
         """Generate one image. ``seed`` biases toward reproducibility/consistency.
 
-        ``local_model_path`` is supplied only for local-tier adapters after the
-        Model Cache has ensured the weights are present; remote adapters ignore it.
+        ``negative_prompt`` and ``reference_image_refs`` come from the Reference
+        Asset Store; an adapter consumes them only if it supports negative prompts
+        / image conditioning and ignores them otherwise. ``local_model_path`` is
+        supplied only for local-tier adapters after the Model Cache has ensured the
+        weights are present; remote adapters ignore it.
         """
         ...

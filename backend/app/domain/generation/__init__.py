@@ -38,6 +38,8 @@ from app.domain.generation.identity import (
     IdentityProfile,
     Location,
     Prop,
+    ReferenceImage,
+    ReferenceKind,
     join_fragments,
 )
 from app.domain.generation.plan import GenerationPlan, Shot
@@ -45,6 +47,11 @@ from app.domain.generation.planner import PlanRequest, plan_from_prompt
 from app.domain.generation.prompt_builder import build_prompt
 from app.domain.generation.repair import RepairAction, RepairDecision, decide_repair
 from app.domain.generation.storyboard import ShotPrompt, build_storyboard
+from app.domain.generation.timeline_verification import (
+    TimelineFrame,
+    TimelineReport,
+    verify_timeline,
+)
 from app.domain.generation.verification import (
     CheckResult,
     CheckStatus,
@@ -61,6 +68,8 @@ __all__ = [
     "IdentityProfile",
     "Location",
     "Prop",
+    "ReferenceImage",
+    "ReferenceKind",
     "join_fragments",
     # prompt builder
     "build_prompt",
@@ -85,6 +94,10 @@ __all__ = [
     "VerificationExpectation",
     "VerificationReport",
     "verify_image",
+    # timeline verification
+    "TimelineFrame",
+    "TimelineReport",
+    "verify_timeline",
     # repair
     "RepairAction",
     "RepairDecision",
