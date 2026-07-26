@@ -19,8 +19,11 @@
 > ADR-0042/0044/0045/0046 stays byte-for-byte unchanged — publishing is strictly
 > additive.
 >
-> **Status:** **DRAFT — pending sign-off.** No implementation until this is approved.
-> Baseline `v0.4.35-phase3-alpha8.7` is untouched.
+> **Status:** **APPROVED** (sign-off 2026-07-26; §15 decisions Q1–Q5 ruled).
+> **ADR-0047** (credential ownership) is approved-in-principle and must be **accepted**
+> before α8.6a implementation begins; α8.6b/c follow. No `PublishJob`, upload adapter,
+> destination API, or OAuth implementation starts until ADR-0047 has landed. Baseline
+> `v0.4.35-phase3-alpha8.7` is untouched — this slice is additive.
 >
 > **One-line purpose:** **Given one finished export artifact, publish it to one
 > external destination** — as its own bounded context, downstream of export, without
@@ -138,20 +141,21 @@ social-publishing port **MUST NOT** reuse that name. Use **`IDestinationPublishe
 (the port a use case calls) and per-platform Protocols (`YouTubeDestination`, …). The
 two concepts must be impossible to confuse.
 
-### 4.2 Destinations are not AI providers (PUB-3)
+### 4.2 Destinations are not AI providers (PUB-4)
 
 Destinations get a **parallel registry** (`DestinationRegistry`), never the AI
 capability catalogue, `ProviderRegistry`, dispatcher, or resolver (`capabilities.yaml`
 already excludes `publishing`; W8.5c.4). A YAML destination catalogue + validator
-(forking α8.5c tooling) is **deferred** until ≥2 real destinations exist (§14, open
-question Q3) — the first slice registers adapters in code.
+(forking α8.5c tooling) is **deferred** until ≥2 real destinations exist (approved
+Q1, §15) — a catalogue models capability variance that does not exist between one
+real destination and a mock, so the first slice registers adapters in code.
 
 ---
 
 ## 5. The `ContentPackage` contract
 
 `ContentPackage` is the immutable, **platform-agnostic** description of *what to
-publish*. It is built once (deterministically in α8.6; see PUB-2) and mapped to a
+publish*. It is built once (deterministically in α8.6; see PUB-9) and mapped to a
 platform-specific request by each destination adapter at the boundary.
 
 | Field | Type | Notes |
@@ -196,11 +200,15 @@ CAS transitions → settle + outbox), plus scheduling and bounded retries.
   `scheduled_at` predicate on `QUEUED` (a claimable job is `QUEUED AND (scheduled_at IS
   NULL OR scheduled_at ≤ now())`) — not a separate state, matching the export/worker
   poll pattern.
-- **Transitions are CAS-fenced** on `status` (PUB-8); no ad-hoc status writes.
-- **Retries are bounded and deterministic:** transient destination failures increment
-  `attempt`, set `scheduled_at = now + backoff(attempt)`, and return to `QUEUED` until
-  `max_attempts`, then `FAILED`. Permanent failures (auth revoked, invalid media) go
-  straight to `FAILED`.
+- **Transitions are CAS-fenced** on `status` (PUB-7); no ad-hoc status writes.
+- **Retries are bounded and deterministic (approved Q4):** `max_attempts = 5`.
+  **Retryable** failures (timeout, network error, provider temporary outage, rate
+  limit) increment `attempt`, set `scheduled_at = now + backoff(attempt)` (exponential
+  backoff with a maximum cap), and return to `QUEUED` until `max_attempts`, then
+  `FAILED`. **Permanent** failures (revoked OAuth token, invalid permissions, deleted
+  account, unsupported media) go straight to `FAILED`. The **destination adapter**
+  translates provider-specific errors into these two platform-level failure classes —
+  the runtime never inspects provider error codes.
 - **Idempotency (PUB-7):** each attempt sends a stable idempotency key
   (`publish_job_id` [+ attempt policy]) so an at-least-once worker never double-posts;
   the DB owns uniqueness via a partial-unique constraint (mirror of `ExportJob`).
@@ -213,8 +221,11 @@ CAS transitions → settle + outbox), plus scheduling and bounded retries.
 - **`PublishWorker.run_once()`** polls claimable jobs (`QUEUED`, due) in batches —
   the **`ExportWorker` pattern**, not the completion engine (that is provider-async
   resume) and not the relay (that is event fan-out).
-- **`ProcessPublishJob`**: lease (`publish_job:<id>`, and/or `project_publish:<project_id>`
-  to serialise per project — the reserved lock prefix), CAS `QUEUED→RUNNING`, load the
+- **`ProcessPublishJob`**: acquire **both** locks (approved Q2) — `publish_job:<id>`
+  protects *execution* (no two workers attempt the same upload) and
+  `project_publish:<project_id>` protects *product semantics* (serialises concurrent
+  publishes of a project; the seam for future republish / replace-published-version /
+  destination-ordering) — CAS `QUEUED→RUNNING`, load the
   `SocialAccount` + a **pre-authenticated client** from the credential service (§9),
   stream the delivery `MediaAsset` bytes, call `IDestinationPublisher.publish(...)`,
   then settle (`SUCCEEDED`/retry/`FAILED`) and emit outbox events — **all heavy I/O
@@ -230,7 +241,7 @@ CAS transitions → settle + outbox), plus scheduling and bounded retries.
 - **Port:** `IDestinationPublisher` (§4.1). Input: a `ContentPackage` + a
   pre-authenticated client/token + a byte stream. Output: a neutral `PublishResult`
   (`platform_post_id`, url) or a typed `DestinationError` (`transient` vs `permanent`).
-- **Adapters are credential-blind (PUB-4, W8.1.1 analogue):** an adapter **receives** a
+- **Adapters are credential-blind (PUB-5, W8.1.1 analogue):** an adapter **receives** a
   ready-to-use client; it never reads config, fetches, stores, refreshes, or decides
   the storage of credentials. It knows one thing: how to talk to its platform's upload
   API.
@@ -257,9 +268,15 @@ Credential service           owns storage + encryption-at-rest + refresh + revok
 Destination adapter          owns the platform API call (credential-blind)
 ```
 
-- **`SocialAccount` aggregate (α8.6a):** `(user_id, platform, external_account_id,
-  display_name, scopes, status ∈ {connected, expired, revoked}, timestamps)`. Owner-
-  scoped like notifications (PUB-9); a foreign/missing id is a uniform 404.
+- **`SocialAccount` aggregate (α8.6a):** `id`, `user_id`, `platform`,
+  `external_account_id`, `display_name`, `credential_reference` (pointer to the
+  credential service — never a token), `status ∈ {connected, expired, revoked}`,
+  timestamps. **Multiple accounts per `(user, platform)` are supported from v1
+  (approved Q3)** — a creator may connect several YouTube channels or personal +
+  business accounts. Uniqueness is **`(user_id, platform, external_account_id)`**, not
+  `(user_id, platform)`; deciding this now avoids reworking OAuth, permissions, and
+  publish routing later. Owner-scoped; a foreign/missing id is a uniform 404
+  (anti-enumeration, W8.5b.8 analogue).
 - **Credential service (`ISocialCredentialStore`):** stores/retrieves/refreshes
   **encrypted** access+refresh tokens; hands the worker a pre-authenticated client.
   The publishing domain and adapters never see plaintext storage concerns.
@@ -270,7 +287,7 @@ Destination adapter          owns the platform API call (credential-blind)
 external vault); encryption-at-rest mechanism + key management; token lifecycle &
 refresh ownership; revocation semantics (and cascade to in-flight `PublishJob`s);
 access boundaries (who may decrypt, and when); and the explicit statement that
-adapters are credential-blind (PUB-4/PUB-5). This contract defers those specifics to
+adapters are credential-blind (PUB-5). This contract defers those specifics to
 the ADR rather than pre-empting them.
 
 ---
@@ -280,7 +297,7 @@ the ADR rather than pre-empting them.
 - Publishing emits terminal outbox events — `publishing.publish_job.succeeded` and
   `publishing.publish_job.failed` — following the `generation.*` / `ExportJobSucceeded`
   naming and the transactional-outbox pattern.
-- **Downstream is pure fan-out (PUB-10):** the notification projection (or a sibling
+- **Downstream is pure fan-out (PUB-8):** the notification projection (or a sibling
   subscriber) may consume these to notify the user. Publishing itself **never** chains
   into another projection (fan-out `Event → {A,B,C}`, never a chain).
 - **No auto-publish (PUB-2):** there is **no** subscriber on `ExportJobSucceeded` that
@@ -289,39 +306,52 @@ the ADR rather than pre-empting them.
 
 ---
 
-## 11. Invariants (PUB-1 … PUB-10)
+## 11. Invariants (PUB-1 … PUB-10) — approved 2026-07-26
 
-- **PUB-1 — Publishing consumes a finished export-delivery `MediaAsset` only.** Never
-  `generation_assets`; never triggers export/render; never recomposes/re-encodes.
-- **PUB-2 — Publishing is intent-bearing and user-initiated.** A `PublishJob` exists
-  only from an explicit user action; nothing auto-publishes from `ExportJobSucceeded`.
-- **PUB-3 — Destinations are not AI providers.** Separate registry; never the AI
-  catalogue / provider registry / dispatcher / resolver.
-- **PUB-4 — Destination adapters are credential-blind.** They receive a pre-
-  authenticated client; they never read, fetch, store, refresh, or decide credential
-  storage (W8.1.1 analogue).
-- **PUB-5 — Credential storage & encryption belong to the credential service.** Domain
-  owns intent; adapter owns the API call; the credential service owns secrets
-  (ADR-0047). No responsibility leaks across these lines.
-- **PUB-6 — Publishing never mutates the frozen platform or upstream state.** It reads
-  a finished artifact and writes only its own `PublishJob`/`SocialAccount` state +
-  outbox events (ADR-0042; projection discipline).
-- **PUB-7 — Uploads are idempotent under at-least-once.** A stable idempotency key
-  prevents double-posting; the DB owns uniqueness (partial-unique, mirror of
-  `ExportJob`).
-- **PUB-8 — Status advances only through the `PublishJob` state machine.** CAS-fenced
-  transitions; bounded, deterministic retries; no ad-hoc status writes.
-- **PUB-9 — `SocialAccount` and `PublishJob` are owner-scoped.** Foreign/missing ids
-  are a uniform 404 (anti-enumeration, W8.5b.8 analogue).
-- **PUB-10 — Terminal publishing events are consumed as pure fan-out.** Downstream
-  projections read them and write their own state; publishing never chains projections.
+The canonical, sign-off-approved invariant set. Operational specifics (idempotency,
+owner-scoping, CAS transitions, the three-layer credential separation) live in the
+sections cited and are governed by these ten.
 
-Each invariant that can be mechanically guarded gets **documentation +
-implementation + enforcement** (import-linter / test) in its increment — the α8.7
-discipline continues. Candidate guards: an import-linter contract that
-`domain.publishing` / `infrastructure.publishing.destinations` cannot import the AI
-`providers`/`resolver` packages (PUB-3), and a test proving adapters take an injected
-client and never touch the credential store (PUB-4).
+- **PUB-1 — Publishing consumes the export-delivery `MediaAsset` only.** It reads
+  `export_jobs.output_media_asset_id`; never `generation_assets` (§3).
+- **PUB-2 — A `PublishJob` requires explicit user intent.** Nothing auto-publishes
+  from `ExportJobSucceeded`; export completion means "the artifact exists," not
+  "publish it" (§10).
+- **PUB-3 — Publishing is a separate bounded context.** Its own domain module,
+  aggregates, tables, and API surface; it shares no frozen path (§4).
+- **PUB-4 — Destinations are not AI providers.** A parallel `DestinationRegistry` —
+  never the AI capability catalogue, `ProviderRegistry`, dispatcher, or resolver (§4.2).
+- **PUB-5 — Destination adapters are credential-blind.** An adapter receives a usable,
+  pre-authenticated client/context; it never fetches secrets, decrypts tokens, or
+  manages storage. *Adapters publish content; they do not own credential management*
+  (§8, §9; ADR-0047).
+- **PUB-6 — Publishing never triggers rendering/export and never mutates upstream
+  state.** It reads a finished artifact and writes only its own `PublishJob` /
+  `SocialAccount` state + outbox events; it never recomposes/re-encodes (RC5) or
+  touches the frozen orchestration platform (§1, §3; ADR-0042).
+- **PUB-7 — Publish execution follows the worker/lease pattern.** Poll → dual lease
+  (`publish_job:<id>` + `project_publish:<project_id>`) → CAS status transitions →
+  bounded, deterministic retries → idempotent, at-least-once-safe upload (DB-owned
+  partial-unique); no ad-hoc status writes (§6, §7).
+- **PUB-8 — Publishing events are fan-out only.** Terminal events
+  (`publishing.publish_job.succeeded` / `.failed`) are consumed by independent
+  projections that write their own state; publishing never chains into another
+  projection (§10; ADR-0041 event-projection pattern).
+- **PUB-9 — Metadata generation is deterministic in v1.** `ContentPackage` title /
+  description / hashtags are pure template functions; LLM metadata is a later slice
+  (§5).
+- **PUB-10 — OAuth credential ownership requires ADR-0047.** Per-user third-party
+  credentials — storage, encryption-at-rest, refresh, revocation, access boundaries —
+  are owned by a credential service defined in ADR-0047, which must be accepted before
+  α8.6a (§9).
+
+Each mechanically-guardable invariant ships with **documentation + implementation +
+enforcement** in its increment (the α8.7 discipline). Candidate guards: an
+import-linter contract that `domain.publishing` / `infrastructure.publishing` cannot
+import the AI `providers` / `resolver` packages (**PUB-3/PUB-4**); a test proving
+destination adapters take an injected client and never touch the credential store
+(**PUB-5**); and repository-layer owner-scoping tests for `SocialAccount` /
+`PublishJob` (§9, W8.5b.8 analogue).
 
 ---
 
@@ -334,9 +364,9 @@ and execution ledgers). Migrations are additive; no frozen path changes.
 
 | Increment | Migration | Tables |
 |---|---|---|
-| α8.6a | `0013_social_accounts` | `social_accounts`, `social_credentials` (encrypted tokens; shape per ADR-0047) |
+| α8.6a | `0013_social_accounts` | `social_accounts` (`UNIQUE(user_id, platform, external_account_id)`, `credential_reference`, `status`), `social_credentials` (encrypted tokens; exact shape + storage per ADR-0047) |
 | α8.6b | `0014_publish_jobs` | `publish_jobs` (status, `scheduled_at`, `attempt`/`max_attempts`, `content_package` JSONB, `source_media_asset_id`, `social_account_id`, `platform_post_id`, `error`, partial-unique for PUB-7) |
-| α8.6c | (adapters only) | none required for YouTube/Mock; a destination catalogue table arrives only if/when the YAML catalogue is adopted (Q3) |
+| α8.6c | (adapters only) | none required for YouTube/Mock; a destination catalogue table arrives only if/when the YAML catalogue is adopted (Q1) |
 
 ---
 
@@ -368,22 +398,29 @@ deterministic and network-free.
 - **No auto-publish** from export completion (PUB-2).
 - **No time scheduler.** `scheduled_at` + external `run_once` cadence only (§7).
 - **No custom thumbnail upload** in α8.6 (reuse the enrichment-derived thumbnail).
-- **No YAML destination catalogue/validator** until ≥2 real destinations (§4.2, Q3).
+- **No YAML destination catalogue/validator** until ≥2 real destinations (§4.2, Q1).
 
 ---
 
-## 15. Open questions for sign-off
+## 15. Resolved pre-flight decisions (Q1–Q5) — ruled 2026-07-26
 
-- **Q1 — YAML destination catalogue timing.** Defer the α8.5c-style
-  `destinations.yaml` + validator until ≥2 real destinations (recommended), or build
-  the parallel tooling up front in α8.6c?
-- **Q2 — Per-project publish serialisation.** Lease on `publish_job:<id>` only, or also
-  `project_publish:<project_id>` to serialise concurrent publishes of the same project
-  (recommended, uses the reserved lock prefix)?
-- **Q3 — `SocialAccount` cardinality.** One connected account per `(user, platform)` in
-  α8.6, or allow multiple (e.g. two YouTube channels) from the start?
-- **Q4 — Retry policy shape.** Confirm `max_attempts` + backoff curve, and which
-  destination failures are classified `transient` vs `permanent`.
-- **Q5 — ADR-0047 scope.** Confirm the credential-ownership ADR covers exactly the
-  items in §9 before α8.6a begins.
+- **Q1 — YAML destination catalogue timing → DEFER.** No `destinations.yaml` /
+  `validate_destinations.py` in α8.6c; introduce the parallel catalogue tooling only
+  when a **second real destination** creates genuine capability variance (§4.2, §14).
+- **Q2 — Per-project publish serialisation → BOTH LOCKS.** Use `publish_job:<id>`
+  (execution: no duplicate upload) **and** `project_publish:<project_id>` (product
+  semantics: serialised publish per project; seam for republish/replace/ordering) (§7).
+- **Q3 — `SocialAccount` cardinality → MULTIPLE FROM v1.** No `UNIQUE(user_id,
+  platform)`; uniqueness is `(user_id, platform, external_account_id)`, with a
+  `credential_reference` pointer to the credential service. Supports multiple channels
+  / personal + business accounts (§9, §12).
+- **Q4 — Retry policy → BOUNDED (ExportWorker pattern).** `max_attempts = 5`,
+  exponential backoff with a max cap; **retryable** (timeout, network, temporary
+  outage, rate limit) vs **permanent** (revoked token, invalid permissions, deleted
+  account, unsupported media); the adapter translates provider errors into these two
+  classes (§6).
+- **Q5 — ADR-0047 scope → CONFIRMED.** The credential-ownership ADR covers exactly
+  §9: ownership, storage, encryption-at-rest (mandatory), refresh lifecycle,
+  revocation (user disconnect / provider revocation / expiry), access boundaries, and
+  credential-blind adapters. ADR-0047 must be **accepted before α8.6a** (§9, §13).
 ```
