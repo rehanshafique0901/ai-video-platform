@@ -70,6 +70,9 @@ from app.application.use_cases.prompts.update_prompt import UpdatePrompt
 from app.application.use_cases.publishing.complete_social_connection import (
     CompleteSocialConnection,
 )
+from app.application.use_cases.publishing.create_publish_job import CreatePublishJob
+from app.application.use_cases.publishing.get_publish_job import GetPublishJob
+from app.application.use_cases.publishing.list_publish_jobs import ListPublishJobs
 from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
 from app.application.use_cases.publishing.revoke_social_account import RevokeSocialAccount
 from app.application.use_cases.publishing.start_social_connection import StartSocialConnection
@@ -275,6 +278,14 @@ RevokeSocialAccountDep = Annotated[
 ListSocialAccountsDep = Annotated[
     ListSocialAccounts, Depends(container.get_list_social_accounts_use_case)
 ]
+
+# ---- Use-case dependencies (Slice α8.6b — Publish runtime) ------------
+
+CreatePublishJobDep = Annotated[
+    CreatePublishJob, Depends(container.get_create_publish_job_use_case)
+]
+GetPublishJobDep = Annotated[GetPublishJob, Depends(container.get_get_publish_job_use_case)]
+ListPublishJobsDep = Annotated[ListPublishJobs, Depends(container.get_list_publish_jobs_use_case)]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
 

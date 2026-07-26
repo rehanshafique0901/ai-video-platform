@@ -7,14 +7,16 @@ revocation, and multi-account-per-(user, platform) (R4).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.publishing.social_account import AccountStatus
 from app.infrastructure.db.models.identity import Tenant, User
+from app.infrastructure.db.models.publishing import SocialAccount as SocialAccountRow
 from app.infrastructure.repositories.social_account_repository import SocialAccountRepository
 
 pytestmark = pytest.mark.integration
@@ -179,7 +181,7 @@ async def test_list_is_newest_first_and_owner_scoped(session: AsyncSession) -> N
     tenant_id, user_id = await _seed_user(session)
     other_tenant, other_user = await _seed_user(session)
     repo = SocialAccountRepository(session)
-    await repo.upsert_connected(
+    first = await repo.upsert_connected(
         tenant_id=tenant_id,
         user_id=user_id,
         platform="mock",
@@ -187,7 +189,7 @@ async def test_list_is_newest_first_and_owner_scoped(session: AsyncSession) -> N
         display_name="First",
         scopes=(),
     )
-    await repo.upsert_connected(
+    second = await repo.upsert_connected(
         tenant_id=tenant_id,
         user_id=user_id,
         platform="mock",
@@ -203,6 +205,19 @@ async def test_list_is_newest_first_and_owner_scoped(session: AsyncSession) -> N
         display_name="Foreign",
         scopes=(),
     )
+    # ``now()`` is transaction-constant, so all rows seeded in this SAVEPOINT share a
+    # ``created_at``; stamp distinct values so the newest-first ordering is deterministic
+    # (chan-2 newer than chan-1) rather than resolved by the random-UUID id tiebreak.
+    base = datetime(2026, 7, 27, 12, 0, 0, tzinfo=UTC)
+    await session.execute(
+        update(SocialAccountRow).where(SocialAccountRow.id == first.id).values(created_at=base)
+    )
+    await session.execute(
+        update(SocialAccountRow)
+        .where(SocialAccountRow.id == second.id)
+        .values(created_at=base + timedelta(minutes=1))
+    )
+    await session.flush()
 
     mine = await repo.list_for_owner(tenant_id=tenant_id, user_id=user_id)
     assert [a.external_account_id for a in mine] == ["chan-2", "chan-1"]

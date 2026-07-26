@@ -27,7 +27,9 @@ from app.infrastructure.db import enums as enums_module
 # Expected count is the implementation count after Phase 2B closed.
 # α8.6a (ADR-0047, migration 0013): +1 for ``social_account_status`` — the
 # publishing bounded context's connected/expired/revoked account states.
-EXPECTED_ENUM_COUNT = 27
+# α8.6b (migration 0014): +1 for ``publish_status`` — the publish-runtime
+# job lifecycle (queued/running/succeeded/failed/canceled).
+EXPECTED_ENUM_COUNT = 28
 
 _LOWER_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 
