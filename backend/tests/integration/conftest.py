@@ -170,6 +170,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IProjectVersionRepository,
         IPromptRepository,
         IProviderSettingsRepository,
+        IPublishJobRepository,
         IRenderJobRepository,
         IRoleRepository,
         ISceneRepository,
@@ -203,6 +204,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.provider_settings_repository import (
         ProviderSettingsRepository,
     )
+    from app.infrastructure.repositories.publish_job_repository import PublishJobRepository
     from app.infrastructure.repositories.render_job_repository import RenderJobRepository
     from app.infrastructure.repositories.role_repository import RoleRepository
     from app.infrastructure.repositories.scene_repository import SceneRepository
@@ -271,6 +273,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.social_accounts = cast(
                     ISocialAccountRepository, SocialAccountRepository(self._session)
                 )
+                self.publish_jobs = cast(IPublishJobRepository, PublishJobRepository(self._session))
                 self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
                 self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
                 self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))

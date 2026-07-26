@@ -115,7 +115,12 @@ from app.application.use_cases.prompts.update_prompt import UpdatePrompt
 from app.application.use_cases.publishing.complete_social_connection import (
     CompleteSocialConnection,
 )
+from app.application.use_cases.publishing.create_publish_job import CreatePublishJob
+from app.application.use_cases.publishing.get_publish_job import GetPublishJob
+from app.application.use_cases.publishing.list_publish_jobs import ListPublishJobs
 from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
+from app.application.use_cases.publishing.process_publish_job import ProcessPublishJob
+from app.application.use_cases.publishing.publish_worker import PublishWorker
 from app.application.use_cases.publishing.revoke_social_account import RevokeSocialAccount
 from app.application.use_cases.publishing.start_social_connection import StartSocialConnection
 from app.application.use_cases.relay.relay_service import RelayService
@@ -192,6 +197,8 @@ from app.infrastructure.publishing.credentials.master_key import (
     EnvMasterKeyProvider,
     IMasterKeyProvider,
 )
+from app.infrastructure.publishing.destinations.mock_destination import MockDestination
+from app.infrastructure.publishing.destinations.registry import DestinationRegistry
 from app.infrastructure.publishing.oauth.mock_oauth_client import MockSocialOAuthClient
 from app.infrastructure.publishing.state_token_signer import JwtOAuthStateSigner
 from app.infrastructure.render import (
@@ -268,6 +275,8 @@ _image_client: httpx.AsyncClient | None = None
 _feature_extractor: IImageFeatureExtractor | None = None
 _slideshow_renderer: ISlideshowRenderer | None = None
 _video_probe: IVideoProbe | None = None
+# α8.6b: the publish-runtime destination registry (Mock in α8.6b; YouTube in α8.6c).
+_destination_registry: DestinationRegistry | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -458,6 +467,7 @@ def reset() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
+    global _destination_registry
     _settings = None
     _engine = None
     _session_factory = None
@@ -493,6 +503,7 @@ def reset() -> None:
     _feature_extractor = None
     _slideshow_renderer = None
     _video_probe = None
+    _destination_registry = None
 
 
 def _require_init() -> None:
@@ -1624,3 +1635,67 @@ def get_revoke_social_account_use_case() -> RevokeSocialAccount:
 
 def get_list_social_accounts_use_case() -> ListSocialAccounts:
     return ListSocialAccounts(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α8.6b — Publish runtime)
+# ---------------------------------------------------------------------
+
+
+def _get_destination_registry() -> DestinationRegistry:
+    """The platform → adapter registry (α8.6b: Mock only; YouTube is α8.6c).
+
+    Memoised: the Mock adapter is stateless + network-free. A YAML destination catalogue is
+    deferred until ≥2 real destinations justify it (contract §14).
+    """
+    global _destination_registry
+    if _destination_registry is None:
+        _destination_registry = DestinationRegistry({"mock": MockDestination()})
+    return _destination_registry
+
+
+def get_create_publish_job_use_case() -> CreatePublishJob:
+    """Factory: the α8.6b owner-facing create use case (validates against supported platforms)."""
+    return CreatePublishJob(
+        uow=get_unit_of_work(),
+        supported_platforms=_get_destination_registry().supported_platforms(),
+    )
+
+
+def get_get_publish_job_use_case() -> GetPublishJob:
+    return GetPublishJob(uow=get_unit_of_work())
+
+
+def get_list_publish_jobs_use_case() -> ListPublishJobs:
+    return ListPublishJobs(uow=get_unit_of_work())
+
+
+def get_process_publish_job_use_case() -> ProcessPublishJob:
+    """Factory: the α8.6b single-job publish use case (fresh UoW per call).
+
+    Credential-blind runtime (PUB-5): it consumes the α8.6a credential service only to obtain
+    a short-lived ``AuthorizedContext`` (never key material), and hands adapters that bearer.
+    """
+    settings = _get_settings()
+    return ProcessPublishJob(
+        uow=get_unit_of_work(),
+        storage=_get_storage_resolver(),
+        credential_store=get_social_credential_store(),
+        destinations=_get_destination_registry(),
+        workspace_dir=settings.render_workspace_dir,
+        lease=timedelta(seconds=settings.render_timeout_seconds),
+    )
+
+
+def get_publish_worker() -> PublishWorker:
+    """Factory: the α8.6b publish poll ingress (``run_once`` drains due queued publish jobs).
+
+    Mirrors ``get_export_worker`` — a dedicated poller (PUB-7). Publishing is downstream and
+    never triggers rendering/export (PUB-6).
+    """
+    settings = _get_settings()
+    return PublishWorker(
+        uow=get_unit_of_work(),
+        process=get_process_publish_job_use_case(),
+        batch_size=settings.publish_batch_size,
+    )

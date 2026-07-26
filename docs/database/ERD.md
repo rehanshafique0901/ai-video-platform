@@ -1219,6 +1219,67 @@ erDiagram
 
 ---
 
+## Cluster 14 — Publishing / Publish Runtime (α8.6b)
+
+> **The publishing bounded context's execution table.** Created by migration
+> `0014_publish_jobs` (additive) and governed by
+> `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` (§6–§7, PUB-1..PUB-10) and
+> `docs/engineering/PHASE3_ALPHA8_6b_PREFLIGHT.md` (§2 data model, SIGNED OFF). A faithful
+> adaptation of `export_jobs` (DQ8: same OCC/`version` + `touch_updated_at`/`bump_version`
+> triggers) with three publishing twists: **direct ownership** (`tenant_id` +
+> `requested_by_user_id`, no render-job join), an **explicit `project_id`** (DQ1) that powers
+> the `project_publish:<project_id>` serialisation lock, and **scheduling + bounded retries**
+> (`scheduled_at`, `attempt`/`max_attempts`, capped exponential backoff — DQ6). Credentials
+> are **never** stored here: the worker fetches an `AuthorizedContext` from the α8.6a
+> credential service at run time (PUB-5), so the runtime + destination adapters stay
+> credential-blind (DQ3).
+
+```mermaid
+erDiagram
+    projects ||--o{ publish_jobs : project_id
+    export_jobs ||--o{ publish_jobs : source_export_job_id
+    media_assets ||--o{ publish_jobs : source_media_asset_id
+    social_accounts ||--o{ publish_jobs : social_account_id
+
+    publish_jobs {
+        uuid id PK
+        uuid tenant_id FK
+        uuid requested_by_user_id FK
+        uuid project_id FK "owning project (DQ1, serialisation lock)"
+        uuid source_export_job_id FK "finished export (PUB-1)"
+        uuid source_media_asset_id FK "delivery artifact to upload"
+        uuid social_account_id FK "destination account (PUB-2)"
+        text platform "resolved from the account"
+        publish_status status
+        timestamptz scheduled_at "nullable (retry backoff)"
+        integer attempt
+        integer max_attempts "default 5 (DQ6)"
+        jsonb content_package "deterministic metadata snapshot (PUB-9)"
+        text platform_post_id "nullable (set on success)"
+        text platform_post_url "nullable (set on success)"
+        jsonb error "nullable (neutral code/message)"
+        timestamptz published_at "nullable"
+        timestamptz finished_at "nullable"
+        integer version "OCC fence (DQ8)"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+```
+
+> **Reconciliation note (α8.6b).**
+> - Idempotency (DQ2, PUB-7) is the partial-unique index
+>   `uq_publish_jobs_source_media_asset_social_account` on `(source_media_asset_id,
+>   social_account_id)` over `status IN ('queued','running','succeeded')` — a retry after a
+>   `failed`/`canceled` publish is permitted; a `succeeded` artifact is not re-posted to the
+>   same account (explicit re-publish is a future flow).
+> - `status` is the new `publish_status` enum (`queued|running|succeeded|failed|canceled`).
+> - Self-versioned OCC mirrors `export_jobs`: CAS updates hand-set `version = version + 1`
+>   and the guarded `bump_version` trigger no-ops, so the net increment stays `+1` (DQ8).
+> - No credential material is stored on, emitted by, or returned for a publish job (PUB-8 /
+>   ADR-0047 C8); `error` is a neutral `code`/`message` dict only.
+
+---
+
 ## Cross-Cluster Foreign-Key Summary
 
 These FKs span clusters and are easy to miss; documented here for review:
@@ -1244,6 +1305,12 @@ These FKs span clusters and are easy to miss; documented here for review:
 | `social_accounts.tenant_id` → `tenants.id` | many:1 | RESTRICT |
 | `social_accounts.user_id` → `users.id` | many:1 | CASCADE |
 | `social_credentials.social_account_id` → `social_accounts.id` | 1:1 | CASCADE |
+| `publish_jobs.tenant_id` → `tenants.id` | many:1 | RESTRICT |
+| `publish_jobs.requested_by_user_id` → `users.id` | many:1 | RESTRICT |
+| `publish_jobs.project_id` → `projects.id` | many:1 | CASCADE |
+| `publish_jobs.source_export_job_id` → `export_jobs.id` | many:1 | CASCADE |
+| `publish_jobs.source_media_asset_id` → `media_assets.id` | many:1 | RESTRICT |
+| `publish_jobs.social_account_id` → `social_accounts.id` | many:1 | CASCADE |
 
 Logical FKs (no DB-level constraint, because the target table is partitioned and a composite FK would be needed):
 

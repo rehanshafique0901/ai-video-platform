@@ -112,3 +112,8 @@ audit_actor_kind_enum = _pg_enum(
 # ``platform`` stays free-text (grows per destination); only the small, stable status set
 # is an enum (OQ2).
 social_account_status_enum = _pg_enum("social_account_status", "connected", "expired", "revoked")
+# Publish Runtime (α8.6b) — a user-initiated upload job's lifecycle. Mirrors export_status
+# (queued → running → succeeded/failed/canceled); scheduling + retries are columns, not states.
+publish_status_enum = _pg_enum(
+    "publish_status", "queued", "running", "succeeded", "failed", "canceled"
+)

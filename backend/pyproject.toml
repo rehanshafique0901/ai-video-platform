@@ -362,6 +362,7 @@ source_modules = [
     "app.api",
     "app.core",
     "app.infrastructure.publishing.oauth",
+    "app.infrastructure.publishing.destinations",
 ]
 forbidden_modules = ["cryptography"]
 allow_indirect_imports = "True"
@@ -376,3 +377,23 @@ name = "Publishing domain is an isolated bounded context"
 type = "forbidden"
 source_modules = ["app.domain.publishing"]
 forbidden_modules = ["app.domain.generation", "app.domain.workflow"]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α8.6b (PUB-4 / PUB-5, ADR-0047 C4) — destination adapters are
+# credential-blind leaves. A destination adapter uploads a finished artifact using a
+# short-lived AuthorizedContext it is handed; it must never reach the credential store /
+# key material, the repositories/UoW, or another bounded context. It may import only the
+# destination + credential-store *ports* (for the AuthorizedContext DTO) and the publishing
+# domain. This pins the boundary the runtime relies on so a future real adapter (α8.6c)
+# cannot quietly grow a credential or persistence dependency.
+name = "Destination adapters are credential-blind leaves"
+type = "forbidden"
+source_modules = ["app.infrastructure.publishing.destinations"]
+forbidden_modules = [
+    "app.infrastructure.publishing.credentials",
+    "app.infrastructure.repositories",
+    "app.infrastructure.uow",
+    "app.application.use_cases",
+    "app.domain.generation",
+    "app.domain.workflow",
+]

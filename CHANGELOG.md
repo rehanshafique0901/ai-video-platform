@@ -6,6 +6,53 @@
 
 ## [Unreleased]
 
+### α8.6b — Publish Runtime (`0.4.37-phase3-alpha8.6b`, 2026-07-27)
+
+**Second slice of the α8.6 Publishing / Creator Workflow bounded context — implementation, additive
+migration.** Adds *publish execution*: a user queues a `PublishJob` to upload a finished
+export-delivery `MediaAsset` (PUB-1) to one connected `social_accounts` destination (PUB-2). A faithful
+adaptation of the proven `ExportJob` execution model (DQ8) — poll-ingress worker, lease-guarded claim,
+version-fenced CAS, transactional outbox — with a second serialisation lock and bounded retries. **No
+notification projection** (deferred, DQ7) and **no real destination adapter yet** (YouTube is α8.6c;
+this slice ships the Mock destination). Governed by `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md`
+(PUB-1…PUB-10) and `docs/engineering/PHASE3_ALPHA8_6b_PREFLIGHT.md` (SIGNED OFF, DQ1–DQ8).
+
+#### Added
+- **Publishing domain** — `PublishStatus` (`queued|running|succeeded|failed|canceled`), the `PublishJob`
+  aggregate (+ `PublishSource`, `PublishJobClaim`), and a deterministic, platform-agnostic
+  `ContentPackage` (default visibility **private**) with a pure builder (PUB-9).
+- **Ports** — `IPublishJobRepository` (source resolution, owner-scoped CRUD, claim scan, version-fenced
+  CAS transitions) on the UoW; `IDestinationPublisher` + `IDestinationRegistry` (credential-blind upload
+  contract, consuming only the α8.6a `AuthorizedContext`).
+- **Infrastructure** — `PublishJobRepository` (raw CAS/OCC, `resolve_source` join, idempotency-conflict
+  mapping), `MockDestination` + `DestinationRegistry`, ORM model + UoW/conftest wiring.
+- **Use cases** — `CreatePublishJob` (ownership + readiness + idempotency), `ProcessPublishJob`
+  (dual-lock claim → authorize → materialize → upload → settle, with capped-exponential-backoff retries,
+  DQ5/DQ6), `PublishWorker` (poll ingress), `GetPublishJob`, `ListPublishJobs`, and PascalCase outbox
+  emitters (`PublishJobCreated`/`PublishJobSucceeded`/`PublishJobFailed`, DQ4).
+- **API** — top-level `POST/GET /api/v1/publish-jobs` (`201` create / `200` idempotent replay), DTOs,
+  deps, container factories, and a `publish_batch_size` config field.
+- **Migration `0014_publish_jobs`** (additive) — `publish_status` enum + `publish_jobs` (direct
+  ownership, explicit `project_id` (DQ1), `scheduled_at` scheduling, `attempt`/`max_attempts`,
+  `content_package` JSONB, neutral `error` JSONB), the `(source_media_asset_id, social_account_id)`
+  partial-unique idempotency index over active/fulfilled rows (DQ2), claim/owner/account indexes, and
+  the `touch_updated_at` + guarded `bump_version` triggers (OCC mirrors `export_jobs`, DQ8).
+
+#### Enforcement
+- **Import-linter** — new contract *destination adapters are credential-blind leaves* (10 contracts
+  total, all kept): destination adapters cannot import the credential store, repositories, UoW, use
+  cases, or the generation/workflow domains.
+- **CI Stage 14** — extended with the α8.6b publishing integration suites: `PublishJob` repository,
+  the publish runtime end-to-end (create → worker → succeeded/failed with real `distributed_locks` +
+  outbox chain, credential-blind), and the `/publish-jobs` router.
+- **Enum guard** — `EXPECTED_ENUM_COUNT` 27 → 28 for `publish_status` (created by 0014).
+- **ERD** — new *Cluster 14 — Publishing / Publish Runtime* (`publish_jobs`) + cross-cluster FK rows.
+
+Full ephemeral-DB gate (stages 0–14) **PASS** on a throwaway `pgvector/pgvector:pg16`: migration 0014
+upgrade→downgrade→upgrade roundtrip clean, schema validator + ERD green, 38 publishing integration
+tests green. The runtime remains credential-blind (consumes only `AuthorizedContext`); the slice is
+strictly additive within the Publishing bounded context.
+
 ### α8.6a — Publishing account connections (`0.4.36-phase3-alpha8.6a`, 2026-07-26)
 
 > **Release ordering.** α8.6 (Publishing) was **intentionally completed after the α8.7 baseline**

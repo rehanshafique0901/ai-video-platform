@@ -45,6 +45,8 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.notifications.notification import Notification
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
+from app.domain.publishing.content_package import ContentPackage
+from app.domain.publishing.publish_job import PublishJob, PublishJobClaim, PublishSource
 from app.domain.publishing.social_account import SocialAccount
 from app.domain.render.render_job import RenderJob
 from app.domain.scenes.scene import Scene
@@ -2300,5 +2302,170 @@ class ISocialAccountRepository(ABC):
 
         Returns the updated account, or ``None`` if missing / not the caller's. Idempotent:
         an already-revoked owned row is returned unchanged.
+        """
+        ...
+
+
+class IPublishJobRepository(ABC):
+    """Persistence surface for ``publish_jobs`` — the publish-runtime aggregate (α8.6b).
+
+    A **publish job** is a user's request to upload one finished export-delivery
+    ``MediaAsset`` (PUB-1) to one connected ``social_accounts`` destination (PUB-2). A
+    faithful adaptation of :class:`IExportJobRepository` (DQ8): self-versioned CAS
+    transitions hand-set ``version = version + 1`` over the guarded bump trigger (net +1);
+    the worker-facing methods are a claim scan + status-fenced settlements.
+
+    **Direct ownership.** ``publish_jobs`` carries ``tenant_id`` + ``requested_by_user_id``
+    (the user-initiated convention), so owner-facing reads scope on both — a foreign/missing
+    id returns ``None`` (→ uniform ``404`` upstream, anti-enumeration).
+
+    **Explicit ``project_id`` (DQ1).** Persisted at creation (resolved via
+    :meth:`resolve_source`), it powers the ``project_publish:<project_id>`` serialisation
+    lock without depending on the nullable ``MediaAsset.project_id``.
+
+    **Idempotency backstop (DQ2).** :meth:`add` maps the partial-unique
+    ``uq_publish_jobs_source_media_asset_social_account`` violation (over
+    ``status IN ('queued','running','succeeded')``) to ``ConflictError``; the use case
+    returns the existing active/fulfilled job.
+    """
+
+    # --- source resolution (PUB-1: consume the export delivery artifact) --------
+
+    @abstractmethod
+    async def resolve_source(
+        self, export_job_id: UUID, *, tenant_id: UUID, owner_user_id: UUID
+    ) -> PublishSource | None:
+        """Resolve an owner's export delivery into a publish source, or ``None``.
+
+        Reads the ``export_jobs`` row and joins ``render_jobs → projects`` for owner scoping
+        (``projects.tenant_id`` + ``projects.owner_user_id``), returning the owning
+        ``project_id`` (DQ1), the delivery ``output_media_asset_id`` (the publish source,
+        PUB-1), and the export ``status``. ``None`` when the export is missing OR not the
+        caller's — deliberately indistinguishable (anti-enumeration). The caller requires the
+        export ``succeeded`` with an artifact before creating a job.
+        """
+        ...
+
+    # --- create -----------------------------------------------------------------
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        tenant_id: UUID,
+        requested_by_user_id: UUID,
+        project_id: UUID,
+        source_export_job_id: UUID,
+        source_media_asset_id: UUID,
+        social_account_id: UUID,
+        platform: str,
+        status: str,
+        scheduled_at: datetime | None,
+        content_package: ContentPackage,
+        max_attempts: int,
+    ) -> PublishJob:
+        """Insert a publish job and return it.
+
+        The caller has ALREADY established ownership of both the source export (via
+        :meth:`resolve_source`) and the destination account. ``id`` / timestamps /
+        ``version`` (=1) / ``attempt`` (=0) are DB-populated; worker-owned fields
+        (``platform_post_id`` / ``platform_post_url`` / ``error`` / ``published_at`` /
+        ``finished_at``) are ``NULL``.
+
+        Raises ``ConflictError`` on the partial-unique
+        ``uq_publish_jobs_source_media_asset_social_account`` violation — an active/fulfilled
+        publish of the same ``(source_media_asset_id, social_account_id)`` already exists; the
+        use case returns that existing job (DQ2).
+        """
+        ...
+
+    # --- reads ------------------------------------------------------------------
+
+    @abstractmethod
+    async def get_active(
+        self, *, source_media_asset_id: UUID, social_account_id: UUID
+    ) -> PublishJob | None:
+        """Return the active-or-fulfilled publish for the tuple, or ``None``.
+
+        The idempotency pre-check / race-recovery lookup (DQ2): matches
+        ``status IN ('queued','running','succeeded')`` (the partial-unique predicate), so a
+        repeat request replays the existing job. ``failed`` / ``canceled`` rows are ignored
+        (retry after failure is permitted).
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(
+        self, *, tenant_id: UUID, owner_user_id: UUID, publish_job_id: UUID
+    ) -> PublishJob | None:
+        """Return the caller's publish job by id, or ``None`` if missing / another's."""
+        ...
+
+    @abstractmethod
+    async def list_for_owner(self, *, tenant_id: UUID, owner_user_id: UUID) -> list[PublishJob]:
+        """Return the caller's publish jobs (newest first). Owner-scoped."""
+        ...
+
+    # --- worker-facing lifecycle transitions (mirror export) --------------------
+
+    @abstractmethod
+    async def list_claimable(self, *, now: datetime, limit: int) -> list[PublishJobClaim]:
+        """Return due ``queued`` jobs, oldest first, each with its owning ``project_id``.
+
+        The poll ingress (mirrors ``IExportJobRepository.list_claimable``): ordered
+        ``created_at ASC, id ASC``, filtered to ``status='queued'`` AND (``scheduled_at IS
+        NULL`` OR ``scheduled_at <= now``) so a job awaiting its schedule/retry is skipped
+        until due. ``project_id`` is a real column (DQ1) — no join needed. Side-effect-free.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_running(self, publish_job_id: UUID) -> PublishJob | None:
+        """Version-fenced claim: ``queued`` → ``running`` (also bumps ``attempt`` + 1).
+
+        Atomic CAS ``… SET status='running', attempt=attempt+1, version=version+1 WHERE
+        id=:id AND status='queued'``. Returns the running job, or ``None`` when no row
+        matched (already claimed/terminal) — the worker treats ``None`` as "another owns it".
+        """
+        ...
+
+    @abstractmethod
+    async def mark_succeeded(
+        self,
+        publish_job_id: UUID,
+        *,
+        platform_post_id: str,
+        platform_post_url: str | None,
+    ) -> PublishJob | None:
+        """Version-fenced finish: ``running`` → ``succeeded`` with the platform post identity.
+
+        Atomic CAS ``… SET status='succeeded', finished_at=now(), published_at=now(),
+        platform_post_id=:id, platform_post_url=:url, version=version+1 WHERE id=:id AND
+        status='running'``. Returns the settled job, or ``None`` when no row matched.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_failed(
+        self, publish_job_id: UUID, *, error: dict[str, Any]
+    ) -> PublishJob | None:
+        """Version-fenced finish: ``running`` → ``failed`` (permanent — retries exhausted).
+
+        Atomic CAS ``… SET status='failed', finished_at=now(), error=:error,
+        version=version+1 WHERE id=:id AND status='running'``. ``error`` is a neutral dict
+        (a ``code``/``message``) — no credential or platform internals leak (PUB-8 / C8).
+        """
+        ...
+
+    @abstractmethod
+    async def reschedule_for_retry(
+        self, publish_job_id: UUID, *, scheduled_at: datetime, error: dict[str, Any]
+    ) -> PublishJob | None:
+        """Version-fenced retry: ``running`` → ``queued`` with a future ``scheduled_at`` (DQ6).
+
+        Atomic CAS ``… SET status='queued', scheduled_at=:when, error=:error,
+        version=version+1 WHERE id=:id AND status='running'``. The bumped ``attempt`` (from
+        :meth:`mark_running`) is preserved; the last transient ``error`` is recorded for
+        observability. Returns the requeued job, or ``None`` when no row matched.
         """
         ...

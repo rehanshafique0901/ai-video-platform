@@ -21,23 +21,29 @@ migration ``0013_social_accounts``.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     LargeBinary,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.enums import social_account_status_enum
-from app.infrastructure.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+from app.infrastructure.db.enums import publish_status_enum, social_account_status_enum
+from app.infrastructure.db.mixins import (
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    VersionMixin,
+)
 
 
 class SocialAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -100,4 +106,78 @@ class SocialCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-__all__ = ["SocialAccount", "SocialCredential"]
+class PublishJob(UUIDPrimaryKeyMixin, TimestampMixin, VersionMixin, Base):
+    """Publish-runtime job (α8.6b). Faithful adaptation of ``export_jobs`` (DQ8).
+
+    Direct ownership (``tenant_id`` + ``requested_by_user_id``); an explicit ``project_id``
+    (DQ1) powers the project serialisation lock. ``source_media_asset_id`` is the export
+    delivery artifact consumed (PUB-1); ``content_package`` is the deterministic metadata
+    snapshot (PUB-9). No credential material — the worker fetches an ``AuthorizedContext``
+    at run time (PUB-5). Structure created by migration ``0014_publish_jobs``.
+    """
+
+    __tablename__ = "publish_jobs"
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    requested_by_user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_export_job_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("export_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_media_asset_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("media_assets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    social_account_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("social_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(publish_status_enum, nullable=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
+    content_package: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    platform_post_id: Mapped[str | None] = mapped_column(Text)
+    platform_post_url: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # DQ2 idempotency backstop: at most one active-or-fulfilled publish per
+        # (source_media_asset_id, social_account_id). failed/canceled excluded (retry OK).
+        Index(
+            "uq_publish_jobs_source_media_asset_social_account",
+            "source_media_asset_id",
+            "social_account_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued','running','succeeded')"),
+        ),
+        Index("ix_publish_jobs_status_scheduled_at", "status", "scheduled_at"),
+        Index(
+            "ix_publish_jobs_requested_by_user_id_created_at",
+            "requested_by_user_id",
+            "created_at",
+        ),
+        Index("ix_publish_jobs_social_account_id", "social_account_id"),
+    )
+
+
+__all__ = ["SocialAccount", "SocialCredential", "PublishJob"]

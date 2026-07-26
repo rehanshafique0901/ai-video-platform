@@ -301,6 +301,15 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Publish runtime (α8.6b) ----------------------------------------------
+    # The publish worker uploads a finished export-delivery MediaAsset to a connected
+    # destination via IDestinationPublisher (Mock in α8.6b; YouTube in α8.6c).
+    publish_batch_size: int = Field(
+        default=10,
+        description="Max due queued publish jobs a single PublishWorker.run_once() claims.",
+        gt=0,
+    )
+
     # --- Publishing credential ownership (α8.6a, ADR-0047) --------------------
     # The externally-managed master key that wraps per-record data keys for stored OAuth
     # credentials (envelope encryption, R2). Injected into the credential service; never
