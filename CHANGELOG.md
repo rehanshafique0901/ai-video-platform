@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α8.6c — Destination Adapters: YouTube (`0.4.38-phase3-alpha8.6c-dev`, 2026-07-27)
+### α8.6c — Destination Adapters: YouTube (`0.4.38-phase3-alpha8.6c`, 2026-07-27)
 
 **Third slice of the α8.6 Publishing / Creator Workflow bounded context — adapter-only, no migration.**
 Replaces the Mock destination with the **first production-quality destination (YouTube)** while leaving
@@ -46,7 +46,11 @@ Governed by `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-11) a
 - **Opt-in live smoke** — an env-gated (`YOUTUBE_LIVE_SMOKE=1`) real-upload test, **excluded from CI**
   (Stage 14 stays deterministic + offline; the Mock destination remains the CI default).
 
-**No migration, no port change, no runtime/domain/schema expansion.** Held at `-dev` pending release review.
+**No migration, no port change, no runtime/domain/schema expansion.** Full ephemeral-DB gate
+(stages 0–14) **PASS** on a throwaway `pgvector/pgvector:pg16`: static (mypy + 10 import-linter
+contracts) green, 33 new network-free YouTube unit tests green, migration up→down→up roundtrip clean
+(no new migration), Stage 14 publishing integration green (38 tests) with the runtime still
+credential-blind and the Mock destination still the CI default.
 
 ### α8.6b — Publish Runtime (`0.4.37-phase3-alpha8.6b`, 2026-07-27)
 
