@@ -1,7 +1,8 @@
 # Phase 3 — α8.6b Pre-flight: Publish Runtime (`PublishJob` + `PublishWorker`)
 
-> **Status: DRAFT — awaiting sign-off.** Second increment of the **α8.6 Publishing /
-> Creator Workflow** bounded context. Input: `PHASE3_ALPHA8_6b_GROUNDING.md` (APPROVED,
+> **Status: SIGNED OFF (2026-07-27).** DQ1–DQ8 ruled (see §10); **DQ7 deferred** (events
+> only, no notification projection this slice). Second increment of the **α8.6 Publishing
+> / Creator Workflow** bounded context. Input: `PHASE3_ALPHA8_6b_GROUNDING.md` (APPROVED,
 > PR #36, merged `0a8dcb6`). Governing artifacts: `PUBLISHING_RUNTIME_CONTRACT.md`
 > (§6–§13, PUB-1…PUB-10) and **ADR-0047** (credential ownership — consumed, not
 > re-opened). Baseline: `v0.4.36-phase3-alpha8.6a`.
@@ -349,13 +350,11 @@ attempt increment — it never ran).
 **adapter** classifies `transient` vs `permanent` via `DestinationError.kind`; the
 runtime never reads provider codes. `CredentialUnavailableError` = permanent.
 
-### DQ7 — Notification projection → **ADD a minimal fan-out handler now (recommended)**
-Extend the existing `NotificationProjection` (or a sibling subscriber) to map
-`PublishJobSucceeded/Failed → publish.succeeded/failed` notifications, reusing the proven
-exactly-once `source_event_id` pattern. It is small, additive, uses the established
-fan-out seam (PUB-8), and completes the creator feedback loop. *(If you prefer to keep
-α8.6b laser-focused on the runtime, this is the one item safely deferrable to a follow-up
-— flagged for your call.)*
+### DQ7 — Notification projection → **DEFERRED (ruled 2026-07-27)**
+α8.6b emits `PublishJobSucceeded` / `PublishJobFailed` outbox events **only**. The
+notification projection remains a **downstream consumer** and is **not** built in this
+slice — it must not expand α8.6b scope (PUB-8: events are fan-out; consumers evolve
+independently). Wiring a `publish.*` notification handler is a follow-up.
 
 ### DQ8 — Version bump → **mirror `export_jobs` exactly**
 Add `publish_jobs` to the `bump_version` trigger set **and** set `version = version + 1`
@@ -408,20 +407,27 @@ convention.
 3. Ports (`IPublishJobRepository`, `IDestinationPublisher` + `PublishResult` /
    `DestinationError`) + `uow.publish_jobs` wiring.
 4. Infra (`PublishJobRepository`, `MockDestination`, `DestinationRegistry`).
-5. Use cases (`CreatePublishJob`, `ProcessPublishJob`, `PublishWorker`) + `_events.py`.
+5. Use cases (`CreatePublishJob`, `ProcessPublishJob`, `PublishWorker`) + `_events.py`
+   (emits `PublishJob{Created,Succeeded,Failed}` only — **no** notification handler, DQ7).
 6. API (router + schemas + deps + container factories + `publish_batch_size` config).
-7. (DQ7) notification handler.
-8. Enforcement (import-linter + unit + integration/Stage 14) + ERD + enum-count sync.
-9. Full ephemeral-DB gate → feature commit (`-dev`) → release review.
+7. Enforcement (import-linter + unit + integration/Stage 14) + ERD + enum-count sync.
+8. Full ephemeral-DB gate (migration up→down→up, integration, static) → feature commit
+   (`-dev`) → release review.
 
 ---
 
-## 14. Open items for sign-off
+## 14. Sign-off rulings (2026-07-27)
 
-- **DQ1–DQ8 recommendations** above — confirm or amend.
-- **DQ7 specifically** — add the publish notification projection in α8.6b, or defer?
-- **`ContentPackage` default `visibility`** — confirm **`private`** as the safe default.
-- **API shape** — confirm top-level `/api/v1/publish-jobs` (vs. nesting under project).
+- **DQ1–DQ8** — approved as drafted, **except DQ7 → DEFERRED** (α8.6b emits
+  `PublishJobSucceeded` / `PublishJobFailed` events only; no notification projection).
+- **`ContentPackage` default `visibility`** — **`private`** (confirmed).
+- **API shape** — **top-level `/api/v1/publish-jobs`** (confirmed; not nested under
+  project).
+- **Execution model** — a **faithful adaptation of the `ExportJob` worker pattern**; no
+  new execution model.
+- **Scope** — **strictly additive** within the Publishing bounded context; no
+  architectural expansion beyond the approved contract + ADR-0047.
 
-> On approval, α8.6b implementation proceeds in the §13 order on a feature branch;
-> **no implementation code is written until this pre-flight is signed off.**
+> Implementation approved. It proceeds in the §13 order on a feature branch, holding at
+> the `-dev` version pending release approval; the full ephemeral-Postgres gate
+> (migration up→down→up, integration, static) must pass before release review.
