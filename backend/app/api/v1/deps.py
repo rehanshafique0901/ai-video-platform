@@ -67,6 +67,12 @@ from app.application.use_cases.prompts.delete_prompt import DeletePrompt
 from app.application.use_cases.prompts.get_prompt import GetPrompt
 from app.application.use_cases.prompts.list_prompts import ListPrompts
 from app.application.use_cases.prompts.update_prompt import UpdatePrompt
+from app.application.use_cases.publishing.complete_social_connection import (
+    CompleteSocialConnection,
+)
+from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
+from app.application.use_cases.publishing.revoke_social_account import RevokeSocialAccount
+from app.application.use_cases.publishing.start_social_connection import StartSocialConnection
 from app.application.use_cases.render.cancel_render_job import CancelRenderJob
 from app.application.use_cases.render.create_render_job import CreateRenderJob
 from app.application.use_cases.render.get_render_job import GetRenderJob
@@ -253,6 +259,21 @@ MarkNotificationReadDep = Annotated[
 ]
 MarkAllNotificationsReadDep = Annotated[
     MarkAllNotificationsRead, Depends(container.get_mark_all_notifications_read_use_case)
+]
+
+# ---- Use-case dependencies (Slice α8.6a — Social account connections) --
+
+StartSocialConnectionDep = Annotated[
+    StartSocialConnection, Depends(container.get_start_social_connection_use_case)
+]
+CompleteSocialConnectionDep = Annotated[
+    CompleteSocialConnection, Depends(container.get_complete_social_connection_use_case)
+]
+RevokeSocialAccountDep = Annotated[
+    RevokeSocialAccount, Depends(container.get_revoke_social_account_use_case)
+]
+ListSocialAccountsDep = Annotated[
+    ListSocialAccounts, Depends(container.get_list_social_accounts_use_case)
 ]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------

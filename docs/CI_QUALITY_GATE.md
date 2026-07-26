@@ -34,6 +34,7 @@ A red gate blocks merge. There are no opt-outs.
 | 11 | Provider-catalogue seed round-trip   | `scripts/verify_seed_roundtrip.py` | **yes** | < 60 s |
 | 12 | Runtime integration verification     | `pytest -m integration` (Decision-/Execution-plane repos) | **yes** | < 30 s |
 | 13 | Generation end-to-end slice          | `pytest -m integration` (full pipeline → MP4) | **yes** | < 60 s |
+| 14 | Publishing integration verification  | `pytest -m integration` (social account repo + credential service + router) | **yes** | < 30 s |
 
 Total wall-clock budget: **≤ 6 min** in CI; observed Phase 2C run on a warm runner ≈ **3 m 40 s**.
 
@@ -223,6 +224,23 @@ stage — not Stage 12 — precisely because of that stage's scope freeze (§2.8
 For **manual** inspection of a run (rows left intact) use `scripts/generate_demo.py`
 against a throwaway/ephemeral database; a gated live-provider variant of the e2e
 runs only when `AIVP_E2E_POLLINATIONS=1`.
+
+### 2.10 Publishing integration verification (14)
+
+α8.6a Account Connections. The first integration coverage for the **publishing**
+bounded context, run against a DB at head (stages 5–7). It proves three
+boundaries hold on a real database: the `SocialAccount` repository round-trips
+owner-scoped `upsert_connected` / `get_owned` / `list_for_owner` / `mark_revoked`
+(anti-enumeration, newest-first, idempotent revoke); the envelope-encrypting
+`SocialCredential` service stores, authorizes (with proactive refresh), and
+revokes tokens while the database holds **only** ciphertext + nonce + wrapped DEK
+— **never a plaintext or usable OAuth token** (ADR-0047 C1/C6); and the
+`/social-accounts` router enforces authentication and request validation end to
+end. Every test runs inside a `SAVEPOINT` that rolls back on teardown, so — like
+Stage 12 — it never mutates the target database and does not touch the
+destructive-migration restoration guard. It lives in its own stage rather than
+Stage 12 because publishing is a distinct bounded context (Stage 12 scope freeze,
+§2.8) — see `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` §13.
 
 ---
 

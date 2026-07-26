@@ -36,6 +36,11 @@ dependencies = [
     # cross-frame consistency) and image normalisation before ffmpeg assembly.
     # Import is confined to app/infrastructure adapters, never the domain.
     "pillow>=11.0.0",
+    # Publishing credential ownership (α8.6a, ADR-0047) — envelope encryption (AES-256-GCM +
+    # per-record DEK wrapped by an externally-managed master key) for stored user OAuth
+    # credentials. Promoted from a transitive dep (pyjwt[crypto]) to a first-class security
+    # boundary; import is confined to app/infrastructure/publishing/credentials (import-linter).
+    "cryptography>=43.0.0",
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -341,3 +346,33 @@ forbidden_modules = ["boto3", "botocore"]
 # "API talks to application services" contract above. Any layer here that wrote
 # ``import boto3`` itself would be a direct edge and would fail this contract.
 allow_indirect_imports = "True"
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α8.6a (ADR-0047) — the credential-ownership boundary. The ``cryptography``
+# primitives (envelope encryption of user-owned OAuth tokens) are confined to the credential
+# adapter package ``app.infrastructure.publishing.credentials`` — the *sole* module that ever
+# holds key material or decrypts a token (C7). No other layer, and specifically no destination
+# adapter, may import it directly. The composition root wires the credential service, so its
+# indirect edge (core → publishing.credentials → cryptography) is allowed by design.
+name = "Encryption primitives are confined to the publishing credential adapter"
+type = "forbidden"
+source_modules = [
+    "app.domain",
+    "app.application",
+    "app.api",
+    "app.core",
+    "app.infrastructure.publishing.oauth",
+]
+forbidden_modules = ["cryptography"]
+allow_indirect_imports = "True"
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α8.6a — publishing is its own bounded context (PUB-3/PUB-4). The publishing
+# domain must not reach into other domains' aggregates (generation / workflow) — cross-context
+# coupling would erode the boundary the contract establishes. (The generic domain-isolation
+# contract already forbids infrastructure/application/api from the domain; this pins the
+# intra-domain separation the bounded context depends on.)
+name = "Publishing domain is an isolated bounded context"
+type = "forbidden"
+source_modules = ["app.domain.publishing"]
+forbidden_modules = ["app.domain.generation", "app.domain.workflow"]

@@ -301,6 +301,35 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Publishing credential ownership (α8.6a, ADR-0047) --------------------
+    # The externally-managed master key that wraps per-record data keys for stored OAuth
+    # credentials (envelope encryption, R2). Injected into the credential service; never
+    # written to the database, never auto-generated. FAIL-CLOSED: production (environment ==
+    # 'prod') requires this to be set or the process refuses to boot (see container.init);
+    # dev/tests may inject a deterministic key. When unset outside production, publishing is
+    # simply unavailable (no plaintext fallback).
+    publishing_credential_master_key: SecretStr | None = Field(
+        default=None,
+        description="Master key wrapping stored OAuth credentials. Required in production.",
+    )
+    publishing_credential_key_version: str = Field(
+        default="v1",
+        description="Version label recorded with each encrypted credential (rotation key).",
+        min_length=1,
+    )
+    # Base URL the destination OAuth provider redirects back to; the callback path is
+    # appended to form the redirect_uri used in both authorize + code-exchange.
+    publishing_oauth_redirect_base_url: str = Field(
+        default="http://localhost:8000",
+        description="Base URL for the OAuth callback (redirect_uri = base + callback path).",
+        min_length=1,
+    )
+    publishing_oauth_state_ttl_seconds: int = Field(
+        default=600,
+        description="TTL for the signed, stateless OAuth 'state' token (CSRF window).",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -6,6 +6,68 @@
 
 ## [Unreleased]
 
+### α8.6a — Publishing account connections (`0.4.36-phase3-alpha8.6a`, 2026-07-26)
+
+> **Release ordering.** α8.6 (Publishing) was **intentionally completed after the α8.7 baseline**
+> (`v0.4.35-phase3-alpha8.7`, Planner V2): the roadmap deferred Publishing until *after* the AI/AR
+> runtime, so this release's numeric prefix moves forward (`0.4.36`) while the roadmap-milestone
+> suffix steps back to `alpha8.6a`. Publishing is its own bounded context, **not** an α8.7 increment.
+
+**First slice of the α8.6 Publishing / Creator Workflow bounded context — implementation, additive
+migration.** Establishes *credential and connection ownership* only: how a user connects
+an external destination account (OAuth) and how we hold that account's tokens safely. **No `PublishJob`,
+no upload execution, no scheduling, no publishing worker** — those are α8.6b/α8.6c. Governed by
+`docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-10, APPROVED),
+`docs/decisions/ADR-0047-publishing-credential-ownership.md` (C1–C8 / R1–R4), and
+`docs/engineering/PHASE3_ALPHA8_6a_PREFLIGHT.md` (SIGNED OFF, OQ1–OQ5).
+
+#### Added
+- **Publishing domain** (`app/domain/publishing/`) — `SocialAccount` aggregate + `AccountStatus`
+  (`connected|expired|revoked`). A distinct bounded context; login identity (`oauth_identities`) is
+  **not** reused (grounding conclusion).
+- **Ports** — `ISocialCredentialStore` (`store`/`authorize`/`revoke`, returns an immutable
+  `AuthorizedContext`, never raw stored tokens), `ISocialOAuthClient` (+ Mock this slice; real YouTube
+  is α8.6c — OQ1), `IOAuthStateSigner` (signed, stateless CSRF state — OQ3), `IMasterKeyProvider`
+  (env-injected now, Cloud KMS is a future swap behind the same seam — OQ5), and
+  `ISocialAccountRepository` on the UoW.
+- **Envelope encryption** (`app/infrastructure/publishing/credentials/`) — AES-256-GCM per-record DEK
+  wrapped by the master key (`cryptography`, now a direct dependency). The database stores **only**
+  ciphertext + nonce + wrapped DEK + `key_version` — never a plaintext or usable OAuth token
+  (ADR-0047 C1/C2). `key_version` gives a clean rotation path.
+- **Credential service, mock OAuth client, JWT state signer, `SocialAccount` repository** + container
+  wiring, config fields (`publishing_credential_master_key`, `publishing_credential_key_version`,
+  `publishing_oauth_redirect_base_url`, `publishing_oauth_state_ttl_seconds`), and **fail-closed**
+  startup: production refuses to boot without a master key; dev/tests use an explicitly-injected
+  deterministic key only.
+- **Use cases** — `StartSocialConnection`, `CompleteSocialConnection`, `RevokeSocialAccount`,
+  `ListSocialAccounts`; **API** — `POST /api/v1/social-accounts/connect`, `GET …/callback`,
+  `GET …`, `POST …/{id}/revoke` (owner-scoped, anti-enumeration).
+- **Migration `0013_social_accounts`** (additive) — `social_accounts` (profile; `platform` free-text
+  per OQ2, `status` = new `social_account_status` enum) + `social_credentials` (1:1 encrypted secret).
+  Multiple accounts per `(user, platform)` (R4). ORM-backed.
+
+#### Enforcement
+- **Import-linter** — two new contracts: encryption primitives confined to the publishing credential
+  adapter, and the publishing domain kept an isolated bounded context (9 contracts total, all kept).
+- **CI Stage 14 — publishing integration verification** — `SocialAccount` repository, credential
+  service (no-plaintext-token proof), and `/social-accounts` router, run against a DB at head. Kept out
+  of Stage 12 (scope freeze) and Stage 13 (generation slice) — publishing is its own context
+  (`CI_QUALITY_GATE.md` §2.10; contract §13).
+- **Enum guard** — `EXPECTED_ENUM_COUNT` 26 → 27 for `social_account_status` (created by 0013).
+- **ERD** — new *Cluster 13 — Publishing / Creator Workflow* + cross-cluster FK rows.
+
+#### Fixed (CI tooling)
+- **`scripts/_load_env.py`** — environment variables now take precedence over `.env.validation`
+  (`setdefault`, standard 12-factor semantics). This aligns the schema validator (stage 8) and every
+  other `_load_env` consumer with the ci_gate's documented precedence
+  (`--ephemeral-db` > `VALIDATION_DATABASE_URL` > `DATABASE_URL`/`.env.validation`), so
+  `--ephemeral-db` correctly retargets *all* live-DB stages at the isolated container instead of
+  silently validating the shared database.
+
+Full ephemeral-DB gate (stages 0–14) **PASS** on a throwaway `pgvector/pgvector:pg16`: migration 0013
+upgrade→downgrade→upgrade roundtrip clean, schema validator + ERD green, 20 publishing integration
+tests green.
+
 ### Design lock + tooling — α8.5d Capability-registry seed pre-flight & manifest enrichment (2026-07-25)
 
 **Governance + design-time tooling only — no runtime change, no migration, no version bump yet** (the

@@ -84,6 +84,10 @@ def _ensure_test_env_defaults() -> None:
         os.environ["JWT_SECRET"] = "test-secret-do-not-use-in-production-32chars"
     if not os.environ.get("ENVIRONMENT"):
         os.environ["ENVIRONMENT"] = "local"
+    # α8.6a: a deterministic, explicitly-injected publishing master key for dev/tests only
+    # (approved). Production must supply its own or fail closed (container.init).
+    if not os.environ.get("PUBLISHING_CREDENTIAL_MASTER_KEY"):
+        os.environ["PUBLISHING_CREDENTIAL_MASTER_KEY"] = "test-publishing-master-key-do-not-use"
 
 
 @pytest.fixture
@@ -170,6 +174,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
         IRoleRepository,
         ISceneRepository,
         ISessionRepository,
+        ISocialAccountRepository,
         ITenantRepository,
         ITimelineRepository,
         IUsageRecordRepository,
@@ -202,6 +207,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.role_repository import RoleRepository
     from app.infrastructure.repositories.scene_repository import SceneRepository
     from app.infrastructure.repositories.session_repository import SessionRepository
+    from app.infrastructure.repositories.social_account_repository import (
+        SocialAccountRepository,
+    )
     from app.infrastructure.repositories.tenant_repository import TenantRepository
     from app.infrastructure.repositories.timeline_repository import TimelineRepository
     from app.infrastructure.repositories.usage_record_repository import (
@@ -259,6 +267,9 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.media = cast(IMediaRepository, MediaRepository(self._session))
                 self.notifications = cast(
                     INotificationRepository, NotificationRepository(self._session)
+                )
+                self.social_accounts = cast(
+                    ISocialAccountRepository, SocialAccountRepository(self._session)
                 )
                 self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
                 self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))

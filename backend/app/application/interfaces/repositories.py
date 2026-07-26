@@ -45,6 +45,7 @@ from app.domain.media.media_asset import MediaAsset
 from app.domain.notifications.notification import Notification
 from app.domain.projects.project import Project
 from app.domain.prompts.prompt import Prompt
+from app.domain.publishing.social_account import SocialAccount
 from app.domain.render.render_job import RenderJob
 from app.domain.scenes.scene import Scene
 from app.domain.timeline.clip import Clip
@@ -2241,5 +2242,63 @@ class INotificationRepository(ABC):
         AND read_at IS NULL AND archived = false``. Writes only ``read_at`` (W8.5b.9) and
         never reshuffles the feed (W8.5b.10). Returns the affected row count (``0`` when
         nothing was unread — an idempotent no-op). Owner-scoped (W8.5b.8).
+        """
+        ...
+
+
+class ISocialAccountRepository(ABC):
+    """Persistence surface for ``social_accounts`` — the publishing-context identity (α8.6a).
+
+    A ``social_accounts`` row records a user's connection to one external destination
+    (non-secret profile + status). The OAuth secret lives in a separate credential store
+    (ADR-0047 R1); this port never touches token material.
+
+    **Owner-scoped (anti-enumeration).** Every read/mutation is scoped by ``tenant_id`` +
+    ``user_id`` — an account belonging to another principal is invisible: a foreign/missing
+    id returns ``None`` (→ uniform ``404`` upstream), mirroring
+    :class:`IMediaRepository`. **Multiple accounts per ``(user, platform)``** are allowed;
+    the natural key is ``(user_id, platform, external_account_id)`` (R4).
+    """
+
+    @abstractmethod
+    async def upsert_connected(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        platform: str,
+        external_account_id: str,
+        display_name: str | None,
+        scopes: tuple[str, ...],
+    ) -> SocialAccount:
+        """Insert (or reconnect) a ``connected`` account and return it.
+
+        Keyed on ``(user_id, platform, external_account_id)``: a first connection inserts;
+        a reconnection updates the existing row to ``status='connected'`` (clearing
+        ``revoked_at``, refreshing ``display_name`` / ``scopes`` / ``connected_at``). The
+        credential itself is stored separately by the credential service.
+        """
+        ...
+
+    @abstractmethod
+    async def get_owned(
+        self, *, tenant_id: UUID, user_id: UUID, social_account_id: UUID
+    ) -> SocialAccount | None:
+        """Return the caller's account by id, or ``None`` if missing / another principal's."""
+        ...
+
+    @abstractmethod
+    async def list_for_owner(self, *, tenant_id: UUID, user_id: UUID) -> list[SocialAccount]:
+        """Return the caller's accounts (newest first). Owner-scoped."""
+        ...
+
+    @abstractmethod
+    async def mark_revoked(
+        self, *, tenant_id: UUID, user_id: UUID, social_account_id: UUID
+    ) -> SocialAccount | None:
+        """Owner-scoped transition to ``status='revoked'`` (stamps ``revoked_at``).
+
+        Returns the updated account, or ``None`` if missing / not the caller's. Idempotent:
+        an already-revoked owned row is returned unchanged.
         """
         ...

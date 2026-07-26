@@ -1164,6 +1164,61 @@ erDiagram
 
 ---
 
+## Cluster 13 — Publishing / Creator Workflow (α8.6a)
+
+> **The publishing bounded context's account-connection tables.** Created by migration
+> `0013_social_accounts` (additive) and governed by
+> **ADR-0047** (publishing credential ownership, C1–C8 / R1–R4) and
+> `docs/engineering/PHASE3_ALPHA8_6a_PREFLIGHT.md` (§2 data model). Unlike Cluster 12,
+> these are **ORM-backed** (`app/infrastructure/db/models/publishing.py`). The profile
+> (`social_accounts`) is deliberately split from the secret (`social_credentials`): the
+> database holds **only** envelope-encrypted token material — ciphertext + nonce +
+> wrapped DEK — never a plaintext or directly-usable OAuth token (C1/C2). `platform` is
+> free-text for now (OQ2); `status` is the new `social_account_status` enum.
+
+```mermaid
+erDiagram
+    social_accounts ||--o| social_credentials : social_account_id
+
+    social_accounts {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        text platform "youtube|… (free-text, OQ2)"
+        text external_account_id
+        text display_name "nullable"
+        social_account_status status
+        text_array scopes
+        timestamptz connected_at "nullable"
+        timestamptz revoked_at "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    social_credentials {
+        uuid id PK
+        uuid social_account_id FK "unique (1:1)"
+        bytea ciphertext "envelope-encrypted token bundle"
+        bytea nonce
+        bytea wrapped_dek "DEK wrapped by master key"
+        text key_version
+        text algorithm "AES-256-GCM"
+        timestamptz access_token_expires_at "nullable (drives refresh)"
+        timestamptz rotated_at "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+```
+
+> **Reconciliation note (α8.6a).**
+> - `social_accounts` is unique on `(user_id, platform, external_account_id)` — multiple
+>   accounts per `(user, platform)` are supported (R4); owner scope is `(tenant_id, user_id)`.
+> - `social_credentials` is 1:1 with `social_accounts` (`uq_social_credentials_social_account_id`)
+>   and `ON DELETE CASCADE`, so revoking/deleting an account removes its secret material.
+> - No plaintext OAuth token is ever stored, logged, emitted in events, or returned by the
+>   API (C1/C6); the credential service is the only component that decrypts.
+
+---
+
 ## Cross-Cluster Foreign-Key Summary
 
 These FKs span clusters and are easy to miss; documented here for review:
@@ -1186,6 +1241,9 @@ These FKs span clusters and are easy to miss; documented here for review:
 | `ai_models.successor_model_id` → `ai_models.id` | self | SET NULL |
 | `feature_flag_overrides.flag_id` → `feature_flags.id` | many:1 | CASCADE |
 | `subscriptions.plan_id` → `plans.id` | many:1 | RESTRICT |
+| `social_accounts.tenant_id` → `tenants.id` | many:1 | RESTRICT |
+| `social_accounts.user_id` → `users.id` | many:1 | CASCADE |
+| `social_credentials.social_account_id` → `social_accounts.id` | 1:1 | CASCADE |
 
 Logical FKs (no DB-level constraint, because the target table is partitioned and a composite FK would be needed):
 

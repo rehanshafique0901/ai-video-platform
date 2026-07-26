@@ -557,6 +557,32 @@ def _stages() -> list[Stage]:
             ],
             requires_db=True,
         ),
+        # Stage 14 (α8.6a) — Publishing account-connection integration. Proves the
+        # publishing bounded context persists and enforces its boundaries against a
+        # real DB at head (stages 5-7): the SocialAccount repository round-trips
+        # owner-scoped upsert/list/revoke; the envelope-encrypting SocialCredential
+        # service stores/authorizes/revokes with NO plaintext token ever landing in
+        # the database (ADR-0047 C1/C6); and the /social-accounts router enforces
+        # auth + validation end-to-end. Kept OUT of Stage 12 (its scope freeze) and
+        # Stage 13 (generation slice) — publishing is its own bounded context, so it
+        # gets its own stage per PUBLISHING_RUNTIME_CONTRACT.md §13. Each test rolls
+        # back on teardown; no destructive-migration guard interaction.
+        Stage(
+            number=14,
+            title="publishing integration verification",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/repositories/"
+                "test_social_account_repository.py",
+                "tests/integration/infrastructure/publishing/" "test_social_credential_service.py",
+                "tests/integration/api/test_social_accounts.py",
+            ],
+            requires_db=True,
+        ),
     ]
 
 

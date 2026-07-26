@@ -33,6 +33,7 @@ from app.application.interfaces.repositories import (
     IRoleRepository,
     ISceneRepository,
     ISessionRepository,
+    ISocialAccountRepository,
     ITenantRepository,
     ITimelineRepository,
     IUsageRecordRepository,
@@ -60,6 +61,7 @@ from app.infrastructure.repositories.render_job_repository import RenderJobRepos
 from app.infrastructure.repositories.role_repository import RoleRepository
 from app.infrastructure.repositories.scene_repository import SceneRepository
 from app.infrastructure.repositories.session_repository import SessionRepository
+from app.infrastructure.repositories.social_account_repository import SocialAccountRepository
 from app.infrastructure.repositories.tenant_repository import TenantRepository
 from app.infrastructure.repositories.timeline_repository import TimelineRepository
 from app.infrastructure.repositories.usage_record_repository import UsageRecordRepository
@@ -101,6 +103,9 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
         self.export_jobs = cast(IExportJobRepository, ExportJobRepository(self._session))
         self.notifications = cast(INotificationRepository, NotificationRepository(self._session))
+        self.social_accounts = cast(
+            ISocialAccountRepository, SocialAccountRepository(self._session)
+        )
         self.outbox = cast(IEventOutboxRepository, EventOutboxRepository(self._session))
         self.workflow_runs = cast(IWorkflowRunRepository, WorkflowRunRepository(self._session))
         self.locks = cast(IDistributedLockManager, SqlAlchemyDistributedLockManager(self._session))
