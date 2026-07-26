@@ -306,11 +306,11 @@ the ADR rather than pre-empting them.
 
 ---
 
-## 11. Invariants (PUB-1 … PUB-10) — approved 2026-07-26
+## 11. Invariants (PUB-1 … PUB-11) — PUB-1…PUB-10 approved 2026-07-26; PUB-11 added α8.6c 2026-07-27
 
 The canonical, sign-off-approved invariant set. Operational specifics (idempotency,
 owner-scoping, CAS transitions, the three-layer credential separation) live in the
-sections cited and are governed by these ten.
+sections cited and are governed by these eleven.
 
 - **PUB-1 — Publishing consumes the export-delivery `MediaAsset` only.** It reads
   `export_jobs.output_media_asset_id`; never `generation_assets` (§3).
@@ -344,6 +344,21 @@ sections cited and are governed by these ten.
   credentials — storage, encryption-at-rest, refresh, revocation, access boundaries —
   are owned by a credential service defined in ADR-0047, which must be accepted before
   α8.6a (§9).
+- **PUB-11 — A destination upload is never retried once the platform may have durably
+  accepted the media** (added α8.6c). If the outcome *after byte transmission* is
+  **ambiguous** — the connection drops after the upload `PUT`, the finalize response
+  times out, or a success status carries a body that cannot be parsed into a post id —
+  the adapter classifies it as a **permanent, manual-review** failure
+  (`DestinationError(retryable=False, code="ambiguous_upload_outcome")`), **never**
+  retryable. Only failures that occur **strictly before upload begins**, or that are
+  **unambiguously transient before acceptance** (session-initiation `5xx` / `429` /
+  network / pre-`PUT` timeout), are retryable. This favours correctness over automatic
+  retry: the platform may occasionally surrender a legitimately-retryable upload to a
+  permanent failure, but it will **never** double-post to a creator's channel. The
+  job-level partial-unique idempotency (`(source_media_asset_id, social_account_id)`,
+  PUB-7) prevents a *second job* for the same artifact/account; PUB-11 covers the
+  *within-attempt* ambiguity that job key cannot see — necessary because the YouTube
+  `videos.insert` API exposes no native idempotency key (§6, §8).
 
 Each mechanically-guardable invariant ships with **documentation + implementation +
 enforcement** in its increment (the α8.7 discipline). Candidate guards: an
