@@ -6,7 +6,7 @@
 
 ## 1. What runs, in what order
 
-Thirteen stages (**0–12**), **fail-fast** — the first failure stops the run.
+Fifteen stages (**0–14**), **fail-fast** — the first failure stops the run.
 
 | # | Stage                                              | Tool                                              | Needs DB? | Typical runtime |
 |---|----------------------------------------------------|---------------------------------------------------|-----------|-----------------|
@@ -24,8 +24,9 @@ Thirteen stages (**0–12**), **fail-fast** — the first failure stops the run.
 | 11| Provider-catalogue seed round-trip (α8.5d)         | `scripts/verify_seed_roundtrip.py`                | yes       | 20–60 s         |
 | 12| Runtime integration verification (α8.5e/α8.6)      | `pytest -m integration` (Decision-/Execution-plane repos) | yes | 10–30 s     |
 | 13| Generation end-to-end slice (α8.6 Increment 5)     | `pytest -m integration` (full pipeline → MP4)     | yes       | 20–60 s         |
+| 14| Publishing integration verification (α8.6a)        | `pytest -m integration` (social account repo + credential service + router) | yes | 10–30 s |
 
-Stages 11–13 are appended after the destructive migration round-trip so they
+Stages 11–14 are appended after the destructive migration round-trip so they
 cannot disturb its restoration guard. Stage 11 seeds the eight catalogue tables
 from YAML and proves the seeder is deterministic/idempotent; stage 12 then runs
 the Decision-/Execution-plane persistence tests (catalogue reader, runtime-state
@@ -34,7 +35,12 @@ that seeded DB — each inside a `SAVEPOINT` that rolls back — to prove a fres
 created database can drive the runtime plumbing. Stage 13 runs the generation
 **feature slice** end to end (Prompt→…→FFmpeg→MP4→persistence); it is deliberately
 kept out of Stage 12 (see the scope-freeze note) and commits + self-cleans rather
-than rolling back, and auto-skips when ffmpeg/ffprobe are unavailable.
+than rolling back, and auto-skips when ffmpeg/ffprobe are unavailable. Stage 14
+runs the **publishing** bounded context's account-connection integration tests —
+the `SocialAccount` repository (owner-scoped upsert/list/revoke), the
+envelope-encrypting `SocialCredential` service (store/authorize/revoke with **no
+plaintext token** ever persisted — ADR-0047 C1/C6), and the `/social-accounts`
+router (auth + validation) — each inside a `SAVEPOINT` that rolls back.
 
 > **Stage 12 scope freeze (governance).** Stage 12 grows *only* when a new
 > runtime repository or persistence boundary is introduced. Business-feature
@@ -42,8 +48,8 @@ than rolling back, and auto-skips when ffmpeg/ffprobe are unavailable.
 > providers, publishing) belong to their feature slices, not this infrastructure
 > gate — keeping Stage 12 from becoming a kitchen sink. A feature slice that
 > needs its own live-DB e2e coverage gets a **dedicated stage** instead (as the
-> α8.6 generation slice does in Stage 13), so each stage keeps a single, legible
-> purpose.
+> α8.6 generation slice does in Stage 13 and α8.6a publishing does in Stage 14),
+> so each stage keeps a single, legible purpose.
 
 End-to-end runtime: **~3 minutes** in CI (service container), **~2.5 minutes** locally against a low-latency Postgres, **~5 minutes** locally against a cross-region pooled Postgres (e.g. Supabase). The earlier validator was 263 s for stage 8 alone; the pg_catalog rewrite brought it to 17 s.
 

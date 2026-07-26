@@ -39,6 +39,7 @@ from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
 from app.application.interfaces.image_generator import IImageGenerator
 from app.application.interfaces.media_downloader import IMediaDownloader
+from app.application.interfaces.oauth_state_signer import IOAuthStateSigner
 from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.preview_clipper import IPreviewClipper
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
@@ -50,6 +51,8 @@ from app.application.interfaces.resolution_ledger import IResolutionLedger
 from app.application.interfaces.runtime_state_reader import IRuntimeStateReader
 from app.application.interfaces.security import IPasswordHasher, ITokenIssuer
 from app.application.interfaces.slideshow_renderer import ISlideshowRenderer
+from app.application.interfaces.social_credential_store import ISocialCredentialStore
+from app.application.interfaces.social_oauth_client import ISocialOAuthClient
 from app.application.interfaces.storage_resolver import IStorageResolver
 from app.application.interfaces.thumbnailer import IThumbnailer
 from app.application.interfaces.unit_of_work import IUnitOfWork
@@ -109,6 +112,12 @@ from app.application.use_cases.prompts.delete_prompt import DeletePrompt
 from app.application.use_cases.prompts.get_prompt import GetPrompt
 from app.application.use_cases.prompts.list_prompts import ListPrompts
 from app.application.use_cases.prompts.update_prompt import UpdatePrompt
+from app.application.use_cases.publishing.complete_social_connection import (
+    CompleteSocialConnection,
+)
+from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
+from app.application.use_cases.publishing.revoke_social_account import RevokeSocialAccount
+from app.application.use_cases.publishing.start_social_connection import StartSocialConnection
 from app.application.use_cases.relay.relay_service import RelayService
 from app.application.use_cases.render.cancel_render_job import CancelRenderJob
 from app.application.use_cases.render.create_render_job import CreateRenderJob
@@ -177,6 +186,14 @@ from app.infrastructure.generation.pillow_feature_extractor import PillowFeature
 from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
+from app.infrastructure.publishing.credentials.credential_service import SocialCredentialService
+from app.infrastructure.publishing.credentials.envelope import EnvelopeCipher
+from app.infrastructure.publishing.credentials.master_key import (
+    EnvMasterKeyProvider,
+    IMasterKeyProvider,
+)
+from app.infrastructure.publishing.oauth.mock_oauth_client import MockSocialOAuthClient
+from app.infrastructure.publishing.state_token_signer import JwtOAuthStateSigner
 from app.infrastructure.render import (
     FfmpegGifPreviewer,
     FfmpegPreviewClipper,
@@ -267,6 +284,14 @@ def init(settings: Settings) -> None:
     global _provider_registry, _openai_client, _fal_client, _settings
     if _engine is not None:
         return
+    # α8.6a fail-closed (ADR-0047 C2): production must hold a publishing master key or refuse
+    # to boot. There is no auto-generation and no plaintext fallback — a publishing credential
+    # is either securely available or the capability is explicitly unavailable.
+    if settings.environment == "prod" and settings.publishing_credential_master_key is None:
+        raise RuntimeError(
+            "publishing_credential_master_key is required in production "
+            "(fail-closed — no plaintext fallback, no auto-generation)"
+        )
     _settings = settings
     _engine = make_engine(settings.database_url)
     _session_factory = make_session_factory(_engine)
@@ -1510,3 +1535,92 @@ def get_media_enrichment_worker() -> MediaEnrichmentWorker:
         enrich=get_enrich_generated_media_use_case(),
         batch_size=settings.enrichment_batch_size,
     )
+
+
+# ---------------------------------------------------------------------
+# Publishing — account connections (Slice α8.6a, ADR-0047)
+# ---------------------------------------------------------------------
+# The credential-ownership boundary + the connection lifecycle. The master key is injected
+# (never fetched by adapters — W8.1.1); the credential service is the sole decryptor (C7).
+# α8.6a wires only the deterministic Mock OAuth client (OQ1); the real YouTube client lands
+# in α8.6c. Publishing is FAIL-CLOSED: without a master key the credential service cannot be
+# built and every connection endpoint errors (never a plaintext fallback).
+
+
+_SOCIAL_CALLBACK_PATH = "/api/v1/social-accounts/callback"
+
+
+def _get_master_key_provider() -> IMasterKeyProvider:
+    """Build the envelope master-key provider, or fail closed if no key is configured."""
+    settings = _get_settings()
+    key = settings.publishing_credential_master_key
+    if key is None:
+        raise RuntimeError(
+            "publishing master key is not configured — publishing is unavailable "
+            "(set publishing_credential_master_key)"
+        )
+    return EnvMasterKeyProvider(
+        version=settings.publishing_credential_key_version,
+        secret=key.get_secret_value(),
+    )
+
+
+def _get_oauth_clients() -> dict[str, ISocialOAuthClient]:
+    """The per-platform OAuth clients (α8.6a: Mock only — OQ1)."""
+    return {"mock": MockSocialOAuthClient(clock=get_clock())}
+
+
+def _get_oauth_state_signer() -> IOAuthStateSigner:
+    """The signed, stateless OAuth state signer (reuses the JWT signing key + algorithm)."""
+    settings = _get_settings()
+    return JwtOAuthStateSigner(
+        secret=settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+        ttl_seconds=settings.publishing_oauth_state_ttl_seconds,
+        clock=get_clock(),
+    )
+
+
+def _get_social_redirect_uri() -> str:
+    settings = _get_settings()
+    return settings.publishing_oauth_redirect_base_url.rstrip("/") + _SOCIAL_CALLBACK_PATH
+
+
+def get_social_credential_store() -> ISocialCredentialStore:
+    """The credential service (sole decryptor). Raises if the master key is unavailable."""
+    cipher = EnvelopeCipher(_get_master_key_provider())
+    return SocialCredentialService(
+        session_factory=get_session_factory(),
+        cipher=cipher,
+        oauth_clients=_get_oauth_clients(),
+        clock=get_clock(),
+    )
+
+
+def get_start_social_connection_use_case() -> StartSocialConnection:
+    return StartSocialConnection(
+        oauth_clients=_get_oauth_clients(),
+        state_signer=_get_oauth_state_signer(),
+        redirect_uri=_get_social_redirect_uri(),
+    )
+
+
+def get_complete_social_connection_use_case() -> CompleteSocialConnection:
+    return CompleteSocialConnection(
+        uow=get_unit_of_work(),
+        oauth_clients=_get_oauth_clients(),
+        state_signer=_get_oauth_state_signer(),
+        credential_store=get_social_credential_store(),
+        redirect_uri=_get_social_redirect_uri(),
+    )
+
+
+def get_revoke_social_account_use_case() -> RevokeSocialAccount:
+    return RevokeSocialAccount(
+        uow=get_unit_of_work(),
+        credential_store=get_social_credential_store(),
+    )
+
+
+def get_list_social_accounts_use_case() -> ListSocialAccounts:
+    return ListSocialAccounts(uow=get_unit_of_work())

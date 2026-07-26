@@ -25,7 +25,9 @@ from sqlalchemy import Enum as SAEnum
 from app.infrastructure.db import enums as enums_module
 
 # Expected count is the implementation count after Phase 2B closed.
-EXPECTED_ENUM_COUNT = 26
+# α8.6a (ADR-0047, migration 0013): +1 for ``social_account_status`` — the
+# publishing bounded context's connected/expired/revoked account states.
+EXPECTED_ENUM_COUNT = 27
 
 _LOWER_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 

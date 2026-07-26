@@ -108,3 +108,7 @@ idempotency_status_enum = _pg_enum("idempotency_status", "in_flight", "succeeded
 audit_actor_kind_enum = _pg_enum(
     "audit_actor_kind", "user", "system", "admin", "api_key", "webhook"
 )
+# Publishing / Creator Workflow (α8.6a) — a connected destination account's lifecycle.
+# ``platform`` stays free-text (grows per destination); only the small, stable status set
+# is an enum (OQ2).
+social_account_status_enum = _pg_enum("social_account_status", "connected", "expired", "revoked")

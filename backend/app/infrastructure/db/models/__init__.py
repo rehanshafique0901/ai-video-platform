@@ -20,6 +20,7 @@ from app.infrastructure.db.models import (  # noqa: F401
     notifications,
     operations,
     projects,
+    publishing,
     scenes,
     sentinel,
     templates,
