@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.34-phase3-alpha8.5b3r` (code constant — a version bump lapsed after α8.5b.3r; see the tag/version note below) |
-| **Latest runtime tag** | `v0.4.35-phase3-alpha8.7` |
+| **Application version** | `0.4.36-phase3-alpha8.6a` (code constant — realigned with the tag at the α8.6a finalize) |
+| **Latest runtime tag** | `v0.4.36-phase3-alpha8.6a` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, and α8.7 Planner V2 all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, and α8.6a publishing account connections all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -36,9 +36,16 @@ strictly additive — no frozen path changed, no `Freeze-Override:` trailer used
 > **Tag/version note.** Milestone tagging lapsed after `v0.4.34-phase3-alpha8.5b3r`:
 > α8.5c, α8.5d, α8.5e, the α8.5x execution runtime + first generation slice, and
 > α8.7 Planner V2 all landed **folded into the single `v0.4.35-phase3-alpha8.7`
-> baseline tag**. The FastAPI `version` constant in `backend/app/main.py` still reads
-> `0.4.34-phase3-alpha8.5b3r`; realigning that code constant is a separate (code)
-> bump, out of scope for this documentation sync.
+> baseline tag**. Per-slice tagging **resumed at α8.6a** (`v0.4.36-phase3-alpha8.6a`),
+> and the FastAPI `version` constant in `backend/app/main.py` was **realigned** to match
+> at that finalize (it previously lagged at `0.4.34-phase3-alpha8.5b3r`).
+>
+> **Release ordering.** α8.6 (Publishing) was intentionally completed *after* the α8.7
+> baseline — the roadmap deferred Publishing until after the AI/AR runtime — so the
+> numeric prefix moves forward (`0.4.36`) while the roadmap-milestone suffix steps back
+> to `alpha8.6a`. Publishing is its own bounded context, not an α8.7 increment. (The
+> `v0.4.35` tag annotation loosely applied "α8.6" to the *execution runtime*, which this
+> document records authoritatively as **α8.5x**; **α8.6 is Publishing**.)
 
 ---
 
@@ -145,6 +152,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Execution runtime & provenance | ✅ | α8.5x-mrc.4 (Increment 4) | persistent Execution plane: `generations` / `generation_shots` / `generation_assets` (+ `parent_asset_id` lineage), `model_cache`, the `generations.status` state machine, and transactional-outbox lifecycle events; raw-SQL / ORM-less (migration `0012`); Execution-plane boundaries X1–X8 frozen ([`ADR-0046`](../decisions/ADR-0046-execution-runtime-boundaries.md), [`EXECUTION_RUNTIME_CONTRACT.md`](../engineering/EXECUTION_RUNTIME_CONTRACT.md)) |
 | First end-to-end generation slice | ✅ | α8.5x-mrc (Increment 5) | prompt → plan → storyboard → resolve → generate → verify → render → export, persisted with AR18 provenance; proven on an ephemeral Postgres + ffmpeg (CI Stage 13); golden-scenario regression, Pollinations wired purely as an `IImageGenerator` |
 | Cinematic storyboard — Planner V2 | ✅ | α8.7 | `ShotIntent` value object + data-driven `StoryArcTemplate` (3/5/6 arcs); deterministic, position-independent shot ids + `blake2b` per-shot seeds; invariants CS-7 (adjacent shots differ) + CS-8 (no provider language in intent); Golden V1 frozen, Golden V2 active ([`CINEMATIC_STORYBOARD_CONTRACT.md`](../engineering/CINEMATIC_STORYBOARD_CONTRACT.md)) |
+| Publishing — account connections (OAuth) | ✅ | α8.6a | first slice of the **Publishing** bounded context (credential + connection ownership only — no `PublishJob`/upload yet): `SocialAccount` aggregate, envelope-encrypted `social_credentials` (AES-256-GCM, per-record DEK wrapped by a fail-closed master key — the DB never holds a plaintext/usable token, ADR-0047 C1/C2), ports `ISocialCredentialStore`/`ISocialOAuthClient`/`IOAuthStateSigner` (Mock OAuth this slice), owner-scoped `/api/v1/social-accounts`; additive migration `0013`; import-linter crypto-confinement + bounded-context isolation; CI Stage 14; PUB-1…PUB-10 ([`PUBLISHING_RUNTIME_CONTRACT.md`](../engineering/PUBLISHING_RUNTIME_CONTRACT.md), [`ADR-0047`](../decisions/ADR-0047-publishing-credential-ownership.md)) |
 
 ### Invariant catalog
 
@@ -314,14 +322,16 @@ rather than guarding against code that does not yet exist.
 ## Remaining roadmap
 
 > Shipped slices (α8.5a → α8.5b.3r, α8.5c → α8.5e, the α8.5x execution runtime +
-> first generation slice, and α8.7 Planner V2) have moved up into
-> *Completed capability lifecycles*. Only genuinely future work remains below.
+> first generation slice, α8.7 Planner V2, and α8.6a publishing account connections)
+> have moved up into *Completed capability lifecycles*. Only genuinely future work
+> remains below.
 
 | Slice | Scope |
 |---|---|
 | **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
 | **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
-| **α8.6** | Publishing — `PublishJob` + `SocialAccount` + destination OAuth (a new bounded context; destinations are not AI providers; its own parallel registry, shared α8.5c tooling; after the AR runtime) |
+| **α8.6b** | Publishing — Publish Runtime: `PublishJob` + `PublishWorker`, state machine, dual-lock serialization (`publish_job:*` / `project_publish:*`), bounded retries, terminal outbox events (fan-out only); additive migration `0014` (`publish_jobs`); builds on the α8.6a connection/credential boundary (PUB-6/7/8; contract §6–§7) |
+| **α8.6c** | Publishing — destination adapters: credential-blind `IDestinationPublisher`, YouTube (real OAuth client + upload) + Mock, deterministic metadata mapping (destinations are not AI providers; contract §8) |
 
 All remaining work is **downstream of / additive to the frozen orchestration
 platform** (ADR-0042 Gate 1) and respects the render composition boundary
