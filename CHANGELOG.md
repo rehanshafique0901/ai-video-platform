@@ -6,6 +6,52 @@
 
 ## [Unreleased]
 
+### α8.6c — Destination Adapters: YouTube (`0.4.38-phase3-alpha8.6c`, 2026-07-27)
+
+**Third slice of the α8.6 Publishing / Creator Workflow bounded context — adapter-only, no migration.**
+Replaces the Mock destination with the **first production-quality destination (YouTube)** while leaving
+the runtime, ports, domain, and schema exactly as α8.6b left them. Two new credential-blind infrastructure
+leaves behind unchanged ports — `YouTubeOAuthClient` (`ISocialOAuthClient`: connect / exchange / refresh /
+revoke) and `YouTubeDestination` (`IDestinationPublisher`: Data API v3 `videos.insert` resumable upload) —
+plus a thin injected `httpx` transport, configuration-blind `Settings`, and composition-root wiring.
+Governed by `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-11) and
+`docs/engineering/PHASE3_ALPHA8_6c_PREFLIGHT.md` (EQ1–EQ5).
+
+#### Added
+- **`YouTubeOAuthClient`** (`infrastructure/publishing/oauth/`) — Google OAuth 2.0 mechanics against
+  injected endpoints: consent-URL construction (`access_type=offline`, `prompt=consent`), code exchange
+  (+ `channels?mine=true` identity lookup so a `SocialAccount` is keyed by the real channel), refresh, and
+  best-effort revoke. Configuration-blind (client id/secret/scopes/endpoints injected).
+- **`YouTubeDestination`** (`infrastructure/publishing/destinations/`) — resumable `videos.insert`
+  (initiate session → stream bytes → parse video id), deterministic `ContentPackage → snippet/status`
+  mapping with adapter-side limit validation, and Google-error → `DestinationError(retryable)`
+  classification. Credential-blind leaf: consumes only the `AuthorizedContext` bearer.
+- **`PUB-11`** (new invariant) — ambiguous post-transmission upload outcomes are **permanent
+  manual-review** failures, never retried (no double-post); only pre-upload / unambiguously-transient
+  failures are retryable. Recorded in `PUBLISHING_RUNTIME_CONTRACT.md` §11 (EQ3).
+- **Config** — configuration-blind YouTube `Settings` (client id/secret, scopes, authorize/token/revoke/
+  API base URLs, timeout); **fail-soft**: if the client id/secret are unset, YouTube is simply not
+  registered (parallels the α8.6a master-key fail-soft).
+- **Composition wiring** — `_get_oauth_clients()` + `_get_destination_registry()` register `"youtube"`
+  when configured, sharing one memoised `httpx.AsyncClient` (closed on shutdown). `supported_platforms()`
+  then admits YouTube at create-time with no create-path change.
+
+#### Enforcement
+- **Import-linter** — no new contract; the existing *destination adapters are credential-blind leaves* +
+  *encryption primitives confined* contracts already box in the new `destinations`/`oauth` files. A unit
+  test asserts `YouTubeDestination.publish` consumes only the `AuthorizedContext`.
+- **Tests (network-free, Stage 4 unit)** — request/response mapping, error-classification (incl. PUB-11
+  ambiguous-outcome), and resumable-protocol tests for `YouTubeDestination`; consent-URL / exchange /
+  refresh / revoke tests for `YouTubeOAuthClient` — all via an injected `httpx.MockTransport`.
+- **Opt-in live smoke** — an env-gated (`YOUTUBE_LIVE_SMOKE=1`) real-upload test, **excluded from CI**
+  (Stage 14 stays deterministic + offline; the Mock destination remains the CI default).
+
+**No migration, no port change, no runtime/domain/schema expansion.** Full ephemeral-DB gate
+(stages 0–14) **PASS** on a throwaway `pgvector/pgvector:pg16`: static (mypy + 10 import-linter
+contracts) green, 33 new network-free YouTube unit tests green, migration up→down→up roundtrip clean
+(no new migration), Stage 14 publishing integration green (38 tests) with the runtime still
+credential-blind and the Mock destination still the CI default.
+
 ### α8.6b — Publish Runtime (`0.4.37-phase3-alpha8.6b`, 2026-07-27)
 
 **Second slice of the α8.6 Publishing / Creator Workflow bounded context — implementation, additive

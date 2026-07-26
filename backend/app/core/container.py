@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.interfaces.catalogue_reader import ICatalogueReader
 from app.application.interfaces.clock import IClock
+from app.application.interfaces.destination_publisher import IDestinationPublisher
 from app.application.interfaces.download_delivery import IDownloadDelivery
 from app.application.interfaces.exporter import IExporter
 from app.application.interfaces.gif_previewer import IGifPreviewer
@@ -199,7 +200,9 @@ from app.infrastructure.publishing.credentials.master_key import (
 )
 from app.infrastructure.publishing.destinations.mock_destination import MockDestination
 from app.infrastructure.publishing.destinations.registry import DestinationRegistry
+from app.infrastructure.publishing.destinations.youtube import YouTubeDestination
 from app.infrastructure.publishing.oauth.mock_oauth_client import MockSocialOAuthClient
+from app.infrastructure.publishing.oauth.youtube_oauth_client import YouTubeOAuthClient
 from app.infrastructure.publishing.state_token_signer import JwtOAuthStateSigner
 from app.infrastructure.render import (
     FfmpegGifPreviewer,
@@ -277,6 +280,10 @@ _slideshow_renderer: ISlideshowRenderer | None = None
 _video_probe: IVideoProbe | None = None
 # α8.6b: the publish-runtime destination registry (Mock in α8.6b; YouTube in α8.6c).
 _destination_registry: DestinationRegistry | None = None
+# α8.6c: one shared httpx client for the real YouTube leaves (OAuth client + destination),
+# built lazily iff YouTube is configured and closed in shutdown(). None on the common
+# (unconfigured) path, so tests open no client they must close.
+_youtube_client: httpx.AsyncClient | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -417,6 +424,7 @@ async def shutdown() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
+    global _destination_registry, _youtube_client
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -429,6 +437,8 @@ async def shutdown() -> None:
         await _media_download_client.aclose()
     if _image_client is not None:
         await _image_client.aclose()
+    if _youtube_client is not None:
+        await _youtube_client.aclose()
     _engine = None
     _session_factory = None
     _provider_registry = None
@@ -454,6 +464,8 @@ async def shutdown() -> None:
     _feature_extractor = None
     _slideshow_renderer = None
     _video_probe = None
+    _destination_registry = None
+    _youtube_client = None
     _settings = None
 
 
@@ -467,7 +479,7 @@ def reset() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
-    global _destination_registry
+    global _destination_registry, _youtube_client
     _settings = None
     _engine = None
     _session_factory = None
@@ -504,6 +516,7 @@ def reset() -> None:
     _slideshow_renderer = None
     _video_probe = None
     _destination_registry = None
+    _youtube_client = None
 
 
 def _require_init() -> None:
@@ -1576,9 +1589,48 @@ def _get_master_key_provider() -> IMasterKeyProvider:
     )
 
 
+def _get_youtube_http_client() -> httpx.AsyncClient:
+    """Lazily build + memoise the shared httpx client for the YouTube leaves (α8.6c).
+
+    Built on first use (only when YouTube is configured), so the common path opens no client
+    it must close; disposed in ``shutdown()``. Both the OAuth client and the destination
+    adapter share it. Configuration-blind: it holds no credential (the bearer/secret is
+    passed per-request by the leaves).
+    """
+    global _youtube_client
+    if _youtube_client is None:
+        settings = _get_settings()
+        _youtube_client = httpx.AsyncClient(timeout=settings.youtube_timeout_seconds)
+    return _youtube_client
+
+
+def _build_youtube_oauth_client() -> YouTubeOAuthClient | None:
+    """The real YouTube OAuth client, or ``None`` when YouTube is unconfigured (fail-soft)."""
+    settings = _get_settings()
+    client_id = settings.youtube_oauth_client_id
+    client_secret = settings.youtube_oauth_client_secret
+    if client_id is None or client_secret is None:
+        return None
+    return YouTubeOAuthClient(
+        http=_get_youtube_http_client(),
+        client_id=client_id,
+        client_secret=client_secret.get_secret_value(),
+        clock=get_clock(),
+        scopes=settings.youtube_oauth_scopes,
+        authorize_url=settings.youtube_oauth_authorize_url,
+        token_url=settings.youtube_oauth_token_url,
+        revoke_url=settings.youtube_oauth_revoke_url,
+        api_base_url=settings.youtube_api_base_url,
+    )
+
+
 def _get_oauth_clients() -> dict[str, ISocialOAuthClient]:
-    """The per-platform OAuth clients (α8.6a: Mock only — OQ1)."""
-    return {"mock": MockSocialOAuthClient(clock=get_clock())}
+    """The per-platform OAuth clients (Mock always; YouTube iff configured — α8.6c, fail-soft)."""
+    clients: dict[str, ISocialOAuthClient] = {"mock": MockSocialOAuthClient(clock=get_clock())}
+    youtube = _build_youtube_oauth_client()
+    if youtube is not None:
+        clients["youtube"] = youtube
+    return clients
 
 
 def _get_oauth_state_signer() -> IOAuthStateSigner:
@@ -1643,14 +1695,26 @@ def get_list_social_accounts_use_case() -> ListSocialAccounts:
 
 
 def _get_destination_registry() -> DestinationRegistry:
-    """The platform → adapter registry (α8.6b: Mock only; YouTube is α8.6c).
+    """The platform → adapter registry (Mock always; YouTube iff configured — α8.6c).
 
-    Memoised: the Mock adapter is stateless + network-free. A YAML destination catalogue is
-    deferred until ≥2 real destinations justify it (contract §14).
+    Memoised. The Mock adapter is stateless + network-free; the real YouTube adapter is
+    registered only when its OAuth credentials are configured (fail-soft — an unconfigured
+    ``platform="youtube"`` publish then fails create-time validation, never at runtime). A
+    YAML destination catalogue stays deferred until ≥2 real destinations justify it (§14).
     """
     global _destination_registry
     if _destination_registry is None:
-        _destination_registry = DestinationRegistry({"mock": MockDestination()})
+        adapters: dict[str, IDestinationPublisher] = {"mock": MockDestination()}
+        settings = _get_settings()
+        if (
+            settings.youtube_oauth_client_id is not None
+            and settings.youtube_oauth_client_secret is not None
+        ):
+            adapters["youtube"] = YouTubeDestination(
+                http=_get_youtube_http_client(),
+                api_base_url=settings.youtube_api_base_url,
+            )
+        _destination_registry = DestinationRegistry(adapters)
     return _destination_registry
 
 

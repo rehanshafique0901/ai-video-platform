@@ -339,6 +339,55 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- YouTube destination (α8.6c) -----------------------------------------
+    # The first real destination: YouTubeOAuthClient (connect/refresh/revoke) +
+    # YouTubeDestination (Data API v3 resumable upload). Configuration-blind (W8.1.1) —
+    # these are injected into the leaves at the composition root; the leaves never read
+    # Settings themselves. FAIL-SOFT: when the client id/secret are unset, YouTube is
+    # simply not registered (create for platform="youtube" then fails create-time
+    # validation) — no boot failure, mirroring the α8.6a master-key story. Endpoints are
+    # overridable so the opt-in live smoke test can point at a sandbox.
+    youtube_oauth_client_id: str | None = Field(
+        default=None,
+        description="Google OAuth 2.0 client id for the YouTube destination.",
+    )
+    youtube_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Google OAuth 2.0 client secret for the YouTube destination.",
+    )
+    youtube_oauth_scopes: tuple[str, ...] = Field(
+        default=(
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube.readonly",
+        ),
+        description="OAuth scopes requested when connecting a YouTube channel.",
+    )
+    youtube_oauth_authorize_url: str = Field(
+        default="https://accounts.google.com/o/oauth2/v2/auth",
+        description="Google OAuth 2.0 authorization (consent) endpoint.",
+        min_length=1,
+    )
+    youtube_oauth_token_url: str = Field(
+        default="https://oauth2.googleapis.com/token",
+        description="Google OAuth 2.0 token endpoint (code exchange + refresh).",
+        min_length=1,
+    )
+    youtube_oauth_revoke_url: str = Field(
+        default="https://oauth2.googleapis.com/revoke",
+        description="Google OAuth 2.0 token revocation endpoint.",
+        min_length=1,
+    )
+    youtube_api_base_url: str = Field(
+        default="https://www.googleapis.com",
+        description="Base URL for the YouTube Data API v3 (channels + resumable upload).",
+        min_length=1,
+    )
+    youtube_timeout_seconds: float = Field(
+        default=120.0,
+        description="HTTP timeout for YouTube OAuth + upload requests.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
