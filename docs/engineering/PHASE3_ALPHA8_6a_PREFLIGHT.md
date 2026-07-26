@@ -1,9 +1,10 @@
 # Phase 3 — α8.6a Pre-flight: Account Connections (Publishing Credential Ownership)
 
-> **Status: DRAFT — awaiting sign-off.** First increment of the **α8.6 Publishing /
-> Creator Workflow** bounded context. Input: `PHASE3_ALPHA8_6a_GROUNDING.md` (APPROVED,
-> PR #32). Governing artifacts: `PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-10) and
-> **ADR-0047** (credential ownership — C1–C8, R1–R4). Baseline: `v0.4.35-phase3-alpha8.7`.
+> **Status: SIGNED OFF (2026-07-26).** OQ1–OQ5 approved (see §12). First increment of the
+> **α8.6 Publishing / Creator Workflow** bounded context. Input:
+> `PHASE3_ALPHA8_6a_GROUNDING.md` (APPROVED, PR #32). Governing artifacts:
+> `PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-10) and **ADR-0047** (credential ownership —
+> C1–C8, R1–R4). Baseline: `v0.4.35-phase3-alpha8.7`.
 >
 > **The one question α8.6a answers:** *How does the platform safely connect a user's
 > external destination account?* — store, refresh, and revoke a user-owned OAuth
@@ -339,12 +340,28 @@ reserved for the publish runtime in α8.6b per the contract).
 
 ---
 
-## 12. Open questions for sign-off
+## 12. Resolved rulings (OQ1–OQ5 — APPROVED 2026-07-26)
 
-| # | Question | Recommendation |
+| # | Question | Ruling |
 |---|---|---|
-| **OQ1** | OAuth client in α8.6a? | **Yes — ship `ISocialOAuthClient` + a Mock now; real YouTube OAuth client with its upload adapter in α8.6c.** Proves the boundary end-to-end without a real destination API. |
-| **OQ2** | `platform` as `text` vs pg enum? | **`text` + app-level validation** (grows per destination; avoids an enum migration each time). `status` stays a pg enum (small, stable). |
-| **OQ3** | Connection state: signed stateless token vs a `pending_connections` table? | **Signed short-lived state token** (reuse the JWT boundary) — CSRF-safe, no extra table. |
-| **OQ4** | `AuthorizedContext` exposes `access_token` vs `apply(request)`? | **Expose `access_token` now**; keep `apply()` as a later hardening option. |
-| **OQ5** | Master key: env-injected now vs a cloud-KMS SDK now? | **Env-injected master key behind `IMasterKeyProvider` now** (still a correct envelope scheme); a real KMS provider is a future swap, not α8.6a — avoids adding a KMS SDK and keeps scope on "publishing credential ownership." |
+| **OQ1** | OAuth client in α8.6a? | **APPROVED — ship `ISocialOAuthClient` + a Mock only.** Real YouTube OAuth belongs in α8.6c with the destination adapter. α8.6a proves the credential/connection boundary, not a platform integration. |
+| **OQ2** | `platform` as `text` vs pg enum? | **APPROVED — `platform` stays `text`; `status` stays a pg enum.** A platform enum/catalogue is introduced only when multiple real destinations justify it. |
+| **OQ3** | Connection state: signed stateless token vs a table? | **APPROVED — signed, stateless, short-lived, CSRF-safe `state` token. No OAuth-state persistence table.** |
+| **OQ4** | `AuthorizedContext` exposes `access_token` vs `apply(request)`? | **APPROVED — `AuthorizedContext` may expose an `access_token`; immutable and scoped to publishing infrastructure.** Higher-level request/application helpers may follow later if multiple adapters justify them. |
+| **OQ5** | Master key: env-injected now vs cloud-KMS SDK now? | **APPROVED — env-injected master key behind `IMasterKeyProvider`.** Cloud KMS is a future infrastructure swap; the envelope model and service boundary must not change when it happens. |
+
+### Additional implementation constraints (binding)
+
+- Migration 0013 is **additive only**.
+- **No** `PublishJob`, upload execution, scheduling, destination upload logic, or
+  publishing worker in this slice.
+- **No** generic `SecretsManager` abstraction.
+- **No** plaintext OAuth tokens in the database, logs, events, exceptions, or API
+  responses.
+- Production **fails closed** if the publishing master key is unavailable; dev/tests use
+  an explicitly injected deterministic key only.
+- Destination adapters remain **credential-blind**, obtaining authorization only through
+  `ISocialCredentialStore` / `AuthorizedContext`.
+- Preserve existing conventions: ABC ports, frozen DTOs, UoW, raw-SQL migrations,
+  import-linter enforcement.
+- Do **not** begin α8.6b until α8.6a is released.
