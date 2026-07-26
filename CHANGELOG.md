@@ -6,10 +6,15 @@
 
 ## [Unreleased]
 
-### α8.6a — Publishing account connections (`0.4.36-phase3-alpha8.6a-dev`, 2026-07-26)
+### α8.6a — Publishing account connections (`0.4.36-phase3-alpha8.6a`, 2026-07-26)
+
+> **Release ordering.** α8.6 (Publishing) was **intentionally completed after the α8.7 baseline**
+> (`v0.4.35-phase3-alpha8.7`, Planner V2): the roadmap deferred Publishing until *after* the AI/AR
+> runtime, so this release's numeric prefix moves forward (`0.4.36`) while the roadmap-milestone
+> suffix steps back to `alpha8.6a`. Publishing is its own bounded context, **not** an α8.7 increment.
 
 **First slice of the α8.6 Publishing / Creator Workflow bounded context — implementation, additive
-migration, `-dev` bump.** Establishes *credential and connection ownership* only: how a user connects
+migration.** Establishes *credential and connection ownership* only: how a user connects
 an external destination account (OAuth) and how we hold that account's tokens safely. **No `PublishJob`,
 no upload execution, no scheduling, no publishing worker** — those are α8.6b/α8.6c. Governed by
 `docs/engineering/PUBLISHING_RUNTIME_CONTRACT.md` (PUB-1…PUB-10, APPROVED),
