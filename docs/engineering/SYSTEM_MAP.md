@@ -42,9 +42,9 @@ Three planes, each with its own mutability model (full rationale:
                                            runtime · asset store · publisher*
 
   * Publishing is an Execution-plane capability, not a separate plane. Its
-    account-connection foundation (OAuth credential ownership) shipped in α8.6a and the
-    publish runtime (`PublishJob` + `PublishWorker`) in α8.6b; the real destination
-    adapters (YouTube) are α8.6c.
+    account-connection foundation (OAuth credential ownership) shipped in α8.6a, the
+    publish runtime (`PublishJob` + `PublishWorker`) in α8.6b, and the first real
+    destination adapter (YouTube — `YouTubeOAuthClient` + `YouTubeDestination`) in α8.6c.
 ```
 
 …and the single request that flows through them, end to end:
@@ -134,7 +134,7 @@ into a seam; it does not reshape the flow (ADR-0042, ADR-0045).
 | **FFmpeg** | Execution | Renders accepted frames into an MP4; ffprobe measures the output for verification. | `FfmpegSlideshowRenderer`, `FfprobeVideoProbe` (`infrastructure/render/`) | [ADR-0043](../decisions/ADR-0043-render-composition-boundary.md) | ✅ α8.6 |
 | **Execution Runtime** | Execution | Persists the whole run incrementally: `generations` + `generation_shots`, the `status` state machine, the resolution ledger, and lifecycle events via the transactional outbox. | `SqlExecutionRuntimeStore`; migration `0012` | [EXECUTION_RUNTIME_CONTRACT](./EXECUTION_RUNTIME_CONTRACT.md) · [ADR-0046](../decisions/ADR-0046-execution-runtime-boundaries.md) | ✅ α8.6 |
 | **Asset Store** | Execution | Registers execution-owned artefacts (`generation_assets`, with a `parent_asset_id` lineage) and stores bytes behind object storage. Promotion to `media_assets` is an explicit later use case. | `generation_assets`; `IObjectStorage` | [ADR-0046](../decisions/ADR-0046-execution-runtime-boundaries.md) · [ADR-0037](../decisions/ADR-0037-media-generation-outputs.md) | ✅ α8.6 |
-| **Publisher** | Execution | Uploads the final MP4 to social platforms behind per-platform adapters. Its **account-connection foundation** (OAuth credential ownership: `SocialAccount`, envelope-encrypted tokens, owner-scoped `/api/v1/social-accounts`) shipped in **α8.6a**; the **publish runtime** (user-initiated `PublishJob` + poll-ingress `PublishWorker`, dual-lock serialization, bounded retries, terminal outbox events, `/api/v1/publish-jobs`) in **α8.6b** — credential-blind, consuming only the `AuthorizedContext` and uploading via `IDestinationPublisher` (Mock this slice). Real destination adapters (YouTube) are α8.6c. | `SocialCredentialService`, `/social-accounts` (α8.6a); `CreatePublishJob`/`ProcessPublishJob`/`PublishWorker`, `IDestinationPublisher`/`IDestinationRegistry`, `/publish-jobs` (α8.6b); YouTube adapter *(α8.6c)* | [PUBLISHING_RUNTIME_CONTRACT](./PUBLISHING_RUNTIME_CONTRACT.md) · [ADR-0047](../decisions/ADR-0047-publishing-credential-ownership.md) | ◑ α8.6a (connections) · ✅ α8.6b (runtime) · ⟢ α8.6c (YouTube) |
+| **Publisher** | Execution | Uploads the final MP4 to social platforms behind per-platform adapters. Its **account-connection foundation** (OAuth credential ownership: `SocialAccount`, envelope-encrypted tokens, owner-scoped `/api/v1/social-accounts`) shipped in **α8.6a**; the **publish runtime** (user-initiated `PublishJob` + poll-ingress `PublishWorker`, dual-lock serialization, bounded retries, terminal outbox events, `/api/v1/publish-jobs`) in **α8.6b** — credential-blind, consuming only the `AuthorizedContext` and uploading via `IDestinationPublisher`; and the **first real destination adapter** (YouTube — `YouTubeOAuthClient` + `YouTubeDestination`, Data API v3 resumable upload over a thin injected `httpx` transport, PUB-11 ambiguous-outcome safety) in **α8.6c** — adapter-only, no port/runtime change, still credential-blind (Mock remains the CI default; live smoke is opt-in). | `SocialCredentialService`, `/social-accounts` (α8.6a); `CreatePublishJob`/`ProcessPublishJob`/`PublishWorker`, `IDestinationPublisher`/`IDestinationRegistry`, `/publish-jobs` (α8.6b); `YouTubeOAuthClient`/`YouTubeDestination` (α8.6c) | [PUBLISHING_RUNTIME_CONTRACT](./PUBLISHING_RUNTIME_CONTRACT.md) · [ADR-0047](../decisions/ADR-0047-publishing-credential-ownership.md) | ◑ α8.6a (connections) · ✅ α8.6b (runtime) · ✅ α8.6c (YouTube) |
 
 Legend: ✅ implemented · ⟢ planned.
 
@@ -188,11 +188,16 @@ Validation mirrors the plane boundaries (see [`../CI_QUALITY_GATE.md`](../CI_QUA
 - **Execution plane** → **Stage 12** (runtime infrastructure, frozen), **Stage 13**
   (the Generation Runtime end-to-end slice), and **Stage 14** (publishing — account
   connections α8.6a + the publish runtime α8.6b) against an ephemeral Postgres + real ffmpeg.
+  The α8.6c YouTube adapter adds **no** Stage 14 test: it is covered by **network-free unit
+  tests in Stage 4** (via `httpx.MockTransport`) plus an **opt-in live smoke test excluded
+  from CI**, so Stage 14 stays deterministic and offline (the Mock destination remains the
+  CI default).
 
 Governance principle: infrastructure stages stay stable; each **new bounded context**
-earns its **own** stage — **Stage 14** is the Publishing stage, extended in place across
-the Publishing slices (α8.6a connections, α8.6b publish runtime, and α8.6c destination
-adapters) rather than expanding Stage 13 into a catch-all.
+earns its **own** stage — **Stage 14** is the Publishing stage, extended in place across the
+persistence-bearing Publishing slices (α8.6a connections, α8.6b publish runtime) rather than
+expanding Stage 13 into a catch-all; the adapter-only α8.6c slice keeps its determinism by
+staying in Stage 4.
 
 ---
 
