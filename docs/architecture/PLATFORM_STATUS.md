@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.38-phase3-alpha8.6c` (code constant — matches the tag at the α8.6c finalize) |
-| **Latest runtime tag** | `v0.4.38-phase3-alpha8.6c` |
+| **Application version** | `0.4.39-phase3-alpha8.8` (code constant — matches the tag at the α8.8 finalize) |
+| **Latest runtime tag** | `v0.4.39-phase3-alpha8.8` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, and α8.6c destination adapters all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, α8.6c destination adapters, and the α8.8 asset promotion bridge all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -154,6 +154,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Cinematic storyboard — Planner V2 | ✅ | α8.7 | `ShotIntent` value object + data-driven `StoryArcTemplate` (3/5/6 arcs); deterministic, position-independent shot ids + `blake2b` per-shot seeds; invariants CS-7 (adjacent shots differ) + CS-8 (no provider language in intent); Golden V1 frozen, Golden V2 active ([`CINEMATIC_STORYBOARD_CONTRACT.md`](../engineering/CINEMATIC_STORYBOARD_CONTRACT.md)) |
 | Publishing — account connections (OAuth) | ✅ | α8.6a | first slice of the **Publishing** bounded context (credential + connection ownership only — no `PublishJob`/upload yet): `SocialAccount` aggregate, envelope-encrypted `social_credentials` (AES-256-GCM, per-record DEK wrapped by a fail-closed master key — the DB never holds a plaintext/usable token, ADR-0047 C1/C2), ports `ISocialCredentialStore`/`ISocialOAuthClient`/`IOAuthStateSigner` (Mock OAuth this slice), owner-scoped `/api/v1/social-accounts`; additive migration `0013`; import-linter crypto-confinement + bounded-context isolation; CI Stage 14; PUB-1…PUB-10 ([`PUBLISHING_RUNTIME_CONTRACT.md`](../engineering/PUBLISHING_RUNTIME_CONTRACT.md), [`ADR-0047`](../decisions/ADR-0047-publishing-credential-ownership.md)) |
 | Publishing — publish runtime | ✅ | α8.6b | second Publishing slice (upload execution): user-initiated `PublishJob` (explicit `project_id`, DQ1) + poll-ingress `PublishWorker`, a faithful adaptation of the `ExportJob` execution model (DQ8) — dual lease (`publish_job:<id>` then `project_publish:<project_id>`, DQ5), version-fenced CAS, bounded capped-exponential-backoff retries with adapter-classified failures (DQ6), `(source_media_asset_id, social_account_id)` idempotency backstop (DQ2), and PascalCase terminal outbox events only (`PublishJobCreated`/`PublishJobSucceeded`/`PublishJobFailed`, DQ4/DQ7); **credential-blind** runtime consuming only the α8.6a `AuthorizedContext` (DQ3); `ContentPackage` (default visibility private) + Mock destination behind `IDestinationPublisher`/`IDestinationRegistry`; top-level `/api/v1/publish-jobs`; additive migration `0014`; import-linter credential-blind-leaves contract; CI Stage 14 ([`PUBLISHING_RUNTIME_CONTRACT.md`](../engineering/PUBLISHING_RUNTIME_CONTRACT.md), [`ADR-0047`](../decisions/ADR-0047-publishing-credential-ownership.md)) |
+| Asset promotion bridge (`generation_assets` → `media_assets`) | ✅ | α8.8 | the **ADR-0046 X8** (`PublishGenerationAssets`) seam — connects the AI generation runtime (Path B, execution-owned `generation_assets`) to the platform media library (Path A, `media_assets(source='generated')`) that already feeds Render → Export → Publish. An explicit, user-initiated `PromoteGenerationAssets` use case, **library-only** (ends at `media_assets`; Render/Export/Publish/Timeline/orchestration untouched): request-time project-scoped ownership (mirrors `IngestGeneratedMedia`), byte **copy** under a deterministic key (copy never reference), recomputed checksum + provenance in `source_metadata`, storage-coordinate-uniqueness idempotency → `noop` replay; `POST /api/v1/media/promotions`; one new **read-only** `IGenerationReader` port (no existing port changed); **no schema migration**; import-linter X8 contract ("Execution Runtime never writes the media library") + CI Stage 15 ([ADR-0046](../decisions/ADR-0046-execution-runtime-boundaries.md), [`PHASE3_ASSET_PROMOTION_BRIDGE_PREFLIGHT.md`](../engineering/PHASE3_ASSET_PROMOTION_BRIDGE_PREFLIGHT.md)) |
 | Publishing — destination adapters (YouTube) | ✅ | α8.6c | third Publishing slice (first real destination, **adapter-only — no migration, no port change, no runtime expansion**, EQ1–EQ5): two credential-blind infrastructure leaves behind the unchanged α8.6b ports — `YouTubeOAuthClient` (`ISocialOAuthClient`: consent URL / code exchange + channel-identity lookup / refresh / revoke) and `YouTubeDestination` (`IDestinationPublisher`: Data API v3 `videos.insert` resumable upload, deterministic `ContentPackage → snippet/status` mapping, Google-error → `DestinationError(retryable)` classification) — over a thin injected `httpx` transport (EQ2, no Google SDK); configuration-blind `Settings` + composition-root wiring that registers `"youtube"` only when credentials are set (**fail-soft**); **PUB-11** (ambiguous post-transmission outcome ⇒ permanent, never retried — no double-post, EQ3); network-free unit tests via `httpx.MockTransport` + an **opt-in live smoke test excluded from CI** (Stage 14 stays deterministic, EQ4); credential-blindness still enforced by the existing import-linter contracts (`AuthorizedContext` the only credential crossing into the adapter) ([`PUBLISHING_RUNTIME_CONTRACT.md`](../engineering/PUBLISHING_RUNTIME_CONTRACT.md) PUB-1…PUB-11, [`ADR-0047`](../decisions/ADR-0047-publishing-credential-ownership.md)) |
 
 ### Invariant catalog
@@ -325,8 +326,9 @@ rather than guarding against code that does not yet exist.
 
 > Shipped slices (α8.5a → α8.5b.3r, α8.5c → α8.5e, the α8.5x execution runtime +
 > first generation slice, α8.7 Planner V2, α8.6a publishing account connections,
-> α8.6b publish runtime, and α8.6c destination adapters — YouTube) have moved up
-> into *Completed capability lifecycles*. Only genuinely future work remains below.
+> α8.6b publish runtime, α8.6c destination adapters — YouTube, and the α8.8 asset
+> promotion bridge) have moved up into *Completed capability lifecycles*. Only
+> genuinely future work remains below.
 
 | Slice | Scope |
 |---|---|
