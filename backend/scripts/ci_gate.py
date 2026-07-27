@@ -19,6 +19,7 @@ provider pre-flight):
    13. generation_e2e            (α8.6 Increment 5 — full Prompt→…→FFmpeg→MP4 slice)
    14. publishing_integration    (α8.6a/b — social accounts + publish runtime + APIs)
    15. asset_promotion_bridge    (α8.8 — generation_assets → media_assets X8 seam)
+   16. publish_notifications     (α8.9a — publish terminal events → in-app notifications)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -615,6 +616,30 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/media/test_asset_promotion_bridge.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 16 (α8.9a) — Publish Notifications (deferred DQ7 fan-out). Proves the
+        # publish notification projection against a real DB at head: a PublishJobSucceeded /
+        # PublishJobFailed outbox event is projected — through the reused CreateNotification
+        # writer — into exactly one owner-scoped notifications row, with the DB-owned
+        # (user_id, source_event_id) index enforcing exactly-once under redelivery, and the
+        # projected notification visible through the real /api/v1/notifications read API.
+        # Kept OUT of Stage 14 (publishing runtime) since this is the notifications bounded
+        # context reacting to publish events — a downstream fan-out consumer, not the publish
+        # runtime. Like Stages 13-15 the writer commits its own UoW and the tests delete the
+        # rows they created on teardown, so the destructive-migration guard is untouched.
+        Stage(
+            number=16,
+            title="publish notifications integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/notifications/"
+                "test_publish_notification_projection.py",
             ],
             requires_db=True,
         ),

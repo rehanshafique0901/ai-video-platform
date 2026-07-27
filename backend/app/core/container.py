@@ -104,6 +104,9 @@ from app.application.use_cases.notifications.mark_notification_read import (
 from app.application.use_cases.notifications.notification_projection import (
     NotificationProjection,
 )
+from app.application.use_cases.notifications.publish_notification_projection import (
+    PublishNotificationProjection,
+)
 from app.application.use_cases.projects.create_project import CreateProject
 from app.application.use_cases.projects.delete_project import DeleteProject
 from app.application.use_cases.projects.get_project import GetProject
@@ -337,13 +340,17 @@ def init(settings: Settings) -> None:
     # untouched). α8.5b.3 registers a SECOND, fully independent consumer — the
     # notification projection for ``ExportJobSucceeded`` / ``ExportJobFailed`` — on the
     # same event stream, demonstrating the platform's fan-out seam (the runner knows
-    # nothing about either consumer). A broker-backed publisher can replace this later
-    # identically. Each consumer holds a *factory* (not an instance) so every delivery
-    # runs in its own fresh use case + Unit of Work.
+    # nothing about either consumer). α8.9a registers a THIRD, equally independent
+    # consumer — the publish notification projection for ``PublishJobSucceeded`` /
+    # ``PublishJobFailed`` (the deferred DQ7 fan-out) — reusing the same
+    # ``CreateNotification`` writer on the same event stream. A broker-backed publisher
+    # can replace this later identically. Each consumer holds a *factory* (not an
+    # instance) so every delivery runs in its own fresh use case + Unit of Work.
     _publisher = InProcessPublisher(
         [
             GeneratedMediaIngestionSubscriber(get_ingest_generated_media_use_case),
             NotificationProjection(get_create_notification_use_case),
+            PublishNotificationProjection(get_create_notification_use_case),
         ]
     )
     # α8.1/α8.2: wire the provider registry. When a provider's key is configured,
