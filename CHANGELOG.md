@@ -6,6 +6,42 @@
 
 ## [Unreleased]
 
+### α8.9b — Creator Scheduling (`0.4.41-phase3-alpha8.9b`, 2026-07-27)
+
+**Lets a creator schedule a YouTube go-live using the existing pipeline.** Second increment of the
+**α8.9 Creator Experience** milestone. Adds the one missing creator-facing ingress — an optional,
+validated `publish_at` on the publish-create request — and threads it into the already-wired
+`ContentPackage.publish_at` → YouTube `status.publishAt` path. The job still uploads immediately; the
+destination keeps the video private and flips it live at `publish_at` (platform-native scheduling).
+Governed by [`PHASE3_ALPHA8_9b_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA8_9b_PREFLIGHT.md) (SC1–SC7).
+**Strictly additive: no scheduler/cron/timer/worker-loop, no migration, no new port, no ADR, no
+runtime change.**
+
+#### Added
+- **`PublishJobCreateRequest.publish_at`** (`api/v1/schemas/publish_jobs.py`) — optional
+  `datetime | None`, validated by a `field_validator`: **timezone-aware only** and **strictly
+  future**, **normalised to UTC** (SC3). A bad value is a 422 at the ingress. `extra="forbid"` was
+  **not** introduced (would be a behaviour change) — the addition is purely additive.
+- **`CreatePublishJob.execute(..., publish_at=…)`** threads the schedule into the existing
+  `build_content_package(publish_at=…)`; the router forwards `body.publish_at`. `publish_jobs.scheduled_at`
+  (worker-side deferral) is **left `None`** — the runtime is unchanged (SC1).
+
+#### Reused unchanged
+- `ContentPackage.publish_at` + its JSONB (de)serialisation; the **YouTube adapter** mapping
+  (`publish_at` ⇒ `privacyStatus=private` + `status.publishAt`, already shipped in α8.6c); the publish
+  runtime, `(source_media_asset, social_account)` idempotency (a replay does **not** reschedule — SC5),
+  ownership, retry model, and the `/api/v1/publish-jobs` API.
+
+#### Enforcement
+- **Tests** — DB-free schema-validator unit tests (future tz-aware accepted + normalised to UTC;
+  naive → 422; past/now → 422; `None` passes) + use-case unit tests (publish_at threaded into the
+  persisted `ContentPackage`; `scheduled_at` stays `None`; idempotent replay ignores a new
+  `publish_at`); **Stage 14** integration extended: API create validation (naive/past → 422; future
+  parses → account gate) and a DB round-trip where a scheduled publish persists `publish_at` and still
+  runs to `succeeded`.
+
+**No migration, no new port, no ADR, no scheduler.** Full ephemeral-DB gate (stages 0–16) **PASS**.
+
 ### α8.9a — Publish Notifications (`0.4.40-phase3-alpha8.9a`, 2026-07-27)
 
 **Exposes the publishing pipeline's outcome to the creator.** First increment of the **α8.9 Creator

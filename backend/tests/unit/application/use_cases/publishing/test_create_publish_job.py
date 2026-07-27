@@ -353,3 +353,61 @@ async def test_create_race_conflict_recovers_to_winner() -> None:
     result = await _run(uow, social_account_id=account_id)
     assert result.created is False
     assert result.job.id == winner.id
+
+
+# ---- α8.9b — Creator Scheduling (publish_at threading) --------------------
+
+
+@pytest.mark.unit
+async def test_absent_publish_at_leaves_content_package_unscheduled() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+    )
+    result = await _run(uow, social_account_id=account_id)
+    assert result.job.content_package.publish_at is None
+
+
+@pytest.mark.unit
+async def test_publish_at_is_threaded_into_content_package() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    when = datetime(2026, 8, 1, 9, 30, tzinfo=UTC)
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+    )
+    result = await _run(uow, social_account_id=account_id, publish_at=when)
+    # Threaded into the built package + the persisted add kwargs (scheduled_at untouched).
+    assert result.job.content_package.publish_at == when
+    (added,) = uow.publish_jobs.added
+    assert added["content_package"].publish_at == when
+    assert added["scheduled_at"] is None  # SC1 — worker-side deferral is NOT used
+
+
+@pytest.mark.unit
+async def test_idempotent_replay_ignores_new_publish_at() -> None:
+    # SC5 — a replay returns the existing job unchanged; the replay's publish_at is not applied.
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    existing = _existing_job(media_id, account_id)  # its package.publish_at is None
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        active=existing,
+        project=_project(project_id),
+    )
+    result = await _run(
+        uow, social_account_id=account_id, publish_at=datetime(2026, 8, 1, 9, 30, tzinfo=UTC)
+    )
+    assert result.created is False
+    assert result.job.id == existing.id
+    assert result.job.content_package.publish_at is None  # unchanged by the replay
+    assert uow.publish_jobs.added == []

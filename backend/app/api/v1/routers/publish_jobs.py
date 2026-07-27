@@ -76,7 +76,8 @@ async def create_publish_job(
     for the same ``(source media asset, social account)`` already exists, returns it with
     ``200`` (idempotent replay). ``404`` if the export/account is not the caller's; ``422``
     if the export has no completed delivery artifact, the account is not connected, or the
-    platform has no registered destination adapter.
+    platform has no registered destination adapter. An optional ``publish_at`` (timezone-aware,
+    future) schedules the platform-native go-live (α8.9b) — the upload still runs immediately.
     """
     result = await use_case.execute(
         owner_user_id=current_user.id,
@@ -87,6 +88,7 @@ async def create_publish_job(
         description=body.description,
         tags=tuple(body.tags) if body.tags is not None else None,
         visibility=body.visibility,
+        publish_at=body.publish_at,
         ip=client_ip(request),
     )
     code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
