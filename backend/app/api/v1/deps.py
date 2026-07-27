@@ -39,6 +39,7 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.dashboard.get_creator_dashboard import GetCreatorDashboard
 from app.application.use_cases.export.create_export_job import CreateExportJob
 from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.get_export_job import GetExportJob
@@ -290,6 +291,12 @@ CreatePublishJobDep = Annotated[
 ]
 GetPublishJobDep = Annotated[GetPublishJob, Depends(container.get_get_publish_job_use_case)]
 ListPublishJobsDep = Annotated[ListPublishJobs, Depends(container.get_list_publish_jobs_use_case)]
+
+# ---- Use-case dependencies (Slice α8.9c — Creator dashboard) ----------
+
+CreatorDashboardDep = Annotated[
+    GetCreatorDashboard, Depends(container.get_creator_dashboard_use_case)
+]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
 

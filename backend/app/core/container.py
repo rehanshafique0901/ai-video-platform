@@ -64,6 +64,7 @@ from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
 from app.application.use_cases.auth.register_user import RegisterUser
+from app.application.use_cases.dashboard.get_creator_dashboard import GetCreatorDashboard
 from app.application.use_cases.export.create_export_job import CreateExportJob
 from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.export_worker import ExportWorker
@@ -1757,6 +1758,15 @@ def get_get_publish_job_use_case() -> GetPublishJob:
 
 def get_list_publish_jobs_use_case() -> ListPublishJobs:
     return ListPublishJobs(uow=get_unit_of_work())
+
+
+def get_creator_dashboard_use_case() -> GetCreatorDashboard:
+    """Factory: the α8.9c read-only creator dashboard (fresh UoW per call).
+
+    Composes existing owner-scoped reads (publish jobs, social accounts, notifications, media)
+    into a scalar summary — no new repository method, no analytics.
+    """
+    return GetCreatorDashboard(uow=get_unit_of_work())
 
 
 def get_process_publish_job_use_case() -> ProcessPublishJob:
