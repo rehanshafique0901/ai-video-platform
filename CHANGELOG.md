@@ -6,6 +6,36 @@
 
 ## [Unreleased]
 
+### α8.9a — Publish Notifications (`0.4.40-phase3-alpha8.9a`, 2026-07-27)
+
+**Exposes the publishing pipeline's outcome to the creator.** First increment of the **α8.9 Creator
+Experience** milestone: the deferred **DQ7** fan-out. A new event projection turns the publish runtime's
+terminal outbox events into in-app notifications, so a creator sees when their video was published or
+failed — reusing the notification subsystem (write projection α8.5b.3 + read API α8.5b.3r) **exactly**.
+Governed by `docs/engineering/PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md` (§3). **Strictly additive: no
+migration, no new port, no ADR; only a new downstream consumer on the existing fan-out seam.**
+
+#### Added
+- **`PublishNotificationProjection`** (`application/use_cases/notifications/publish_notification_projection.py`)
+  — a faithful twin of the export `NotificationProjection`. Consumes only `PublishJobSucceeded` /
+  `PublishJobFailed`; produces only the `publish.succeeded` / `publish.failed` notification kinds
+  (free-form `kind`, so no schema change); addresses the recipient by the event's `requested_by_user_id`;
+  copies only the already-neutral event fields (no credential/bearer/URL/bytes — PUB-8 / ADR-0047 C8).
+  Reuses `CreateNotification` (built fresh per event via the injected factory → own UoW per event) and the
+  DB-owned `(user_id, source_event_id)` partial-unique index for exactly-once under relay redelivery.
+- **Composition** — registered as the **third** independent consumer on the existing
+  `InProcessPublisher([...])` fan-out alongside the generated-media subscriber and the export notification
+  projection; producers and the relay are untouched (ADR-0042 fan-out property).
+
+#### Enforcement
+- **Tests** — DB-free use-case unit tests (both events, owner-targeting, `PublishJobCreated`/other-type
+  ignore, malformed/invalid-recipient no-op, redelivery-duplicate swallow, DB-error propagation) + a live-DB
+  **Stage 16** integration test proving success + failure notifications, exactly-once under redelivery, and
+  visibility through the real `/api/v1/notifications` read API (commits + cleans up on teardown).
+
+**No migration, no port changes, no new ADR — additive fan-out consumer only.** Full ephemeral-DB gate
+(stages 0–16) **PASS** on a throwaway `pgvector/pgvector:pg16`.
+
 ### α8.8 — Asset Promotion Bridge (`0.4.39-phase3-alpha8.8`, 2026-07-27)
 
 **Connects the two parallel pipelines.** Bridges the Stage-13 AI generation runtime output
