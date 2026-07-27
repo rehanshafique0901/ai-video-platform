@@ -6,6 +6,38 @@
 
 ## [Unreleased]
 
+### α8.9c — Creator Dashboard (`0.4.42-phase3-alpha8.9c`, 2026-07-27)
+
+**A read-only owner-scoped creator dashboard.** Final increment of the **α8.9 Creator Experience**
+milestone. Adds one authenticated `GET /api/v1/dashboard/summary` that surfaces the caller's product
+state as scalar counts, composed entirely from **existing** owner-scoped repository reads. Governed by
+[`PHASE3_ALPHA8_9c_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA8_9c_PREFLIGHT.md) (CD1–CD6).
+**Strictly additive: no analytics subsystem, no charts/reporting, no new repository method, no new
+SQL, no migration, no new port, no ADR, no runtime change.**
+
+#### Added
+- **`GetCreatorDashboard`** (`application/use_cases/dashboard/`) — a read-only use case that, inside a
+  single `IUnitOfWork`, reuses `publish_jobs.list_for_owner` (grouped by `PublishStatus`),
+  `social_accounts.list_for_owner` (connected + total), `notifications.count_unread`, and
+  `media.list_owned` (total), returning a `CreatorDashboardSummary` (CD3). Every publish status is
+  always present (`0` when absent — a stable shape).
+- **`GET /api/v1/dashboard/summary`** (`api/v1/routers/dashboard.py`, `schemas/dashboard.py`) — thin
+  router projecting `DashboardSummaryPublic` via `envelope`; all scope from `CurrentUserDep` (CD4), so
+  a fresh caller sees all-zero. Wired through `get_creator_dashboard_use_case` + `CreatorDashboardDep`.
+
+#### Explicitly out of scope (CD6)
+Analytics subsystem / `analytics_events` (dormant table untouched), charts, reporting, email, push,
+scheduler, AI, Planner, generation/render/export/publish runtime changes, second destination,
+per-kind media breakdown, and pagination.
+
+#### Enforcement
+- **Tests** — unit test of the aggregation (mixed statuses grouped exactly; absent statuses → `0`;
+  connected vs. total; unread; media total) + a DB-backed API integration test (**Stage 17**): seed
+  committed owner-scoped rows across publish jobs / social accounts / notifications / media, assert the
+  summary; a fresh user sees all-zero (owner isolation); `401` unauthenticated.
+
+**No migration, no new port, no ADR, no analytics.** Full ephemeral-DB gate (stages 0–17) **PASS**.
+
 ### α8.9b — Creator Scheduling (`0.4.41-phase3-alpha8.9b`, 2026-07-27)
 
 **Lets a creator schedule a YouTube go-live using the existing pipeline.** Second increment of the

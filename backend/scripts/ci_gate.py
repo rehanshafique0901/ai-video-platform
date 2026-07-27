@@ -20,6 +20,7 @@ provider pre-flight):
    14. publishing_integration    (α8.6a/b — social accounts + publish runtime + APIs)
    15. asset_promotion_bridge    (α8.8 — generation_assets → media_assets X8 seam)
    16. publish_notifications     (α8.9a — publish terminal events → in-app notifications)
+   17. creator_dashboard         (α8.9c — read-only owner-scoped dashboard summary)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -640,6 +641,28 @@ def _stages() -> list[Stage]:
                 "integration",
                 "tests/integration/infrastructure/notifications/"
                 "test_publish_notification_projection.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 17 (α8.9c) — Creator Dashboard. Proves the read-only GET /api/v1/dashboard/summary
+        # aggregates the caller's real, committed, owner-scoped state against a DB at head: publish-
+        # job counts by status, connected/total social accounts, the unread notification count, and
+        # the media total — all through the *reused* owner-scoped repository reads (no new SQL). Also
+        # asserts owner isolation (a fresh user sees all-zero) and the auth gate. It composes across
+        # bounded contexts (a new read surface), so — per the "each new slice earns its own stage"
+        # discipline (Stages 15/16) — it gets its own stage rather than expanding Stage 14. Like
+        # Stages 13-16 it commits its seed and deletes the rows it created on teardown, leaving the
+        # destructive-migration guard untouched.
+        Stage(
+            number=17,
+            title="creator dashboard integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/dashboard/test_creator_dashboard.py",
             ],
             requires_db=True,
         ),
