@@ -102,6 +102,22 @@ class MediaRegisterRequest(BaseModel):
         return bytes.fromhex(self.checksum_sha256)
 
 
+class MediaPromoteRequest(BaseModel):
+    """POST /api/v1/media/promotions body (α8.8 — Asset Promotion Bridge).
+
+    Promotes a completed AI-generation's final rendered video into the caller's media
+    library (the ADR-0046 X8 seam). ``generation_id`` names the execution-plane
+    generation to promote; ``project_id`` is the required, ownership-validated link the
+    new ``media_assets`` row is attached to (ownership itself comes from
+    ``CurrentUserDep``, never the body). ``extra="forbid"`` rejects any other key.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    generation_id: UUID
+    project_id: UUID
+
+
 class MediaPublic(BaseModel):
     """Public projection of :class:`app.domain.media.media_asset.MediaAsset`.
 

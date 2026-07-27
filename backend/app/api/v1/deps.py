@@ -45,6 +45,7 @@ from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.list_media import ListMedia
+from app.application.use_cases.media.promote_generation_assets import PromoteGenerationAssets
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
 from app.application.use_cases.notifications.count_unread_notifications import (
@@ -212,6 +213,9 @@ ListMediaDep = Annotated[ListMedia, Depends(container.get_list_media_use_case)]
 GetMediaDep = Annotated[GetMedia, Depends(container.get_get_media_use_case)]
 UpdateMediaDep = Annotated[UpdateMedia, Depends(container.get_update_media_use_case)]
 DeleteMediaDep = Annotated[DeleteMedia, Depends(container.get_delete_media_use_case)]
+PromoteGenerationAssetsDep = Annotated[
+    PromoteGenerationAssets, Depends(container.get_promote_generation_assets_use_case)
+]
 
 # ---- Use-case dependencies (Slice α6.3a — Timeline + Tracks) ----------
 

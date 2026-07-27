@@ -17,6 +17,8 @@ provider pre-flight):
    11. seed_roundtrip            (α8.5d — provider-catalogue seed idempotency)
    12. runtime_integration       (α8.5e/α8.6 — readers + resolver + ledger + exec repos)
    13. generation_e2e            (α8.6 Increment 5 — full Prompt→…→FFmpeg→MP4 slice)
+   14. publishing_integration    (α8.6a/b — social accounts + publish runtime + APIs)
+   15. asset_promotion_bridge    (α8.8 — generation_assets → media_assets X8 seam)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -590,6 +592,29 @@ def _stages() -> list[Stage]:
                 "tests/integration/infrastructure/repositories/test_publish_job_repository.py",
                 "tests/integration/infrastructure/publishing/test_publish_runtime_end_to_end.py",
                 "tests/integration/api/test_publish_jobs.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 15 (α8.8) — Asset Promotion Bridge. Proves the ADR-0046 X8 seam against a
+        # real DB at head: the `PromoteGenerationAssets` use case reads a committed
+        # execution-plane generation via the read-only GenerationReader, copies the
+        # finished bytes through the storage resolver, and registers an owner-scoped
+        # media_assets(source='generated') row via a real SqlAlchemyUnitOfWork — then a
+        # re-promotion is an idempotent noop (storage-coordinate uniqueness, no migration).
+        # Kept OUT of Stage 12 (infra-only freeze), Stage 13 (generation slice), and Stage
+        # 14 (publishing) — promotion is the cross-plane bridge, so it gets its own stage.
+        # Like Stage 13 it commits (its UoW + reader own their sessions) and deletes the
+        # rows it created on teardown, so it leaves the destructive-migration guard untouched.
+        Stage(
+            number=15,
+            title="asset promotion bridge integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/media/test_asset_promotion_bridge.py",
             ],
             requires_db=True,
         ),
