@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.0 — Creator Analytics Foundation (`0.4.43-phase3-alpha9.0-dev`, 2026-07-27)
+### α9.0 — Creator Analytics Foundation (`0.4.43-phase3-alpha9.0`, 2026-07-28)
 
 **Activates the dormant, partitioned `analytics_events` table as a downstream outbox consumer.** The
 foundation for creator analytics: publish/export lifecycle events are projected into owner-scoped
@@ -46,7 +46,6 @@ by [`PHASE3_ALPHA9_0_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_0_PREFLIGHT.m
   visibility through `GET /analytics/summary`.
 
 **Migration `0015` (additive), one new port, ADR-0048.** Full ephemeral-DB gate (stages 0–18) **PASS**.
-*Held at `-dev` pending release review; not finalised, merged, or tagged.*
 
 ### α8.9c — Creator Dashboard (`0.4.42-phase3-alpha8.9c`, 2026-07-27)
 
