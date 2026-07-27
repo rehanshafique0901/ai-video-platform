@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.interfaces.locks import IDistributedLockManager
 from app.application.interfaces.repositories import (
+    IAnalyticsRepository,
     IEventOutboxRepository,
     IExportJobRepository,
     IMediaRepository,
@@ -42,6 +43,7 @@ from app.application.interfaces.repositories import (
     IWorkflowRunRepository,
 )
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.infrastructure.repositories.analytics_repository import AnalyticsRepository
 from app.infrastructure.repositories.distributed_lock_manager import (
     SqlAlchemyDistributedLockManager,
 )
@@ -117,6 +119,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         )
         self.usage = cast(IUsageRecordRepository, UsageRecordRepository(self._session))
         self.model_pricing = cast(IModelPricingRepository, ModelPricingRepository(self._session))
+        self.analytics = cast(IAnalyticsRepository, AnalyticsRepository(self._session))
         return self
 
     async def __aexit__(

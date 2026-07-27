@@ -60,6 +60,9 @@ from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.interfaces.video_probe import IVideoProbe
 from app.application.interfaces.waveform_renderer import IWaveformRenderer
 from app.application.interfaces.webhook_verifier import IWebhookVerifier
+from app.application.use_cases.analytics.analytics_projection import AnalyticsProjection
+from app.application.use_cases.analytics.get_creator_analytics import GetCreatorAnalytics
+from app.application.use_cases.analytics.record_analytics_event import RecordAnalyticsEvent
 from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
@@ -347,11 +350,16 @@ def init(settings: Settings) -> None:
     # ``CreateNotification`` writer on the same event stream. A broker-backed publisher
     # can replace this later identically. Each consumer holds a *factory* (not an
     # instance) so every delivery runs in its own fresh use case + Unit of Work.
+    # α9.0 registers a FOURTH independent consumer — the analytics projection for the publish
+    # + export lifecycle events — activating the dormant ``analytics_events`` table as a
+    # downstream outbox sink (ADR-0042). Exactly-once is DB-owned (ADR-0048); like the others
+    # it holds a factory, so every delivery runs in its own use case + Unit of Work.
     _publisher = InProcessPublisher(
         [
             GeneratedMediaIngestionSubscriber(get_ingest_generated_media_use_case),
             NotificationProjection(get_create_notification_use_case),
             PublishNotificationProjection(get_create_notification_use_case),
+            AnalyticsProjection(get_record_analytics_event_use_case),
         ]
     )
     # α8.1/α8.2: wire the provider registry. When a provider's key is configured,
@@ -1767,6 +1775,29 @@ def get_creator_dashboard_use_case() -> GetCreatorDashboard:
     into a scalar summary — no new repository method, no analytics.
     """
     return GetCreatorDashboard(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α9.0 — Creator Analytics Foundation)
+# ---------------------------------------------------------------------
+
+
+def get_record_analytics_event_use_case() -> RecordAnalyticsEvent:
+    """Factory: the α9.0 idempotent analytics write (fresh UoW per call).
+
+    Invoked by ``AnalyticsProjection`` once per delivered publish/export lifecycle event, so
+    each projection runs in its own Unit of Work. Strictly downstream of — and never mutates —
+    the frozen publish/export runtime (ADR-0042); exactly-once is DB-enforced (ADR-0048).
+    """
+    return RecordAnalyticsEvent(uow=get_unit_of_work())
+
+
+def get_creator_analytics_use_case() -> GetCreatorAnalytics:
+    """Factory: the α9.0 read-only creator analytics summary (fresh UoW per call).
+
+    Owner-scoped per-``event_name`` counts over a window — one aggregate read, no writes.
+    """
+    return GetCreatorAnalytics(uow=get_unit_of_work())
 
 
 def get_process_publish_job_use_case() -> ProcessPublishJob:

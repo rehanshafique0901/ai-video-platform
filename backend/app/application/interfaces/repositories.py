@@ -37,6 +37,7 @@ from app.application.interfaces.usage_recorder import (
     NewUsageRecord,
     UsageRecordRow,
 )
+from app.domain.analytics.analytics_event import AnalyticsEventCount
 from app.domain.export.export_job import ExportJob, ExportJobClaim
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
@@ -2244,6 +2245,68 @@ class INotificationRepository(ABC):
         AND read_at IS NULL AND archived = false``. Writes only ``read_at`` (W8.5b.9) and
         never reshuffles the feed (W8.5b.10). Returns the affected row count (``0`` when
         nothing was unread — an idempotent no-op). Owner-scoped (W8.5b.8).
+        """
+        ...
+
+
+class IAnalyticsRepository(ABC):
+    """Persistence surface for ``analytics_events`` — the α9.0 creator-analytics store.
+
+    The table is a **dormant baseline artifact** (partitioned monthly by ``occurred_at``,
+    append-only, ``reject_mutation`` trigger). α9.0 activates it as a **downstream outbox
+    consumer** (ADR-0042): :meth:`add` records one already-completed publish/export action;
+    :meth:`summary_for_owner` is the owner-scoped read aggregate behind ``GET
+    /analytics/summary``. Nothing here mutates the frozen publish/export runtime.
+
+    **Exactly-once is DB-owned (ADR-0048).** :meth:`add` maps the partial-unique
+    ``uq_analytics_events_source_event_id`` violation (over ``(source_event_id, occurred_at)
+    WHERE source_event_id IS NOT NULL``) to ``ConflictError``; the caller treats that as an
+    already-recorded no-op. The relay is at-least-once, so a redelivered event drives the
+    projection again — the database, not subscriber control flow, guarantees at most one row
+    per source event. Deduplication is only correct because the consumer sets ``occurred_at
+    = event.occurred_at`` (deterministic), never ``now()``.
+
+    **Owner-scoped.** :meth:`summary_for_owner` is keyed by ``(tenant_id, user_id)`` — a
+    principal only ever sees the counts of their own recorded actions (a foreign/absent scope
+    yields an empty aggregate), mirroring the anti-enumeration posture of the other
+    owner-scoped reads.
+    """
+
+    @abstractmethod
+    async def add(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        event_name: str,
+        properties: dict[str, Any],
+        source_event_id: UUID,
+        occurred_at: datetime,
+    ) -> None:
+        """Append one analytics event row (append-only; no return value needed).
+
+        ``occurred_at`` is the **producing event's** ``occurred_at`` (deterministic), which
+        also selects the monthly partition. ``id`` is DB-populated. Raises ``ConflictError``
+        when ``(source_event_id, occurred_at)`` already exists (redelivery of the same source
+        event) — the caller resolves it as an idempotent no-op (ADR-0048).
+        """
+        ...
+
+    @abstractmethod
+    async def summary_for_owner(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        since: datetime,
+        until: datetime,
+    ) -> list[AnalyticsEventCount]:
+        """Return per-``event_name`` counts for the owner over ``[since, until)``.
+
+        Half-open window (``occurred_at >= since AND occurred_at < until``) so adjacent
+        windows never double-count a boundary event. Scoped by ``(tenant_id, user_id)``;
+        side-effect-free. Only ``event_name`` values actually present are returned — the
+        caller (``GetCreatorAnalytics``) zero-fills the full vocabulary.
         """
         ...
 

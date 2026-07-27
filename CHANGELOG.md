@@ -6,6 +6,47 @@
 
 ## [Unreleased]
 
+### α9.0 — Creator Analytics Foundation (`0.4.43-phase3-alpha9.0`, 2026-07-28)
+
+**Activates the dormant, partitioned `analytics_events` table as a downstream outbox consumer.** The
+foundation for creator analytics: publish/export lifecycle events are projected into owner-scoped
+analytics rows, exposed through one authenticated read-only `GET /api/v1/analytics/summary`. Governed
+by [`PHASE3_ALPHA9_0_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_0_PREFLIGHT.md) (AN0–AN14) and
+[`ADR-0048`](docs/decisions/ADR-0048-analytics-consumer-idempotency.md) (idempotency boundary).
+**Strictly additive: no producer change, no frozen-runtime change; the single architectural decision
+(DB-enforced exactly-once) is governed by ADR-0048.**
+
+#### Added
+- **`analytics_events.source_event_id uuid NULL`** + two indexes (migration `0015`): the partial-unique
+  **`uq_analytics_events_source_event_id`** over `(source_event_id, occurred_at) WHERE source_event_id
+  IS NOT NULL` (DB-enforced exactly-once — ADR-0048; includes the partition key so it is valid on and
+  auto-propagates across the partitioned table, empirically verified against PostgreSQL 17.10) and the
+  owner-read **`ix_analytics_events_user_id_occurred_at`** over `(user_id, occurred_at) WHERE user_id IS
+  NOT NULL`.
+- **`IAnalyticsRepository`** (`add` + `summary_for_owner`) on the UoW, with a raw-SQL
+  `AnalyticsRepository` — the write maps the unique-index violation to `ConflictError`; the read is an
+  owner-scoped half-open-window `COUNT(*) … GROUP BY event_name`.
+- **`AnalyticsProjection`** — the fourth independent in-process outbox consumer, mapping the publish +
+  export lifecycle events to a stable `event_name` vocabulary + neutral property subset
+  (`event_schema.py`), with `source_event_id = event.id` and **`occurred_at = event.occurred_at`
+  (deterministic, never `now()`)**. Idempotent on `event.id` (relay redelivery → no-op).
+- **`RecordAnalyticsEvent`** — the idempotent write use case (resolves the owner's `tenant_id` in the
+  same UoW; `ConflictError` → already-recorded no-op; vanished user → clean skip).
+- **`GetCreatorAnalytics`** + **`GET /api/v1/analytics/summary?since=&until=`** — a read-only
+  owner-scoped summary (per-`event_name` counts + total, zero-filled over the full vocabulary; window
+  defaults to a trailing 30 days; naive/inverted windows → `422`). Wired through
+  `get_creator_analytics_use_case` + `CreatorAnalyticsDep`.
+
+#### Enforcement
+- **Tests** — unit tests of the projection (event→name/properties mapping, owner targeting,
+  deterministic `occurred_at`, non-applicable/malformed/unknown-user no-ops), `RecordAnalyticsEvent`
+  (recorded vs duplicate vs skipped), `GetCreatorAnalytics` (zero-fill/total), and window validation;
+  a DB-backed integration suite (**Stage 18**): success/failure rows written with correct
+  `event_name`/`user_id`/`tenant_id`, **exactly-once** under redelivery, owner isolation, and API
+  visibility through `GET /analytics/summary`.
+
+**Migration `0015` (additive), one new port, ADR-0048.** Full ephemeral-DB gate (stages 0–18) **PASS**.
+
 ### α8.9c — Creator Dashboard (`0.4.42-phase3-alpha8.9c`, 2026-07-27)
 
 **A read-only owner-scoped creator dashboard.** Final increment of the **α8.9 Creator Experience**

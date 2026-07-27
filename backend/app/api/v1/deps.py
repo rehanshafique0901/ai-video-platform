@@ -35,6 +35,7 @@ from app.api.v1.helpers import client_ip
 from app.application.interfaces.repositories import IUserRepository
 from app.application.interfaces.security import ITokenIssuer
 from app.application.interfaces.unit_of_work import IUnitOfWork
+from app.application.use_cases.analytics.get_creator_analytics import GetCreatorAnalytics
 from app.application.use_cases.auth.login_user import LoginUser
 from app.application.use_cases.auth.logout_session import LogoutSession
 from app.application.use_cases.auth.refresh_session import RefreshSession
@@ -296,6 +297,12 @@ ListPublishJobsDep = Annotated[ListPublishJobs, Depends(container.get_list_publi
 
 CreatorDashboardDep = Annotated[
     GetCreatorDashboard, Depends(container.get_creator_dashboard_use_case)
+]
+
+# ---- Use-case dependencies (Slice α9.0 — Creator analytics) -----------
+
+CreatorAnalyticsDep = Annotated[
+    GetCreatorAnalytics, Depends(container.get_creator_analytics_use_case)
 ]
 
 # ---- Use-case dependencies (Slice α7.2 — Workflow runs) ---------------
