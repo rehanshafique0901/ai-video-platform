@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.42-phase3-alpha8.9c` (code constant — matches the tag at the α8.9c finalize) |
-| **Latest runtime tag** | `v0.4.42-phase3-alpha8.9c` |
+| **Application version** | `0.4.43-phase3-alpha9.0` (code constant — matches the tag at the α9.0 finalize) |
+| **Latest runtime tag** | `v0.4.43-phase3-alpha9.0` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, α8.6c destination adapters, the α8.8 asset promotion bridge, the α8.9a publish notifications, the α8.9b creator scheduling, and the α8.9c creator dashboard all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, α8.6c destination adapters, the α8.8 asset promotion bridge, the α8.9a publish notifications, the α8.9b creator scheduling, the α8.9c creator dashboard, and the α9.0 creator analytics foundation all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -159,6 +159,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Publishing — publish notifications | ✅ | α8.9a | first increment of the **α8.9 Creator Experience** milestone — fulfils the deferred **DQ7** fan-out. A new `PublishNotificationProjection` (a faithful twin of the export `NotificationProjection`) consumes only the terminal `PublishJobSucceeded`/`PublishJobFailed` outbox events and projects each into exactly one in-app notification (`publish.succeeded`/`publish.failed`) for the event's `requested_by_user_id`, reusing the existing `CreateNotification` writer (fresh per event → own UoW) and the DB-owned `(user_id, source_event_id)` unique index for exactly-once under relay redelivery; registered as a **third** independent consumer on the existing `InProcessPublisher` fan-out (producers + relay untouched, ADR-0042). **Strictly additive: no migration, no new port, no ADR**; carries no credential/URL/bytes (PUB-8 / ADR-0047 C8); CI Stage 16 ([`PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md`](../engineering/PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md)) |
 | Publishing — creator scheduling | ✅ | α8.9b | second increment of the **α8.9 Creator Experience** milestone — lets a creator schedule a YouTube go-live via the existing pipeline. Adds the one missing **creator-facing ingress**: an optional `publish_at` on `PublishJobCreateRequest`, validated at the boundary (timezone-aware + strictly future, normalised to UTC — SC3), threaded through `CreatePublishJob.execute` into the already-wired `build_content_package(publish_at=…)` → the α8.6c YouTube mapping (`publish_at` ⇒ `privacyStatus=private` + `status.publishAt`). **Platform-native scheduling, not worker deferral**: the job still uploads immediately and `publish_jobs.scheduled_at` stays `None`, so the runtime is unchanged (SC1); idempotency preserved — a replay does **not** reschedule (SC5). **Strictly additive: no scheduler/cron/timer/loop, no migration, no new port, no ADR**; scheduling coverage extends **Stage 14** in place ([`PHASE3_ALPHA8_9b_PREFLIGHT.md`](../engineering/PHASE3_ALPHA8_9b_PREFLIGHT.md)) |
 | Creator dashboard | ✅ | α8.9c | third + final increment of the **α8.9 Creator Experience** milestone (completes it) — a **read-only** owner-scoped `GET /api/v1/dashboard/summary` surfacing the caller's product state as scalar counts: publish-job counts by `PublishStatus` (+ total; every status always present), connected/total social accounts, the unread notification count, and the media total. A new `GetCreatorDashboard` use case composes these inside a **single** `IUnitOfWork` from the **already-existing** owner-scoped reads (`publish_jobs.list_for_owner`, `social_accounts.list_for_owner`, `notifications.count_unread`, `media.list_owned`) — all scope from `CurrentUserDep`, so a fresh caller sees all-zero (CD3/CD4). **Strictly additive: no new repository method, no new SQL, no migration, no new port, no ADR, no analytics subsystem** (the dormant `analytics_events` table stays untouched); CI Stage 17 ([`PHASE3_ALPHA8_9c_PREFLIGHT.md`](../engineering/PHASE3_ALPHA8_9c_PREFLIGHT.md)) |
+| Creator analytics foundation | ✅ | α9.0 | activates the dormant, partitioned `analytics_events` table as a **fourth independent** downstream outbox consumer (ADR-0042 fan-out): a new `AnalyticsProjection` maps the publish + export lifecycle events to a stable `event_name` vocabulary + neutral property subset and, through the reused `RecordAnalyticsEvent` writer (fresh per event → own UoW; tenant resolved in-UoW), persists one owner-scoped row each. **Exactly-once is DB-owned** ([`ADR-0048`](../decisions/ADR-0048-analytics-consumer-idempotency.md)): `source_event_id = event.id`, `occurred_at = event.occurred_at` (deterministic, never `now()`), and the partial-unique `uq_analytics_events_source_event_id` over `(source_event_id, occurred_at)` — which includes the partition key so it is valid on / auto-propagates across the partitioned table (empirically verified vs PostgreSQL 17.10) — refuses a relay redelivery as a no-op. Exposed via a **read-only** owner-scoped `GET /api/v1/analytics/summary` (`GetCreatorAnalytics`: per-`event_name` counts + total, zero-filled over the full vocabulary; trailing-30d default window; naive/inverted window → 422). **Additive: migration `0015` (dedup column + unique index + owner-read index), one new `IAnalyticsRepository` port, ADR-0048; no producer or frozen-runtime change**; CI Stage 18 ([`PHASE3_ALPHA9_0_PREFLIGHT.md`](../engineering/PHASE3_ALPHA9_0_PREFLIGHT.md)) |
 
 ### Invariant catalog
 
@@ -330,9 +331,10 @@ rather than guarding against code that does not yet exist.
 > Shipped slices (α8.5a → α8.5b.3r, α8.5c → α8.5e, the α8.5x execution runtime +
 > first generation slice, α8.7 Planner V2, α8.6a publishing account connections,
 > α8.6b publish runtime, α8.6c destination adapters — YouTube, the α8.8 asset
-> promotion bridge, and the complete **α8.9 Creator Experience** — α8.9a publish
-> notifications, α8.9b creator scheduling, α8.9c creator dashboard) have moved up
-> into *Completed capability lifecycles*. Only genuinely future work remains below.
+> promotion bridge, the complete **α8.9 Creator Experience** — α8.9a publish
+> notifications, α8.9b creator scheduling, α8.9c creator dashboard — and the α9.0
+> creator analytics foundation) have moved up into *Completed capability
+> lifecycles*. Only genuinely future work remains below.
 
 | Slice | Scope |
 |---|---|

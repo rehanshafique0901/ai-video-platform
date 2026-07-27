@@ -137,6 +137,7 @@ into a seam; it does not reshape the flow (ADR-0042, ADR-0045).
 | **Asset Promotion Bridge** | Execution → Library | The **ADR-0046 X8** (`PublishGenerationAssets`) seam: promotes a completed generation's final video (`generation_assets`, Path B) into the platform media library (`media_assets(source='generated')`, Path A) that feeds Render → Export → Publish. User-initiated, **library-only**; **copies** bytes (never a shared reference), request-time project-scoped ownership, recomputed checksum + provenance, deterministic-key idempotency (`noop` replay). Reads through a new **read-only** `IGenerationReader` (no existing port changed); **no schema migration**. | `PromoteGenerationAssets` (`application/use_cases/media/`), `IGenerationReader`/`GenerationReader`, `POST /api/v1/media/promotions` | [ADR-0046](../decisions/ADR-0046-execution-runtime-boundaries.md) · [PHASE3_ASSET_PROMOTION_BRIDGE_PREFLIGHT](./PHASE3_ASSET_PROMOTION_BRIDGE_PREFLIGHT.md) | ✅ α8.8 |
 | **Publisher** | Execution | Uploads the final MP4 to social platforms behind per-platform adapters. Its **account-connection foundation** (OAuth credential ownership: `SocialAccount`, envelope-encrypted tokens, owner-scoped `/api/v1/social-accounts`) shipped in **α8.6a**; the **publish runtime** (user-initiated `PublishJob` + poll-ingress `PublishWorker`, dual-lock serialization, bounded retries, terminal outbox events, `/api/v1/publish-jobs`) in **α8.6b** — credential-blind, consuming only the `AuthorizedContext` and uploading via `IDestinationPublisher`; and the **first real destination adapter** (YouTube — `YouTubeOAuthClient` + `YouTubeDestination`, Data API v3 resumable upload over a thin injected `httpx` transport, PUB-11 ambiguous-outcome safety) in **α8.6c** — adapter-only, no port/runtime change, still credential-blind (Mock remains the CI default; live smoke is opt-in). Downstream, the **α8.9a publish notifications** fan-out (`PublishNotificationProjection`) turns the terminal `PublishJobSucceeded`/`PublishJobFailed` events into in-app notifications for the requester — a separate consumer on the existing outbox fan-out, not part of the publish runtime. **α8.9b creator scheduling** adds an optional, boundary-validated `publish_at` on the create request that threads into `ContentPackage.publish_at` → the YouTube `status.publishAt` mapping (platform-native go-live; upload still immediate, `scheduled_at` untouched). | `SocialCredentialService`, `/social-accounts` (α8.6a); `CreatePublishJob`/`ProcessPublishJob`/`PublishWorker`, `IDestinationPublisher`/`IDestinationRegistry`, `/publish-jobs` (α8.6b); `YouTubeOAuthClient`/`YouTubeDestination` (α8.6c); `PublishNotificationProjection` (α8.9a); `PublishJobCreateRequest.publish_at` (α8.9b) | [PUBLISHING_RUNTIME_CONTRACT](./PUBLISHING_RUNTIME_CONTRACT.md) · [ADR-0047](../decisions/ADR-0047-publishing-credential-ownership.md) | ◑ α8.6a (connections) · ✅ α8.6b (runtime) · ✅ α8.6c (YouTube) · ✅ α8.9a (notifications) · ✅ α8.9b (scheduling) |
 | **Creator Dashboard** | API / read | Read-only owner-scoped summary of the caller's product state — publish-job counts by status, connected/total social accounts, unread notifications, media total — composed inside a single UoW from the **already-existing** owner-scoped reads (no new repository method, no new SQL, no migration, no analytics). Completes the **α8.9 Creator Experience**. | `GetCreatorDashboard` (`application/use_cases/dashboard/`), `GET /api/v1/dashboard/summary` | [PHASE3_ALPHA8_9c_PREFLIGHT](./PHASE3_ALPHA8_9c_PREFLIGHT.md) | ✅ α8.9c |
+| **Creator Analytics** | Outbox consumer + API / read | Activates the dormant, partitioned `analytics_events` table as a **fourth independent** downstream outbox consumer: `AnalyticsProjection` maps the publish + export lifecycle events → a stable `event_name` vocabulary + neutral properties, and the reused `RecordAnalyticsEvent` writer (own UoW/event; tenant resolved in-UoW) persists one owner-scoped row each. **Exactly-once is DB-owned** (`source_event_id = event.id`, `occurred_at = event.occurred_at`; partial-unique `(source_event_id, occurred_at)` including the partition key). Read via owner-scoped `GET /api/v1/analytics/summary` (`GetCreatorAnalytics`: zero-filled per-`event_name` counts + total, trailing-30d default, naive/inverted window → 422). Migration `0015`; one new `IAnalyticsRepository`; no producer/frozen-runtime change. | `AnalyticsProjection` / `RecordAnalyticsEvent` / `GetCreatorAnalytics` (`application/use_cases/analytics/`), `IAnalyticsRepository`/`AnalyticsRepository`, `GET /api/v1/analytics/summary`, migration `0015` | [ADR-0048](../decisions/ADR-0048-analytics-consumer-idempotency.md) · [PHASE3_ALPHA9_0_PREFLIGHT](./PHASE3_ALPHA9_0_PREFLIGHT.md) | ✅ α9.0 |
 
 Legend: ✅ implemented · ⟢ planned.
 
@@ -195,9 +196,13 @@ Validation mirrors the plane boundaries (see [`../CI_QUALITY_GATE.md`](../CI_QUA
   promotion bridge — promote + idempotent replay of `generation_assets` → `media_assets`),
   **Stage 16** (the α8.9a publish notifications — publish terminal events →
   in-app notifications: success/failure, exactly-once under redelivery, read-API visibility),
-  and **Stage 17** (the α8.9c creator dashboard — `GET /api/v1/dashboard/summary` aggregating
+  **Stage 17** (the α8.9c creator dashboard — `GET /api/v1/dashboard/summary` aggregating
   committed owner-scoped state across publish jobs / social accounts / notifications / media,
-  plus owner isolation + the auth gate) against an ephemeral Postgres + real ffmpeg.
+  plus owner isolation + the auth gate), and **Stage 18** (the α9.0 creator analytics — the
+  outbox projection writing one owner-scoped `analytics_events` row per publish/export
+  lifecycle event, exactly-once under redelivery via the `(source_event_id, occurred_at)`
+  unique index, owner isolation, and `GET /api/v1/analytics/summary` visibility + `422`/`401`)
+  against an ephemeral Postgres + real ffmpeg.
   The α8.6c YouTube adapter adds **no** Stage 14 test: it is covered by **network-free unit
   tests in Stage 4** (via `httpx.MockTransport`) plus an **opt-in live smoke test excluded
   from CI**, so Stage 14 stays deterministic and offline (the Mock destination remains the
@@ -210,8 +215,10 @@ persistence-bearing Publishing slices (α8.6a connections, α8.6b publish runtim
 adapter-only α8.6c slice keeps its determinism by staying in Stage 4; the α8.8 asset
 promotion bridge earns its own **Stage 15**; the α8.9a publish notifications fan-out
 earns its own **Stage 16** (the notifications context reacting to publish events — a
-downstream consumer, not the publish runtime); and the α8.9c creator dashboard — a new
-read surface composed across bounded contexts — earns its own **Stage 17**.
+downstream consumer, not the publish runtime); the α8.9c creator dashboard — a new
+read surface composed across bounded contexts — earns its own **Stage 17**; and the α9.0
+creator analytics — a dormant table activated as a downstream outbox consumer plus a new
+read surface — earns its own **Stage 18**.
 
 ---
 
