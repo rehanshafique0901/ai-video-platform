@@ -396,3 +396,57 @@ async def test_p3_permanent_failure_is_terminal(session: AsyncSession) -> None:
 
     assert await _outbox_events(session, job_id) == ["PublishJobCreated", "PublishJobFailed"]
     assert await _lock_count(session) == 0
+
+
+# --------------------------------------------------------------------------- #
+# P4 — creator scheduling (α8.9b): publish_at persists + runtime unchanged     #
+# --------------------------------------------------------------------------- #
+async def test_p4_scheduled_publish_persists_publish_at_and_still_runs(
+    session: AsyncSession,
+) -> None:
+    ids = await _seed(session)
+    uow = _PublishUnitOfWork(session)
+    creds = _StubCredentialStore()
+    resolver = _StorageResolver(_InMemoryObjectStorage("media", b"\x01\x02\x03\x04"))
+    registry = DestinationRegistry({"mock": MockDestination()})
+
+    when = datetime(2099, 1, 1, 12, 0, tzinfo=UTC)
+    create = CreatePublishJob(uow, supported_platforms={"mock"})  # type: ignore[arg-type]
+    created = await create.execute(
+        owner_user_id=ids["user_id"],  # type: ignore[arg-type]
+        tenant_id=ids["tenant_id"],  # type: ignore[arg-type]
+        export_job_id=ids["export_job_id"],  # type: ignore[arg-type]
+        social_account_id=ids["social_account_id"],  # type: ignore[arg-type]
+        publish_at=when,
+    )
+    job_id = created.job.id
+    # SC1 — platform-native schedule lives in the content package; worker deferral untouched.
+    assert created.job.content_package.publish_at == when
+    assert created.job.scheduled_at is None
+
+    # Round-trips through the publish_jobs.content_package JSONB (fresh read via the repo).
+    reloaded = await uow.publish_jobs.get_owned(
+        tenant_id=ids["tenant_id"],  # type: ignore[arg-type]
+        owner_user_id=ids["user_id"],  # type: ignore[arg-type]
+        publish_job_id=job_id,
+    )
+    assert reloaded is not None
+    assert reloaded.content_package.publish_at == when
+
+    # Preserve current runtime behaviour: the scheduled job still uploads on the next pass.
+    worker = PublishWorker(
+        uow,  # type: ignore[arg-type]
+        ProcessPublishJob(uow, resolver, creds, registry),  # type: ignore[arg-type]
+    )
+    poll = await worker.run_once()
+    assert [o.status for o in poll.outcomes] == ["published"]
+
+    settled = await uow.publish_jobs.get_owned(
+        tenant_id=ids["tenant_id"],  # type: ignore[arg-type]
+        owner_user_id=ids["user_id"],  # type: ignore[arg-type]
+        publish_job_id=job_id,
+    )
+    assert settled is not None
+    assert settled.status == PublishStatus.SUCCEEDED.value
+    assert settled.content_package.publish_at == when  # schedule preserved through settlement
+    assert await _lock_count(session) == 0

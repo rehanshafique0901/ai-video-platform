@@ -13,6 +13,7 @@ HTTP contract only.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -80,6 +81,56 @@ async def test_create_non_uuid_body_is_422(client: AsyncClient) -> None:
         json={"export_job_id": "not-a-uuid", "social_account_id": str(uuid4())},
     )
     assert r.status_code == 422, r.text
+
+
+async def test_create_naive_publish_at_is_422(client: AsyncClient) -> None:
+    # α8.9b — a naive (tz-less) schedule is rejected at the ingress before any account lookup.
+    access = await _register(client)
+    naive = (datetime.now(UTC) + timedelta(hours=2)).replace(tzinfo=None)
+    r = await client.post(
+        "/api/v1/publish-jobs",
+        headers=_auth(access),
+        json={
+            "export_job_id": str(uuid4()),
+            "social_account_id": str(uuid4()),
+            "publish_at": naive.isoformat(),
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+async def test_create_past_publish_at_is_422(client: AsyncClient) -> None:
+    access = await _register(client)
+    past = datetime.now(UTC) - timedelta(hours=1)
+    r = await client.post(
+        "/api/v1/publish-jobs",
+        headers=_auth(access),
+        json={
+            "export_job_id": str(uuid4()),
+            "social_account_id": str(uuid4()),
+            "publish_at": past.isoformat(),
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+async def test_create_future_publish_at_parses_then_404_on_unknown_account(
+    client: AsyncClient,
+) -> None:
+    # α8.9b — a valid future tz-aware schedule passes ingress validation, so the request
+    # proceeds to the account gate and 404s on an unknown account (proving the field parses).
+    access = await _register(client)
+    future = datetime.now(UTC) + timedelta(days=1)
+    r = await client.post(
+        "/api/v1/publish-jobs",
+        headers=_auth(access),
+        json={
+            "export_job_id": str(uuid4()),
+            "social_account_id": str(uuid4()),
+            "publish_at": future.isoformat(),
+        },
+    )
+    assert r.status_code == 404, r.text
 
 
 async def test_get_unknown_is_404(client: AsyncClient) -> None:

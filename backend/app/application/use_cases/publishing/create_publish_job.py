@@ -3,7 +3,8 @@
 Contract:
 
     POST /api/v1/publish-jobs
-      body:  { export_job_id, social_account_id, title?, description?, tags?, visibility? }
+      body:  { export_job_id, social_account_id, title?, description?, tags?, visibility?,
+               publish_at? }
       → 201  { data: PublishJobPublic, meta }              (new publish queued)
       → 200  { data: PublishJobPublic, meta }              (idempotent replay — existing job)
       → 404  { error: NOT_FOUND }                          (export/account not the caller's)
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 import structlog
@@ -77,6 +79,7 @@ class CreatePublishJob:
         description: str | None = None,
         tags: tuple[str, ...] | None = None,
         visibility: Visibility | None = None,
+        publish_at: datetime | None = None,
         ip: str | None = None,
     ) -> CreatePublishJobResult:
         async with self._uow:
@@ -149,6 +152,7 @@ class CreatePublishJob:
                 description=description,
                 tags=tags,
                 visibility=visibility,
+                publish_at=publish_at,
             )
 
             try:

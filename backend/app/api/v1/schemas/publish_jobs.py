@@ -8,17 +8,23 @@ credential, bearer, or platform-internal field is ever present (PUB-8 / ADR-0047
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.publishing.content_package import ContentPackage, Visibility
 
 
 class PublishJobCreateRequest(BaseModel):
-    """``POST /publish-jobs`` body — what to publish + where + optional metadata."""
+    """``POST /publish-jobs`` body — what to publish + where + optional metadata.
+
+    ``publish_at`` (α8.9b — Creator Scheduling) is an optional platform-native schedule: when
+    set, the job still uploads immediately, but the destination keeps the video private and
+    flips it live at ``publish_at`` (YouTube ``status.publishAt``). It is **not** worker-side
+    deferral — the runtime is unchanged. Absent ⇒ today's immediate-publish behaviour.
+    """
 
     export_job_id: UUID
     social_account_id: UUID
@@ -26,6 +32,24 @@ class PublishJobCreateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=5000)
     tags: list[str] | None = Field(default=None, max_length=50)
     visibility: Visibility | None = None
+    publish_at: datetime | None = None
+
+    @field_validator("publish_at")
+    @classmethod
+    def _validate_publish_at(cls, value: datetime | None) -> datetime | None:
+        """Timezone-aware + strictly future; normalised to UTC (SC3).
+
+        A naive datetime or a non-future time is a 422 (a raised ``ValueError`` in a Pydantic
+        validator surfaces through the app's exception handlers). Normalising to UTC keeps the
+        stored/echoed ``ContentPackage.publish_at`` canonical and deterministic.
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("publish_at must be timezone-aware (include a UTC offset)")
+        if value <= datetime.now(UTC):
+            raise ValueError("publish_at must be in the future")
+        return value.astimezone(UTC)
 
 
 class ContentPackagePublic(BaseModel):
