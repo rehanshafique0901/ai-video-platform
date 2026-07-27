@@ -23,11 +23,11 @@
 
 | | |
 |---|---|
-| **Application version** | `0.4.41-phase3-alpha8.9b` (code constant — matches the tag at the α8.9b finalize) |
-| **Latest runtime tag** | `v0.4.41-phase3-alpha8.9b` |
+| **Application version** | `0.4.42-phase3-alpha8.9c` (code constant — matches the tag at the α8.9c finalize) |
+| **Latest runtime tag** | `v0.4.42-phase3-alpha8.9c` |
 | **Phase** | Phase 3 — orchestration era (α7+) |
 | **Orchestration core** | **Frozen** since `v0.4.23` (ADR-0042, 2026-07-22) |
-| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, α8.6c destination adapters, the α8.8 asset promotion bridge, the α8.9a publish notifications, and the α8.9b creator scheduling all shipped additively) |
+| **Freeze overrides used to date** | **0** (α8.3b, α8.4a–e, α8.5a, α8.5b.1–3, α8.5b.3r, α8.5c–e, the α8.5x execution runtime + first generation slice, α8.7 Planner V2, α8.6a publishing account connections, α8.6b publish runtime, α8.6c destination adapters, the α8.8 asset promotion bridge, the α8.9a publish notifications, the α8.9b creator scheduling, and the α8.9c creator dashboard all shipped additively) |
 
 The project has crossed from *building the orchestration engine* to *building
 capabilities on top of a stable platform*. Every slice since the freeze has been
@@ -158,6 +158,7 @@ Provider → Completion → Generated Media Ingestion → MediaAsset → Timelin
 | Publishing — destination adapters (YouTube) | ✅ | α8.6c | third Publishing slice (first real destination, **adapter-only — no migration, no port change, no runtime expansion**, EQ1–EQ5): two credential-blind infrastructure leaves behind the unchanged α8.6b ports — `YouTubeOAuthClient` (`ISocialOAuthClient`: consent URL / code exchange + channel-identity lookup / refresh / revoke) and `YouTubeDestination` (`IDestinationPublisher`: Data API v3 `videos.insert` resumable upload, deterministic `ContentPackage → snippet/status` mapping, Google-error → `DestinationError(retryable)` classification) — over a thin injected `httpx` transport (EQ2, no Google SDK); configuration-blind `Settings` + composition-root wiring that registers `"youtube"` only when credentials are set (**fail-soft**); **PUB-11** (ambiguous post-transmission outcome ⇒ permanent, never retried — no double-post, EQ3); network-free unit tests via `httpx.MockTransport` + an **opt-in live smoke test excluded from CI** (Stage 14 stays deterministic, EQ4); credential-blindness still enforced by the existing import-linter contracts (`AuthorizedContext` the only credential crossing into the adapter) ([`PUBLISHING_RUNTIME_CONTRACT.md`](../engineering/PUBLISHING_RUNTIME_CONTRACT.md) PUB-1…PUB-11, [`ADR-0047`](../decisions/ADR-0047-publishing-credential-ownership.md)) |
 | Publishing — publish notifications | ✅ | α8.9a | first increment of the **α8.9 Creator Experience** milestone — fulfils the deferred **DQ7** fan-out. A new `PublishNotificationProjection` (a faithful twin of the export `NotificationProjection`) consumes only the terminal `PublishJobSucceeded`/`PublishJobFailed` outbox events and projects each into exactly one in-app notification (`publish.succeeded`/`publish.failed`) for the event's `requested_by_user_id`, reusing the existing `CreateNotification` writer (fresh per event → own UoW) and the DB-owned `(user_id, source_event_id)` unique index for exactly-once under relay redelivery; registered as a **third** independent consumer on the existing `InProcessPublisher` fan-out (producers + relay untouched, ADR-0042). **Strictly additive: no migration, no new port, no ADR**; carries no credential/URL/bytes (PUB-8 / ADR-0047 C8); CI Stage 16 ([`PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md`](../engineering/PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md)) |
 | Publishing — creator scheduling | ✅ | α8.9b | second increment of the **α8.9 Creator Experience** milestone — lets a creator schedule a YouTube go-live via the existing pipeline. Adds the one missing **creator-facing ingress**: an optional `publish_at` on `PublishJobCreateRequest`, validated at the boundary (timezone-aware + strictly future, normalised to UTC — SC3), threaded through `CreatePublishJob.execute` into the already-wired `build_content_package(publish_at=…)` → the α8.6c YouTube mapping (`publish_at` ⇒ `privacyStatus=private` + `status.publishAt`). **Platform-native scheduling, not worker deferral**: the job still uploads immediately and `publish_jobs.scheduled_at` stays `None`, so the runtime is unchanged (SC1); idempotency preserved — a replay does **not** reschedule (SC5). **Strictly additive: no scheduler/cron/timer/loop, no migration, no new port, no ADR**; scheduling coverage extends **Stage 14** in place ([`PHASE3_ALPHA8_9b_PREFLIGHT.md`](../engineering/PHASE3_ALPHA8_9b_PREFLIGHT.md)) |
+| Creator dashboard | ✅ | α8.9c | third + final increment of the **α8.9 Creator Experience** milestone (completes it) — a **read-only** owner-scoped `GET /api/v1/dashboard/summary` surfacing the caller's product state as scalar counts: publish-job counts by `PublishStatus` (+ total; every status always present), connected/total social accounts, the unread notification count, and the media total. A new `GetCreatorDashboard` use case composes these inside a **single** `IUnitOfWork` from the **already-existing** owner-scoped reads (`publish_jobs.list_for_owner`, `social_accounts.list_for_owner`, `notifications.count_unread`, `media.list_owned`) — all scope from `CurrentUserDep`, so a fresh caller sees all-zero (CD3/CD4). **Strictly additive: no new repository method, no new SQL, no migration, no new port, no ADR, no analytics subsystem** (the dormant `analytics_events` table stays untouched); CI Stage 17 ([`PHASE3_ALPHA8_9c_PREFLIGHT.md`](../engineering/PHASE3_ALPHA8_9c_PREFLIGHT.md)) |
 
 ### Invariant catalog
 
@@ -329,15 +330,14 @@ rather than guarding against code that does not yet exist.
 > Shipped slices (α8.5a → α8.5b.3r, α8.5c → α8.5e, the α8.5x execution runtime +
 > first generation slice, α8.7 Planner V2, α8.6a publishing account connections,
 > α8.6b publish runtime, α8.6c destination adapters — YouTube, the α8.8 asset
-> promotion bridge, the α8.9a publish notifications, and the α8.9b creator
-> scheduling) have moved up into *Completed capability lifecycles*. Only
-> genuinely future work remains below.
+> promotion bridge, and the complete **α8.9 Creator Experience** — α8.9a publish
+> notifications, α8.9b creator scheduling, α8.9c creator dashboard) have moved up
+> into *Completed capability lifecycles*. Only genuinely future work remains below.
 
 | Slice | Scope |
 |---|---|
 | **α8.4f** | Render composition — transitions / crossfades / color grading / effects / subtitle burn-in. Blocked on the α6.4 Timeline **authoring** write paths (`transition_in_id`/`transition_out_id`/`effects`/subtitles); ADR-0043 RC1–RC6 |
 | **α8.5b.4** | Notification channels — email (`INotifier` + provider/templates/retries), later push/websocket |
-| **α8.9c** | Creator Experience — final increment: a **read-only** owner-scoped creator dashboard aggregating existing product state (publish-job counts by status, connected social-account count, unread notification count, existing media statistics) over the reused owner-scoped queries; no analytics subsystem (scoped in [`PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md`](../engineering/PHASE3_CREATOR_EXPERIENCE_PREFLIGHT.md)) |
 | **α8.6d′** | Publishing — a **second destination** behind the proven `IDestinationPublisher` seam (the publish-notifications half of the original α8.6d/DQ7 retired into **α8.9a**) |
 
 All remaining work is **downstream of / additive to the frozen orchestration
