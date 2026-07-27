@@ -23,6 +23,7 @@ from typing import Self
 
 from app.application.interfaces.locks import IDistributedLockManager
 from app.application.interfaces.repositories import (
+    IAnalyticsRepository,
     IEventOutboxRepository,
     IExportJobRepository,
     IMediaRepository,
@@ -84,6 +85,7 @@ class IUnitOfWork(ABC):
     provider_settings: IProviderSettingsRepository  # α7.4
     usage: IUsageRecordRepository  # α7.5
     model_pricing: IModelPricingRepository  # α7.5
+    analytics: IAnalyticsRepository  # α9.0
 
     async def __aenter__(self) -> Self:
         return self

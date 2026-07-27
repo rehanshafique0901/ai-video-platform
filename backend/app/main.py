@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.api.v1.routers import (
+    analytics,
     auth,
     dashboard,
     export_jobs,
@@ -101,7 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="AI Video Platform — backend",
-        version="0.4.42-phase3-alpha8.9c",
+        version="0.4.43-phase3-alpha9.0-dev",
         lifespan=lifespan,
     )
 
@@ -125,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(social_accounts.router, prefix="/api/v1")
     app.include_router(publish_jobs.router, prefix="/api/v1")
     app.include_router(dashboard.router, prefix="/api/v1")
+    app.include_router(analytics.router, prefix="/api/v1")
     app.include_router(workflow_runs.router, prefix="/api/v1")
     app.include_router(webhooks.router, prefix="/api/v1")
 

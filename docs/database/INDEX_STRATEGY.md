@@ -189,6 +189,8 @@ Notes:
 |---|---|---|---|---|
 | `analytics_events` (parent + partitions) | `ix_analytics_events_event_name_occurred_at` | composite | Implemented | Funnel queries |
 | `analytics_events` | `ix_analytics_events_tenant_id_occurred_at` | composite | Implemented | Per-tenant slice |
+| `analytics_events` | `uq_analytics_events_source_event_id` (UNIQUE, partial: `WHERE source_event_id IS NOT NULL`, on `(source_event_id, occurred_at)`) | partial unique | Implemented (α9.0, `0015`) | DB-enforced exactly-once for the outbox analytics consumer (ADR-0048); includes the partition key so it is valid on / auto-propagates across the partitioned table |
+| `analytics_events` | `ix_analytics_events_user_id_occurred_at` (partial: `WHERE user_id IS NOT NULL`) | composite partial | Implemented (α9.0, `0015`) | Owner-scoped read path for `GET /api/v1/analytics/summary` |
 | `analytics_events` | `brin_analytics_events_<part>_occurred_at` | BRIN | **Deferred (Phase 3)** | Add per-partition once volume justifies it |
 | `event_outbox` | `ix_event_outbox_unpublished_occurred_at` (partial: `WHERE published_at IS NULL`) | partial | Implemented | Dispatcher hot path |
 | `event_outbox` | `ix_event_outbox_aggregate_type_aggregate_id` | composite | Implemented | "All outbox rows for aggregate X" |

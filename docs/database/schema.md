@@ -949,6 +949,7 @@ CREATE TABLE analytics_events (
   tenant_id uuid,
   user_id uuid,
   session_id text,
+  source_event_id uuid,                 -- α9.0: the outbox event.id that produced this row (nullable, no FK)
   event_name text NOT NULL,
   properties jsonb NOT NULL DEFAULT '{}'::jsonb,
   occurred_at timestamptz NOT NULL,
@@ -958,6 +959,16 @@ CREATE TABLE analytics_events (
 ) PARTITION BY RANGE (occurred_at);
 ```
 Partitions: monthly. No FK constraints (high-volume; integrity at app level).
+
+**Indexes (α9.0, migration `0015`):**
+- `uq_analytics_events_source_event_id` — **UNIQUE** on `(source_event_id, occurred_at) WHERE source_event_id IS NOT NULL`.
+  DB-enforced exactly-once for the outbox analytics consumer ([ADR-0048](../decisions/ADR-0048-analytics-consumer-idempotency.md)):
+  `source_event_id = event.id`, `occurred_at = event.occurred_at` (deterministic), so a relay redelivery targets the
+  identical pair and is refused. Partial (nullable column) and **includes the partition key** `occurred_at`, so the
+  parent unique index is valid on the partitioned table and auto-propagates to every child partition (empirically
+  verified against PostgreSQL 17.10 — ADR-0048 §Verification).
+- `ix_analytics_events_user_id_occurred_at` — on `(user_id, occurred_at) WHERE user_id IS NOT NULL`. The owner-scoped
+  read path for `GET /api/v1/analytics/summary` (α9.0 activates this dormant table as a downstream outbox consumer).
 
 ---
 

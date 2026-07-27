@@ -21,6 +21,7 @@ provider pre-flight):
    15. asset_promotion_bridge    (α8.8 — generation_assets → media_assets X8 seam)
    16. publish_notifications     (α8.9a — publish terminal events → in-app notifications)
    17. creator_dashboard         (α8.9c — read-only owner-scoped dashboard summary)
+   18. creator_analytics         (α9.0 — analytics outbox projection + summary read)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -663,6 +664,28 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/dashboard/test_creator_dashboard.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 18 (α9.0) — Creator Analytics. Proves the analytics outbox projection writes one
+        # owner-scoped analytics_events row per publish/export lifecycle event against a DB at head,
+        # with the DB-owned (source_event_id, occurred_at) unique index enforcing exactly-once under
+        # redelivery (ADR-0048), and the read-only GET /api/v1/analytics/summary returning the
+        # expected owner-scoped, zero-filled counts. It activates a dormant table as a downstream
+        # consumer + adds a new read surface, so — per the "each new slice earns its own stage"
+        # discipline (Stages 15/16/17) — it gets its own stage rather than expanding Stage 14. Like
+        # Stages 13-17 it commits its seed and deletes the rows it created on teardown, leaving the
+        # destructive-migration guard untouched.
+        Stage(
+            number=18,
+            title="creator analytics integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/analytics/test_creator_analytics.py",
             ],
             requires_db=True,
         ),

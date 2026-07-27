@@ -707,6 +707,7 @@ erDiagram
         uuid tenant_id "nullable"
         uuid user_id "nullable"
         text session_id
+        uuid source_event_id "nullable; α9.0 outbox dedupe key (ADR-0048)"
         text event_name
         jsonb properties
         timestamptz occurred_at "partition key"
