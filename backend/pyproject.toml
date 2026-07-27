@@ -398,3 +398,33 @@ forbidden_modules = [
     "app.domain.generation",
     "app.domain.workflow",
 ]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α8.8 (ADR-0046 X8 / W8.6.8) — the Execution Runtime never writes the
+# media library. Path B (generation → generation_assets) reaches the platform media
+# library ONLY through the explicit `PromoteGenerationAssets` bridge (in
+# app.application.use_cases.media), which reads generations via the read-only
+# IGenerationReader port and writes media via the ordinary UoW. This pins X8
+# mechanically: the execution plane (its use cases + its infrastructure, including the
+# new read-only reader) must never import the media bounded context — no generation code
+# may quietly grow a media-write dependency and bypass the bridge.
+name = "Execution Runtime never writes the media library (ADR-0046 X8)"
+type = "forbidden"
+source_modules = [
+    "app.application.use_cases.generation",
+    "app.infrastructure.generation",
+]
+forbidden_modules = [
+    "app.domain.media",
+    "app.application.use_cases.media",
+    "app.infrastructure.repositories.media_repository",
+]
+# Only *direct* execution→media edges are forbidden. The execution store legitimately
+# imports the shared event-outbox repository, which imports the aggregated
+# ``app.application.interfaces.repositories`` module (it declares *every* repo port,
+# including the media one, which references ``MediaAsset`` for typing) — an indirect chain
+# (generation → event_outbox → interfaces.repositories → domain.media) that is allowed by
+# design, exactly like the cloud-SDK / encryption contracts above. A generation module
+# that itself wrote ``import app.application.use_cases.media`` (or the media domain / repo)
+# would be a direct edge and would fail this contract.
+allow_indirect_imports = "True"

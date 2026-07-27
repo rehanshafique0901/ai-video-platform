@@ -87,6 +87,7 @@ from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.ingest_generated_media import IngestGeneratedMedia
 from app.application.use_cases.media.list_media import ListMedia
 from app.application.use_cases.media.media_enrichment_worker import MediaEnrichmentWorker
+from app.application.use_cases.media.promote_generation_assets import PromoteGenerationAssets
 from app.application.use_cases.media.register_media import RegisterMedia
 from app.application.use_cases.media.update_media import UpdateMedia
 from app.application.use_cases.notifications.count_unread_notifications import (
@@ -187,6 +188,7 @@ from app.infrastructure.delivery import (
 )
 from app.infrastructure.export import FfmpegExporter
 from app.infrastructure.generation.execution_runtime_store import SqlExecutionRuntimeStore
+from app.infrastructure.generation.generation_reader import GenerationReader
 from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
 from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
@@ -873,6 +875,22 @@ def get_update_media_use_case() -> UpdateMedia:
 
 def get_delete_media_use_case() -> DeleteMedia:
     return DeleteMedia(uow=get_unit_of_work())
+
+
+def get_promote_generation_assets_use_case() -> PromoteGenerationAssets:
+    """Factory: the α8.8 Asset Promotion Bridge (fresh UoW per call).
+
+    Bridges the execution plane (``generation_assets``) to the media library
+    (``media_assets``) — the ADR-0046 X8 seam. Reads the generation through the
+    read-only :class:`GenerationReader` (its own short session, like the Execution
+    Runtime store), copies the finished bytes via the storage resolver, and registers
+    the owned media asset via the UoW. The execution runtime is untouched.
+    """
+    return PromoteGenerationAssets(
+        uow=get_unit_of_work(),
+        storage=_get_storage_resolver(),
+        reader=GenerationReader(get_session_factory()),
+    )
 
 
 # ---------------------------------------------------------------------

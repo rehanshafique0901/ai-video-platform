@@ -29,12 +29,14 @@ from app.api.v1.deps import (
     DeleteMediaDep,
     GetMediaDep,
     ListMediaDep,
+    PromoteGenerationAssetsDep,
     RegisterMediaDep,
     UpdateMediaDep,
 )
 from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.media import (
     MediaKind,
+    MediaPromoteRequest,
     MediaPublic,
     MediaRegisterRequest,
     MediaUpdateRequest,
@@ -109,6 +111,35 @@ async def register_media(
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content=envelope(_to_public(media), request),
+    )
+
+
+@router.post("/promotions")
+async def promote_generation_assets(
+    body: MediaPromoteRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: PromoteGenerationAssetsDep,
+) -> JSONResponse:
+    """Promote a completed generation's final video into the caller's media library.
+
+    The ADR-0046 X8 seam (α8.8): copies the finished execution-plane artefact into
+    ``media_assets(source='generated')`` under the required, owner-validated
+    ``project_id``. Returns **201** with the created ``MediaPublic`` on first
+    promotion, or **200** with the existing asset on an idempotent replay
+    (deterministic storage-coordinate collision). 404 for an unknown generation; 422
+    for a foreign/unknown ``project_id`` or a generation with no promotable final video.
+    """
+    result = await use_case.execute(
+        generation_id=body.generation_id,
+        project_id=body.project_id,
+        tenant_id=current_user.tenant_id,
+        owner_user_id=current_user.id,
+    )
+    http_status = status.HTTP_201_CREATED if result.status == "promoted" else status.HTTP_200_OK
+    return JSONResponse(
+        status_code=http_status,
+        content=envelope(_to_public(result.media), request),
     )
 
 

@@ -6,6 +6,47 @@
 
 ## [Unreleased]
 
+### α8.8 — Asset Promotion Bridge (`0.4.39-phase3-alpha8.8`, 2026-07-27)
+
+**Connects the two parallel pipelines.** Bridges the Stage-13 AI generation runtime output
+(execution-owned `generation_assets`, Path B) into the platform media library
+(`media_assets(source='generated')`, Path A) that already feeds Render → Export → Publish. Implements the
+**ADR-0046 X8** (`PublishGenerationAssets`) seam as an explicit, user-initiated use case —
+`PromoteGenerationAssets` — **library-only** (it ends at `media_assets`; Render/Export/Publish/Timeline/
+orchestration are untouched). Governed by `docs/engineering/PHASE3_ASSET_PROMOTION_BRIDGE_PREFLIGHT.md`
+(AP1–AP9). **Strictly additive: no schema migration, no changes to any existing port.**
+
+#### Added
+- **`IGenerationReader` port + `PromotableGenerationVideo` DTO** (`application/interfaces/generation_reader.py`)
+  — the single new, **read-only** seam. `IExecutionRuntimeStore` is write-only and the UoW carries no
+  generation repository, so promotion reads the generation head + its final video artefact through this
+  port rather than widening any frozen write seam (AP4).
+- **`GenerationReader`** (`infrastructure/generation/generation_reader.py`) — raw-SQL, ORM-less
+  (`generations LEFT JOIN generation_assets`), one short read session; never writes, emits events, or
+  advances the state machine (W8.6.7).
+- **`PromoteGenerationAssets`** use case (`application/use_cases/media/`) — authorizes a required, owner-scoped
+  `project_id` (request-time ownership, mirroring `IngestGeneratedMedia` — AP2), **copies** the finished
+  bytes into the active media store under a deterministic key (copy, never a shared reference — AP5),
+  recomputes the checksum, and registers an owned `media_assets(source='generated')` row with generation
+  provenance in `source_metadata`. Re-promotion collides on the existing `media_assets` storage-coordinate
+  uniqueness → idempotent **`noop`** (AP3, no new constraint/migration).
+- **API** — `POST /api/v1/media/promotions` (`{generation_id, project_id}`) → **201** on first promotion,
+  **200** on idempotent replay; **404** unknown generation, **422** foreign project / no promotable final
+  video. Composition-root factory + dependency wired.
+
+#### Enforcement
+- **Import-linter** — new contract *"Execution Runtime never writes the media library (ADR-0046 X8)"*: the
+  execution plane (its use cases + infrastructure, incl. the new reader) may not directly import the media
+  bounded context, so the only path from a generation to `media_assets` is the promotion bridge.
+- **Tests** — DB-free use-case unit tests (promote / idempotent noop / 404 / 422 / foreign-project) + an
+  AST-based X8 isolation unit test; a live-DB **Stage 15** integration test proves promote + idempotent
+  replay end-to-end against real PostgreSQL (commits + cleans up on teardown).
+
+**No migration, no port changes, library-only (ends at `media_assets`).** Full ephemeral-DB gate
+(stages 0–15) **PASS** on a throwaway `pgvector/pgvector:pg16`: static (mypy + 11 import-linter contracts)
+green, new unit tests green, migration up→down→up roundtrip clean (no new migration), and the new Stage 15
+asset-promotion-bridge integration green.
+
 ### α8.6c — Destination Adapters: YouTube (`0.4.38-phase3-alpha8.6c`, 2026-07-27)
 
 **Third slice of the α8.6 Publishing / Creator Workflow bounded context — adapter-only, no migration.**
