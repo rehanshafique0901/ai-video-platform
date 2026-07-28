@@ -139,6 +139,7 @@ into a seam; it does not reshape the flow (ADR-0042, ADR-0045).
 | **Creator Dashboard** | API / read | Read-only owner-scoped summary of the caller's product state — publish-job counts by status, connected/total social accounts, unread notifications, media total — composed inside a single UoW from the **already-existing** owner-scoped reads (no new repository method, no new SQL, no migration, no analytics). Completes the **α8.9 Creator Experience**. | `GetCreatorDashboard` (`application/use_cases/dashboard/`), `GET /api/v1/dashboard/summary` | [PHASE3_ALPHA8_9c_PREFLIGHT](./PHASE3_ALPHA8_9c_PREFLIGHT.md) | ✅ α8.9c |
 | **Creator Analytics** | Outbox consumer + API / read | Activates the dormant, partitioned `analytics_events` table as a **fourth independent** downstream outbox consumer: `AnalyticsProjection` maps the publish + export lifecycle events → a stable `event_name` vocabulary + neutral properties, and the reused `RecordAnalyticsEvent` writer (own UoW/event; tenant resolved in-UoW) persists one owner-scoped row each. **Exactly-once is DB-owned** (`source_event_id = event.id`, `occurred_at = event.occurred_at`; partial-unique `(source_event_id, occurred_at)` including the partition key). Read via owner-scoped `GET /api/v1/analytics/summary` (`GetCreatorAnalytics`: zero-filled per-`event_name` counts + total, trailing-30d default, naive/inverted window → 422). Migration `0015`; one new `IAnalyticsRepository`; no producer/frozen-runtime change. | `AnalyticsProjection` / `RecordAnalyticsEvent` / `GetCreatorAnalytics` (`application/use_cases/analytics/`), `IAnalyticsRepository`/`AnalyticsRepository`, `GET /api/v1/analytics/summary`, migration `0015` | [ADR-0048](../decisions/ADR-0048-analytics-consumer-idempotency.md) · [PHASE3_ALPHA9_0_PREFLIGHT](./PHASE3_ALPHA9_0_PREFLIGHT.md) | ✅ α9.0 |
 | **AI Publish Metadata** | Publishing → AI bridge (advisory) | The **first publishing→AI bridge**: an opt-in `POST /api/v1/publish-metadata/suggestions` that *suggests* publish metadata (title / description / hashtags) for a finished, owned export. A **Publishing-owned** `IPublishMetadataGenerator` port (neutral, `ContentPackage`-free DTOs) is implemented by the AI-subsystem `LlmPublishMetadataGenerator` over `Capability.LLM` (deterministic mock by default) — dependency is **strictly one-way** (AI never imports Publishing), pinned by a new import-linter contract. `GeneratePublishMetadata` validates ownership/readiness first (`404`→`422`), then calls the port **outside** the read UoW with a **mandatory deterministic template fallback** on any AI failure (PUB-9 preserved). Advisory only: never a `PublishJob` prerequisite; user edits win; only final metadata persisted (provenance ephemeral); destination adapter stays AI-unaware. No migration; no frozen-runtime change. | `IPublishMetadataGenerator` (`application/interfaces/`), `LlmPublishMetadataGenerator` (`infrastructure/ai/metadata/`), `GeneratePublishMetadata` (`application/use_cases/publishing/`), `POST /api/v1/publish-metadata/suggestions` | [ADR-0049](../decisions/ADR-0049-ai-publish-metadata-boundary.md) · [PHASE3_ALPHA9_1_PREFLIGHT](./PHASE3_ALPHA9_1_PREFLIGHT.md) | ✅ α9.1 |
+| **Media Library** | API / read + write (over Media) | A deterministic, owner-scoped **Asset Library** over registered `media_assets` (ADR-0037 **CR-8**): folders (self-referencing tree) + curated library entries (name / description / `text[]` tags / reuse counters). A **sibling** to the Media aggregate — never mutates `media_assets`, references one asset by id (`uq_library_assets_media_asset_id`). `ILibraryRepository` + 11 `library.*` use cases back `/api/v1/library/*`: folder + asset CRUD, keyset **browse**, tag GIN **ANY-of** filter, **version-fenced** asset OCC (404-before-412), folder-move **cycle rejection**, folder-delete **asset detachment** (SET NULL), **idempotent** reuse recording; browse/get **hide entries whose media is soft-deleted**. The pre-built `embedding vector(1536)` column / vector search are **out of scope** (future increment + own ADR). No migration; no new port beyond the repository; no ADR; no frozen-runtime change. **Accepted limitation**: per-owner **root-folder** name uniqueness is **application-enforced** (`folder_name_conflicts`) because the frozen `uq_library_folders_parent_folder_id_name` index (default NULL-distinct, no `owner_user_id`) can't constrain root rows without a migration — a narrow, non-corrupting root-only TOCTOU race remains (child uniqueness stays DB-enforced); permanent fix = a future per-owner partial-unique-index migration (no ADR). | `LibraryFolder`/`LibraryAsset` (`domain/library/`), `ILibraryRepository`/`LibraryRepository`, `library.*` use cases (`application/use_cases/library/`), `/api/v1/library/*` | [ADR-0037](../decisions/ADR-0037-media-generation-outputs.md) · [PHASE3_ALPHA9_2_PREFLIGHT](./PHASE3_ALPHA9_2_PREFLIGHT.md) | ✅ α9.2 |
 
 Legend: ✅ implemented · ⟢ planned.
 
@@ -203,9 +204,14 @@ Validation mirrors the plane boundaries (see [`../CI_QUALITY_GATE.md`](../CI_QUA
   outbox projection writing one owner-scoped `analytics_events` row per publish/export
   lifecycle event, exactly-once under redelivery via the `(source_event_id, occurred_at)`
   unique index, owner isolation, and `GET /api/v1/analytics/summary` visibility + `422`/`401`),
-  and **Stage 19** (the α9.1 AI publish-metadata suggestion — a deterministic suggestion over the
+  **Stage 19** (the α9.1 AI publish-metadata suggestion — a deterministic suggestion over the
   mock LLM, deterministic-template fallback, owner isolation `404`, not-ready export `422`, and the
-  real `POST /api/v1/publish-metadata/suggestions` end-to-end `200`/`401`/`404`/`422`)
+  real `POST /api/v1/publish-metadata/suggestions` end-to-end `200`/`401`/`404`/`422`),
+  and **Stage 20** (the α9.2 media library — the real `LibraryRepository` + `library.*` use cases
+  honouring `(parent, name)` / `media_asset_id` uniqueness, version-fenced OCC, keyset pagination,
+  the tag GIN ANY-of browse, hiding entries with soft-deleted media, folder-move cycle rejection,
+  folder-delete asset detachment, and idempotent reuse — plus the real `/api/v1/library/*`
+  endpoints for an authenticated owner)
   against an ephemeral Postgres + real ffmpeg.
   The α8.6c YouTube adapter adds **no** Stage 14 test: it is covered by **network-free unit
   tests in Stage 4** (via `httpx.MockTransport`) plus an **opt-in live smoke test excluded
@@ -222,9 +228,10 @@ earns its own **Stage 16** (the notifications context reacting to publish events
 downstream consumer, not the publish runtime); the α8.9c creator dashboard — a new
 read surface composed across bounded contexts — earns its own **Stage 17**; the α9.0
 creator analytics — a dormant table activated as a downstream outbox consumer plus a new
-read surface — earns its own **Stage 18**; and the α9.1 AI publish-metadata suggestion — the
-first publishing→AI bridge — earns its own **Stage 19** (current baseline
-`v0.4.44-phase3-alpha9.1`).
+read surface — earns its own **Stage 18**; the α9.1 AI publish-metadata suggestion — the
+first publishing→AI bridge — earns its own **Stage 19**; and the α9.2 media library — a new
+owner-scoped bounded context sibling to the Media aggregate — earns its own **Stage 20**
+(current baseline `v0.4.45-phase3-alpha9.2`).
 
 ---
 
