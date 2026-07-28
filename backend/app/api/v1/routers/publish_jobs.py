@@ -5,6 +5,8 @@ Top-level (not project-nested — ruled 2026-07-27): publish jobs carry explicit
 
 * ``POST /publish-jobs``        → 201 (or 200 on idempotent replay), queue a publish of a
   finished export delivery to a connected destination.
+* ``POST /publish-jobs/batch`` → 201, fan out one export publish to N connected accounts (α9.4);
+  ``data`` is a per-account outcome array. Additive — the single-create endpoint is unchanged.
 * ``GET  /publish-jobs/{id}``  → 200, fetch one publish job.
 * ``GET  /publish-jobs``       → 200, list the caller's publish jobs (newest first).
 
@@ -22,6 +24,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.deps import (
     CreatePublishJobDep,
+    CreatePublishJobsDep,
     CurrentUserDep,
     GetPublishJobDep,
     ListPublishJobsDep,
@@ -29,9 +32,12 @@ from app.api.v1.deps import (
 from app.api.v1.helpers import client_ip, envelope
 from app.api.v1.schemas.publish_jobs import (
     ContentPackagePublic,
+    PublishJobBatchCreateRequest,
+    PublishJobBatchItemPublic,
     PublishJobCreateRequest,
     PublishJobPublic,
 )
+from app.application.use_cases.publishing.create_publish_jobs import PublishFanOutItem
 from app.domain.publishing.publish_job import PublishJob
 
 router = APIRouter(prefix="/publish-jobs", tags=["publish-jobs"])
@@ -97,6 +103,55 @@ async def create_publish_job(
     )
     code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
     return JSONResponse(status_code=code, content=envelope(_to_public(result.job), request))
+
+
+def _to_batch_item(item: PublishFanOutItem) -> PublishJobBatchItemPublic:
+    """Project one fan-out outcome into its wire DTO (unambiguous per-account result)."""
+    return PublishJobBatchItemPublic(
+        social_account_id=item.social_account_id,
+        created=item.created,
+        publish_job=_to_public(item.job) if item.job is not None else None,
+        error=(
+            {"code": item.error.code, "message": item.error.message}
+            if item.error is not None
+            else None
+        ),
+    )
+
+
+@router.post("/batch", status_code=status.HTTP_201_CREATED)
+async def create_publish_jobs_batch(
+    body: PublishJobBatchCreateRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    use_case: CreatePublishJobsDep,
+) -> JSONResponse:
+    """Fan out a publish of one finished export to N of the caller's connected accounts (α9.4).
+
+    An **additive** entry point that composes the single-create use case — ``POST /publish-jobs``
+    is unchanged. Shared prerequisites are validated once and fail the whole request: a
+    non-owned export/thumbnail is ``404``; a not-ready export or a non-image thumbnail is ``422``.
+    Otherwise returns ``201`` with a ``data`` array of per-account outcomes (input order): each
+    item is ``created`` (freshly queued), an idempotent replay (``created=false`` + ``publish_job``),
+    or a per-account ``error`` (account not owned / not connected / unsupported platform) — so one
+    bad account never blocks the rest. Every created job is an ordinary ``PublishJob``: scheduling,
+    captions, thumbnails, notifications, and analytics all apply with no batch-specific logic.
+    """
+    result = await use_case.execute(
+        owner_user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        export_job_id=body.export_job_id,
+        social_account_ids=body.social_account_ids,
+        title=body.title,
+        description=body.description,
+        tags=tuple(body.tags) if body.tags is not None else None,
+        visibility=body.visibility,
+        publish_at=body.publish_at,
+        thumbnail_media_asset_id=body.thumbnail_media_asset_id,
+        ip=client_ip(request),
+    )
+    data = [_to_batch_item(item) for item in result.items]
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=envelope(data, request))
 
 
 @router.get("/{publish_job_id}")

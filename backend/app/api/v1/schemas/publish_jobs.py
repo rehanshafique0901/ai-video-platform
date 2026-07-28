@@ -9,12 +9,27 @@ credential, bearer, or platform-internal field is ever present (PUB-8 / ADR-0047
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.domain.publishing.content_package import ContentPackage, Visibility
+
+
+def _validate_future_utc(value: datetime | None) -> datetime | None:
+    """Timezone-aware + strictly future; normalised to UTC (SC3, α8.9b).
+
+    Shared by the single-create and batch-create bodies so scheduling validation is defined
+    exactly once. A naive or non-future datetime raises ``ValueError`` → surfaces as a 422.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("publish_at must be timezone-aware (include a UTC offset)")
+    if value <= datetime.now(UTC):
+        raise ValueError("publish_at must be in the future")
+    return value.astimezone(UTC)
 
 
 class PublishJobCreateRequest(BaseModel):
@@ -40,19 +55,45 @@ class PublishJobCreateRequest(BaseModel):
     @field_validator("publish_at")
     @classmethod
     def _validate_publish_at(cls, value: datetime | None) -> datetime | None:
-        """Timezone-aware + strictly future; normalised to UTC (SC3).
+        """Timezone-aware + strictly future; normalised to UTC (SC3)."""
+        return _validate_future_utc(value)
 
-        A naive datetime or a non-future time is a 422 (a raised ``ValueError`` in a Pydantic
-        validator surfaces through the app's exception handlers). Normalising to UTC keeps the
-        stored/echoed ``ContentPackage.publish_at`` canonical and deterministic.
-        """
-        if value is None:
-            return None
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("publish_at must be timezone-aware (include a UTC offset)")
-        if value <= datetime.now(UTC):
-            raise ValueError("publish_at must be in the future")
-        return value.astimezone(UTC)
+
+class PublishJobBatchCreateRequest(BaseModel):
+    """``POST /publish-jobs/batch`` body — fan out one export to N connected accounts (α9.4).
+
+    The shared metadata overrides + ``publish_at`` + ``thumbnail_media_asset_id`` mirror the
+    single-create body and are applied identically to every account (deterministic — PUB-9).
+    ``social_account_ids`` is bounded ([1, 20]) and must contain no duplicates. Ownership /
+    readiness / idempotency are all enforced by the composed ``CreatePublishJob`` — this body only
+    validates request *shape*.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    export_job_id: UUID
+    social_account_ids: Annotated[list[UUID], Field(min_length=1, max_length=20)]
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=5000)
+    tags: list[str] | None = Field(default=None, max_length=50)
+    visibility: Visibility | None = None
+    publish_at: datetime | None = None
+    thumbnail_media_asset_id: UUID | None = None
+
+    @field_validator("publish_at")
+    @classmethod
+    def _validate_publish_at(cls, value: datetime | None) -> datetime | None:
+        """Timezone-aware + strictly future; normalised to UTC (SC3)."""
+        return _validate_future_utc(value)
+
+    @field_validator("social_account_ids")
+    @classmethod
+    def _reject_duplicates(cls, value: list[UUID]) -> list[UUID]:
+        """A duplicate account id is a request error (422) — it would otherwise create then
+        idempotently replay the same job, which is confusing rather than useful."""
+        if len(set(value)) != len(value):
+            raise ValueError("social_account_ids must not contain duplicates")
+        return value
 
 
 class ContentPackagePublic(BaseModel):
@@ -108,8 +149,25 @@ class PublishJobPublic(BaseModel):
     updated_at: datetime
 
 
+class PublishJobBatchItemPublic(BaseModel):
+    """One account's fan-out outcome (α9.4) — unambiguous per-account result.
+
+    Exactly one of ``publish_job`` / ``error`` is set. ``created`` distinguishes a freshly-queued
+    job (``True``) from an idempotent replay of an existing job (``False`` with ``publish_job``
+    set); a per-account failure has ``created=False``, ``publish_job=None``, and a neutral
+    ``error`` ``{code, message}`` (never a credential/platform internal, C8).
+    """
+
+    social_account_id: UUID
+    created: bool
+    publish_job: PublishJobPublic | None
+    error: dict[str, str] | None
+
+
 __all__ = [
     "PublishJobCreateRequest",
+    "PublishJobBatchCreateRequest",
     "ContentPackagePublic",
     "PublishJobPublic",
+    "PublishJobBatchItemPublic",
 ]

@@ -25,6 +25,7 @@ provider pre-flight):
    19. ai_publish_metadata       (α9.1 — AI caption/hashtag suggestion + deterministic fallback)
    20. media_library             (α9.2 — owner-scoped folders + library assets over media)
    21. publish_thumbnail         (α9.3 — optional best-effort thumbnail carried to the destination)
+   22. multi_destination_publish (α9.4 — one export fanned out to N connected accounts)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -759,6 +760,28 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/publishing/test_publish_thumbnail.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 22 (α9.4) — Multi-Destination Publishing. Proves the additive fan-out against a DB
+        # at head: POST /publish-jobs/batch composes the unchanged CreatePublishJob once per account
+        # → N distinct publish_jobs rows that the existing PublishWorker drains (both to succeeded in
+        # one run_once); a shared prerequisite failure (unknown export) aborts the whole request
+        # (404, zero jobs) while a per-account failure (non-owned account) is isolated as an item so
+        # the valid account still publishes. Plus HTTP-contract checks (auth + empty/over-cap/
+        # duplicate request-shape validators). Per the "each new slice earns its own stage"
+        # discipline (Stages 15-21) it gets its own stage rather than expanding Stage 14. Each test
+        # rolls back inside a SAVEPOINT on teardown, so the destructive-migration guard is untouched.
+        Stage(
+            number=22,
+            title="multi-destination publishing integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/publishing/test_multi_destination_publishing.py",
             ],
             requires_db=True,
         ),

@@ -8,11 +8,15 @@ the schema boundary (which FastAPI renders as a 422). These are pure, DB-free sc
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from app.api.v1.schemas.publish_jobs import PublishJobCreateRequest
+from app.api.v1.schemas.publish_jobs import (
+    PublishJobBatchCreateRequest,
+    PublishJobCreateRequest,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -88,3 +92,57 @@ def test_thumbnail_uuid_is_accepted() -> None:
 def test_thumbnail_non_uuid_is_rejected() -> None:
     with pytest.raises(ValidationError):
         PublishJobCreateRequest.model_validate(_base(thumbnail_media_asset_id="not-a-uuid"))
+
+
+# ---- α9.4 — batch (multi-destination) request shape ----
+
+_A1 = "22222222-2222-2222-2222-222222222222"
+_A2 = "44444444-4444-4444-4444-444444444444"
+
+
+def _batch(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "export_job_id": "11111111-1111-1111-1111-111111111111",
+        "social_account_ids": [_A1, _A2],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_batch_accepts_multiple_accounts() -> None:
+    req = PublishJobBatchCreateRequest.model_validate(_batch())
+    assert [str(a) for a in req.social_account_ids] == [_A1, _A2]
+
+
+def test_batch_empty_list_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PublishJobBatchCreateRequest.model_validate(_batch(social_account_ids=[]))
+
+
+def test_batch_over_cap_is_rejected() -> None:
+    too_many = [str(UUID(int=i)) for i in range(21)]
+    with pytest.raises(ValidationError):
+        PublishJobBatchCreateRequest.model_validate(_batch(social_account_ids=too_many))
+
+
+def test_batch_duplicate_ids_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicates"):
+        PublishJobBatchCreateRequest.model_validate(_batch(social_account_ids=[_A1, _A1]))
+
+
+def test_batch_non_uuid_account_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PublishJobBatchCreateRequest.model_validate(_batch(social_account_ids=["not-a-uuid"]))
+
+
+def test_batch_reuses_publish_at_validator() -> None:
+    from datetime import timedelta
+
+    past = datetime.now(UTC) - timedelta(hours=1)
+    with pytest.raises(ValidationError, match="future"):
+        PublishJobBatchCreateRequest.model_validate(_batch(publish_at=past.isoformat()))
+
+
+def test_batch_rejects_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        PublishJobBatchCreateRequest.model_validate(_batch(social_account_id=_A1))
