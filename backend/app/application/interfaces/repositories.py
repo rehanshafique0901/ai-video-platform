@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -2249,6 +2250,82 @@ class INotificationRepository(ABC):
         nothing was unread — an idempotent no-op). Owner-scoped (W8.5b.8).
         """
         ...
+
+    # --- Email delivery surface (α9.5, ADR-0051) --------------------------------
+    #
+    # The email dispatch worker (D2-C) drains undelivered rows via these three additive
+    # methods; the in-app write/read paths above are untouched. Retry/terminal bookkeeping
+    # lives in the reserved ``payload["_email"]`` namespace (an implementation detail, never
+    # part of the public notification contract — it is stripped from every row returned by the
+    # read surface, see :meth:`add` / read mappers). Success uses the existing
+    # ``delivered_email_at`` column, so "delivered" stays unambiguous. No migration (ADR-0051 §9).
+
+    @abstractmethod
+    async def list_email_deliverable(
+        self, *, now: datetime, limit: int
+    ) -> list[NotificationEmailDelivery]:
+        """Return up to ``limit`` notifications awaiting an email send, oldest first (FIFO).
+
+        A row is deliverable when it has not been emailed and is not terminally failed and its
+        backoff gate has elapsed::
+
+            delivered_email_at IS NULL
+            AND COALESCE(payload #>> '{_email,state}', 'pending') <> 'failed'
+            AND COALESCE((payload #>> '{_email,next_attempt_at}')::timestamptz, created_at) <= :now
+
+        Ordered ``created_at ASC, id ASC``. Returns the dedicated :class:`NotificationEmailDelivery`
+        claim (never the public entity), so the worker can read the reserved ``attempts`` counter
+        without that bookkeeping ever reaching the read model. Side-effect-free (the per-row lease is
+        taken separately via ``uow.locks``).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_email_delivered(self, *, notification_id: UUID) -> None:
+        """Stamp ``delivered_email_at = now()`` for one notification (send-then-stamp, ADR-0051 D1-C).
+
+        Called only after the external send has been accepted. Idempotent: stamping an
+        already-delivered row is harmless (the worker never re-claims a delivered row).
+        """
+        ...
+
+    @abstractmethod
+    async def record_email_delivery_failure(
+        self,
+        *,
+        notification_id: UUID,
+        terminal: bool,
+        code: str,
+        attempts: int,
+        next_attempt_at: datetime | None,
+    ) -> None:
+        """Persist a send failure into the reserved ``payload["_email"]`` namespace (ADR-0051 D3).
+
+        The caller (the dispatch worker) computes everything — this method only persists it. Merges
+        ``{attempts, last_error: code, state, next_attempt_at, failed_at}`` (JSONB concatenation —
+        ``delivered_email_at`` is never touched). ``state`` becomes ``"failed"`` (terminal — never
+        re-scanned) when ``terminal`` is true (a permanent failure, or the attempt ceiling reached);
+        otherwise ``"pending"`` with ``next_attempt_at`` gating the next backed-off retry. The
+        ``_email`` key is internal bookkeeping and is stripped from every row the read surface
+        returns.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationEmailDelivery:
+    """A claim for one notification awaiting email delivery (α9.5, ADR-0051 D2-C).
+
+    Defined in the application interfaces layer (not the domain) because it carries the reserved
+    ``attempts`` bookkeeping counter, which ADR-0051 keeps out of the domain model. ``title`` /
+    ``body`` render the message; ``user_id`` resolves the recipient owner-scoped in the worker.
+    """
+
+    id: UUID
+    user_id: UUID
+    title: str
+    body: str | None
+    attempts: int
 
 
 class IAnalyticsRepository(ABC):

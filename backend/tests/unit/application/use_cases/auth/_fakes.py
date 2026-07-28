@@ -43,6 +43,7 @@ from app.application.interfaces.repositories import (
     IUsageRecordRepository,
     IUserRepository,
     IWorkflowRunRepository,
+    NotificationEmailDelivery,
 )
 from app.application.interfaces.security import (
     IPasswordHasher,
@@ -1967,6 +1968,12 @@ class FakeNotificationRepository(INotificationRepository):
     """
 
     _rows: dict[UUID, Notification] = field(default_factory=dict)
+    # α9.5 (ADR-0051): email delivery state modelled out-of-band (the public entity intentionally
+    # never carries ``delivered_email_at`` or the reserved ``_email`` bookkeeping — it is not part
+    # of the domain model). ``_email_delivered`` = send-then-stamp success; ``_email_state`` mirrors
+    # the reserved ``payload["_email"]`` namespace {attempts,state,next_attempt_at}.
+    _email_delivered: dict[UUID, datetime] = field(default_factory=dict)
+    _email_state: dict[UUID, dict[str, Any]] = field(default_factory=dict)
 
     async def add(
         self,
@@ -2043,6 +2050,52 @@ class FakeNotificationRepository(INotificationRepository):
                 self._rows[nid] = replace(n, read_at=now, updated_at=now)
                 affected += 1
         return affected
+
+    # --- Email delivery surface (α9.5, ADR-0051) ------------------------
+
+    async def list_email_deliverable(
+        self, *, now: datetime, limit: int
+    ) -> list[NotificationEmailDelivery]:
+        out: list[Notification] = []
+        for n in self._rows.values():
+            if n.id in self._email_delivered:
+                continue
+            state = self._email_state.get(n.id, {})
+            if state.get("state") == "failed":
+                continue
+            gate = state.get("next_attempt_at") or n.created_at
+            if gate <= now:
+                out.append(n)
+        out.sort(key=lambda n: (n.created_at, n.id))
+        return [
+            NotificationEmailDelivery(
+                id=n.id,
+                user_id=n.user_id,
+                title=n.title,
+                body=n.body,
+                attempts=int(self._email_state.get(n.id, {}).get("attempts", 0)),
+            )
+            for n in out[:limit]
+        ]
+
+    async def mark_email_delivered(self, *, notification_id: UUID) -> None:
+        self._email_delivered[notification_id] = datetime.now(UTC)
+
+    async def record_email_delivery_failure(
+        self,
+        *,
+        notification_id: UUID,
+        terminal: bool,
+        code: str,
+        attempts: int,
+        next_attempt_at: datetime | None,
+    ) -> None:
+        self._email_state[notification_id] = {
+            "attempts": attempts,
+            "state": "failed" if terminal else "pending",
+            "last_error": code,
+            "next_attempt_at": next_attempt_at,
+        }
 
 
 # ---- Event outbox repository ------------------------------------------

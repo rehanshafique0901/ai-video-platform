@@ -6,6 +6,48 @@
 
 ## [Unreleased]
 
+### α9.5 — Notification Delivery: Email (`0.4.48-phase3-alpha9.5-dev`, 2026-07-29)
+
+**Deliver in-app notifications over email — the platform's first outbound external-communication
+channel that is not a publish destination.** A dedicated poll worker drains undelivered notifications
+and sends each via an application-owned notifier; delivery is best-effort and never blocks the in-app
+projection. Governed by
+[`ADR-0051`](docs/decisions/ADR-0051-notification-delivery-email-idempotency-and-boundary.md) and
+[`PHASE3_ALPHA9_5_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_5_PREFLIGHT.md).
+**Strictly additive: no migration (delivery state reuses the existing `delivered_email_at` column +
+the reserved `payload["_email"]` namespace), no relay change, no frozen-runtime change.** Correctness
+never depends on provider-side deduplication (ADR-0051 Appendix A) — the lease + send-then-stamp model
+gives at-least-once delivery with a bounded, explicitly-accepted rare-duplicate window.
+
+#### Added
+- **Port** — application-owned `INotifier` + neutral DTOs (`application/interfaces/notifier.py`):
+  `EmailMessage` (recipient already resolved by the caller) + `NotifierDeliveryError(permanent, code)`.
+  One-way dependency (ADR-0051 D5): the application owns the abstraction; infrastructure supplies the
+  adapter.
+- **Adapters** (`infrastructure/notifications/`) — `LoggingNotifier` (mock-first default + fail-soft
+  fallback; deterministic, no I/O, emits only masked telemetry) and `SmtpNotifier` (config-gated
+  `aiosmtplib`; its one policy job is failure classification — permanent vs. transient). Recipient-blind
+  leaves (import-linter contract): no persistence / use-case / domain imports; `aiosmtplib` is confined
+  to this package.
+- **Worker** — `NotificationEmailWorker` (dedicated poll ingress, off the relay fan-out) +
+  `ProcessNotificationEmail` (per-notification lease → resolve recipient owner-scoped → send **outside**
+  any transaction → **send-then-stamp** `delivered_email_at`). Transient failure → capped exponential
+  backoff retry; permanent failure / attempt-ceiling → terminal. One bad row never aborts the batch.
+- **Persistence (no migration)** — additive `INotificationRepository` methods
+  (`list_email_deliverable` / `mark_email_delivered` / `record_email_delivery_failure`); retry/terminal
+  bookkeeping lives in the reserved `payload["_email"]` JSONB namespace.
+- **Read-model sanitisation** — reserved `_`-prefixed payload keys (the `_email` bookkeeping) are
+  stripped **centrally** at the single repository row→entity boundary, so no endpoint can ever expose
+  internal delivery state. It is an implementation detail, never part of the public notification contract.
+- **Config** — additive fail-soft `email_*` settings (SMTP host/port/credentials/from, batch size,
+  timeout, max attempts, backoff, lease). When SMTP is unconfigured the composition root wires the
+  `LoggingNotifier`; email is never a boot gate.
+- **Tests** — unit (delivery send-then-stamp, backed-off retry, permanent/ceiling terminal, unresolved
+  recipient, lease skip; worker drain/batch/error-isolation; SMTP failure classification; payload
+  sanitisation) and CI **Stage 23** (`notification email delivery integration`: worker delivers +
+  stamps + never re-scans; transient/permanent bookkeeping in the reserved namespace; the `_email`
+  namespace is present in the stored row but stripped from the read API).
+
 ### α9.4 — Multi-Destination Publishing (`0.4.47-phase3-alpha9.4`, 2026-07-28)
 
 **Publish one finished export to many connected accounts in a single action.** A creator fans out

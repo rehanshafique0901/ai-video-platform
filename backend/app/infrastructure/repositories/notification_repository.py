@@ -22,18 +22,38 @@ scan shape (``created_at DESC, id DESC`` + row-value cursor comparison) over the
 
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.interfaces.repositories import INotificationRepository
+from app.application.interfaces.repositories import (
+    INotificationRepository,
+    NotificationEmailDelivery,
+)
 from app.core.errors import ConflictError
 from app.domain.notifications.notification import Notification as NotificationEntity
 from app.infrastructure.db.models.notifications import Notification as NotificationRow
+
+# α9.5 (ADR-0051): ``payload`` keys whose name starts with this prefix are reserved for internal
+# runtime bookkeeping (e.g. ``_email`` — email retry/terminal state). They are an implementation
+# detail, NEVER part of the public notification contract, and are stripped from every row this
+# adapter hands back to the application/read model. Sanitisation is centralised in the single
+# row→entity boundary (:func:`_row_to_entity`), so no endpoint can accidentally expose them. A
+# future migration may relocate this bookkeeping into dedicated columns with no external change.
+_RESERVED_PAYLOAD_PREFIX = "_"
+
+# The one reserved namespace in use today: email delivery retry/terminal bookkeeping.
+_EMAIL_NS = "_email"
+
+
+def _public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip reserved (``_``-prefixed) bookkeeping keys from a stored payload (α9.5, ADR-0051)."""
+    return {k: v for k, v in payload.items() if not k.startswith(_RESERVED_PAYLOAD_PREFIX)}
 
 
 class NotificationRepository(INotificationRepository):
@@ -163,6 +183,83 @@ class NotificationRepository(INotificationRepository):
         marked = (await self._session.execute(upd)).scalars().all()
         return len(marked)
 
+    # --- Email delivery surface (α9.5, ADR-0051) --------------------------------
+
+    async def list_email_deliverable(
+        self, *, now: datetime, limit: int
+    ) -> list[NotificationEmailDelivery]:
+        # Undelivered, not terminally failed, and past its backoff gate — oldest first (FIFO).
+        # Reads the reserved ``_email`` counter directly (never via the sanitised entity), so the
+        # worker sees ``attempts`` without that bookkeeping ever reaching the read model. The
+        # ``delivered_email_at IS NULL`` scan is intentionally unindexed at beta scale (ADR-0051 §9).
+        stmt = text(
+            """
+            SELECT id, user_id, title, body,
+                   COALESCE((payload #>> '{_email,attempts}')::int, 0) AS attempts
+            FROM notifications
+            WHERE delivered_email_at IS NULL
+              AND COALESCE(payload #>> '{_email,state}', 'pending') <> 'failed'
+              AND COALESCE(
+                    (payload #>> '{_email,next_attempt_at}')::timestamptz, created_at
+                  ) <= :now
+            ORDER BY created_at ASC, id ASC
+            LIMIT :limit
+            """
+        )
+        rows = (await self._session.execute(stmt, {"now": now, "limit": limit})).mappings().all()
+        return [
+            NotificationEmailDelivery(
+                id=row["id"],
+                user_id=row["user_id"],
+                title=row["title"],
+                body=row["body"],
+                attempts=int(row["attempts"]),
+            )
+            for row in rows
+        ]
+
+    async def mark_email_delivered(self, *, notification_id: UUID) -> None:
+        # Send-then-stamp (ADR-0051 D1-C): success uses the existing ``delivered_email_at`` column,
+        # so "delivered" is unambiguous and the row is never re-scanned. Idempotent by construction.
+        await self._session.execute(
+            update(NotificationRow)
+            .where(NotificationRow.id == notification_id)
+            .values(delivered_email_at=func.now(), updated_at=func.now())
+        )
+
+    async def record_email_delivery_failure(
+        self,
+        *,
+        notification_id: UUID,
+        terminal: bool,
+        code: str,
+        attempts: int,
+        next_attempt_at: datetime | None,
+    ) -> None:
+        # Persist the caller-computed failure state into the reserved ``_email`` namespace via JSONB
+        # concatenation (``payload || {...}``) — ``delivered_email_at`` is never touched, so a failed
+        # send can never masquerade as delivered. The whole ``_email`` object is replaced each pass.
+        email_state: dict[str, Any] = {
+            "attempts": attempts,
+            "state": "failed" if terminal else "pending",
+            "last_error": code,
+        }
+        if next_attempt_at is not None:
+            email_state["next_attempt_at"] = next_attempt_at.isoformat()
+        if terminal:
+            email_state["failed_at"] = datetime.now(UTC).isoformat()
+        await self._session.execute(
+            text(
+                """
+                UPDATE notifications
+                SET payload = payload || jsonb_build_object('_email', CAST(:email AS jsonb)),
+                    updated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": notification_id, "email": json.dumps(email_state)},
+        )
+
 
 def _row_to_entity(row: NotificationRow) -> NotificationEntity:
     return NotificationEntity(
@@ -171,7 +268,9 @@ def _row_to_entity(row: NotificationRow) -> NotificationEntity:
         kind=row.kind,
         title=row.title,
         body=row.body,
-        payload=dict(row.payload),
+        # Centralised sanitisation (α9.5, ADR-0051): reserved ``_``-prefixed bookkeeping keys never
+        # cross this boundary, so no read path / endpoint can expose internal email delivery state.
+        payload=_public_payload(dict(row.payload)),
         source_event_id=row.source_event_id,
         delivered_in_app_at=row.delivered_in_app_at,
         read_at=row.read_at,
