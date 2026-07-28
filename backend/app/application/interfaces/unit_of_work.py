@@ -26,6 +26,7 @@ from app.application.interfaces.repositories import (
     IAnalyticsRepository,
     IEventOutboxRepository,
     IExportJobRepository,
+    ILibraryRepository,
     IMediaRepository,
     IModelPricingRepository,
     INotificationRepository,
@@ -73,6 +74,7 @@ class IUnitOfWork(ABC):
     versions: IProjectVersionRepository  # α5d
     prompts: IPromptRepository  # α6.1
     media: IMediaRepository  # α6.2
+    library: ILibraryRepository  # α9.2
     timeline: ITimelineRepository  # α6.3a
     render_jobs: IRenderJobRepository  # α7.1
     export_jobs: IExportJobRepository  # α8.5a

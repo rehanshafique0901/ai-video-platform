@@ -6,6 +6,63 @@
 
 ## [Unreleased]
 
+### α9.2 — Media Library Foundation (`0.4.45-phase3-alpha9.2`, 2026-07-28)
+
+**Deterministic, owner-scoped Media Library over registered `media_assets`.** Realises the Asset
+Library reserved by [`ADR-0037`](docs/decisions/ADR-0037-media-generation-outputs.md) **CR-8**:
+folders + curated library entries (name / description / tags / reuse counters) built as a *sibling*
+over the Media aggregate — the library never mutates `media_assets`. Governed by
+[`PHASE3_ALPHA9_2_GROUNDING.md`](docs/engineering/PHASE3_ALPHA9_2_GROUNDING.md) and
+[`PHASE3_ALPHA9_2_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_2_PREFLIGHT.md). **Strictly additive:
+no migration (schema pre-built in `0001_baseline`), no AI, no embeddings, no vector/semantic search,
+no frozen-boundary change.**
+
+#### Added
+- **Domain** (`domain/library/`) — frozen `LibraryFolder` and `LibraryAsset` value entities
+  (`LibraryAsset` carries the `VersionMixin` OCC handle; the dormant `embedding` column is
+  deliberately unmodelled — vector search is a later increment + ADR).
+- **`ILibraryRepository`** (`application/interfaces/repositories.py`) + `LibraryRepository`
+  (`infrastructure/repositories/library_repository.py`) — owner-scoped, live-only persistence:
+  folder CRUD, asset CRUD, keyset browse, tag ANY-of via the existing GIN index (`tags && :tags`),
+  version-fenced asset CAS, folder-delete asset detachment, and idempotent reuse recording
+  (`library_asset_projects` upsert). Wired into the Unit of Work (`library`).
+- **11 use cases** (`application/use_cases/library/`) — create/list/get/update/delete folders;
+  add/list/get/update/delete assets; record reuse. 404-before-412 OCC on asset update (mirrors
+  `UpdateProject`); folder-move cycle guard (`422`); non-empty-parent delete refusal (`409`);
+  reads hide entries whose underlying media is soft-deleted.
+- **`/api/v1/library/*`** (`api/v1/routers/library.py`, `schemas/library.py`) — folder + asset
+  endpoints with `extra="forbid"` DTOs, tri-state PATCH, keyset pagination, three-state folder
+  filters, comma-separated tag filter, and version-fenced updates. Wired via container factories +
+  `deps.py` aliases + `main.py` include.
+- **App-level folder-name uniqueness pre-check** (`folder_name_conflicts`) — closes the root-folder
+  (`parent_folder_id IS NULL`) gap left by the frozen partial-unique index's default NULL-distinct
+  semantics, so duplicate names are a uniform `409` at every level; the DB index remains the
+  race-safe backstop for the non-null-parent case.
+
+#### Known limitation (accepted)
+- **Root-folder name uniqueness is application-enforced, not database-enforced.** The frozen
+  `0001_baseline` index `uq_library_folders_parent_folder_id_name` is keyed on `(parent_folder_id,
+  name)` and, by PostgreSQL's default NULL-distinct semantics, does **not** constrain root folders
+  (`parent_folder_id IS NULL`); it also omits `owner_user_id`, so a `NULLS NOT DISTINCT` variant on
+  the existing columns would incorrectly make root names globally unique across tenants. Under
+  α9.2's **no-migration** constraint the app-level pre-check is the only viable enforcement, which
+  leaves a **narrow TOCTOU race for root folders only** (READ COMMITTED): two concurrent creates of
+  the same root name for one owner may both succeed. This is **non-corrupting** — assets reference
+  folders by id, and no FK/OCC/referential invariant is affected — and **child-folder uniqueness
+  remains database-enforced**. The permanent fix is a **future migration** adding a per-owner
+  partial unique index (`(owner_user_id, name) WHERE parent_folder_id IS NULL AND deleted_at IS
+  NULL`) with matching ORM metadata; no ADR is required.
+
+#### Enforcement
+- **Tests** — 38 use-case + DTO units (folder/asset CRUD, cycle guard, OCC, tag normalisation,
+  soft-deleted-media hiding, reuse idempotency, DTO validation) and a DB-backed integration suite
+  (**Stage 20**): uniqueness + owner isolation, move-cycle rejection, folder-delete detachment,
+  media-asset uniqueness, OCC update/stale-version, tag GIN browse, hidden soft-deleted media,
+  keyset pagination, idempotent reuse, and the real `/api/v1/library/*` endpoints end-to-end.
+
+**No migration, no ADR, no AI/embeddings/vector search; additive over the pre-built `0001_baseline`
+library schema (ADR-0037 CR-8).**
+
 ### α9.1 — AI Caption & Hashtag Generation (`0.4.44-phase3-alpha9.1`, 2026-07-28)
 
 **Opt-in, advisory AI suggestions for publish metadata (title / description / hashtags).** The first

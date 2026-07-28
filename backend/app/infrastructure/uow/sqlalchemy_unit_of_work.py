@@ -23,6 +23,7 @@ from app.application.interfaces.repositories import (
     IAnalyticsRepository,
     IEventOutboxRepository,
     IExportJobRepository,
+    ILibraryRepository,
     IMediaRepository,
     IModelPricingRepository,
     INotificationRepository,
@@ -49,6 +50,7 @@ from app.infrastructure.repositories.distributed_lock_manager import (
 )
 from app.infrastructure.repositories.event_outbox_repository import EventOutboxRepository
 from app.infrastructure.repositories.export_job_repository import ExportJobRepository
+from app.infrastructure.repositories.library_repository import LibraryRepository
 from app.infrastructure.repositories.media_repository import MediaRepository
 from app.infrastructure.repositories.model_pricing_repository import ModelPricingRepository
 from app.infrastructure.repositories.notification_repository import NotificationRepository
@@ -103,6 +105,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.versions = cast(IProjectVersionRepository, ProjectVersionRepository(self._session))
         self.prompts = cast(IPromptRepository, PromptRepository(self._session))
         self.media = cast(IMediaRepository, MediaRepository(self._session))
+        self.library = cast(ILibraryRepository, LibraryRepository(self._session))
         self.timeline = cast(ITimelineRepository, TimelineRepository(self._session))
         self.render_jobs = cast(IRenderJobRepository, RenderJobRepository(self._session))
         self.export_jobs = cast(IExportJobRepository, ExportJobRepository(self._session))

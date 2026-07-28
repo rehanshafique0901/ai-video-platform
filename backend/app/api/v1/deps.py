@@ -44,6 +44,17 @@ from app.application.use_cases.dashboard.get_creator_dashboard import GetCreator
 from app.application.use_cases.export.create_export_job import CreateExportJob
 from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.get_export_job import GetExportJob
+from app.application.use_cases.library.add_library_asset import AddLibraryAsset
+from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
+from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
+from app.application.use_cases.library.delete_library_folder import DeleteLibraryFolder
+from app.application.use_cases.library.get_library_asset import GetLibraryAsset
+from app.application.use_cases.library.get_library_folder import GetLibraryFolder
+from app.application.use_cases.library.list_library_assets import ListLibraryAssets
+from app.application.use_cases.library.list_library_folders import ListLibraryFolders
+from app.application.use_cases.library.record_library_asset_use import RecordLibraryAssetUse
+from app.application.use_cases.library.update_library_asset import UpdateLibraryAsset
+from app.application.use_cases.library.update_library_folder import UpdateLibraryFolder
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.get_media import GetMedia
 from app.application.use_cases.media.list_media import ListMedia
@@ -164,6 +175,38 @@ GetProjectDep = Annotated[GetProject, Depends(container.get_get_project_use_case
 ListProjectsDep = Annotated[ListProjects, Depends(container.get_list_projects_use_case)]
 UpdateProjectDep = Annotated[UpdateProject, Depends(container.get_update_project_use_case)]
 DeleteProjectDep = Annotated[DeleteProject, Depends(container.get_delete_project_use_case)]
+
+# ---- Use-case dependencies (Slice α9.2 — Media Library) ---------------
+
+CreateLibraryFolderDep = Annotated[
+    CreateLibraryFolder, Depends(container.get_create_library_folder_use_case)
+]
+ListLibraryFoldersDep = Annotated[
+    ListLibraryFolders, Depends(container.get_list_library_folders_use_case)
+]
+GetLibraryFolderDep = Annotated[
+    GetLibraryFolder, Depends(container.get_get_library_folder_use_case)
+]
+UpdateLibraryFolderDep = Annotated[
+    UpdateLibraryFolder, Depends(container.get_update_library_folder_use_case)
+]
+DeleteLibraryFolderDep = Annotated[
+    DeleteLibraryFolder, Depends(container.get_delete_library_folder_use_case)
+]
+AddLibraryAssetDep = Annotated[AddLibraryAsset, Depends(container.get_add_library_asset_use_case)]
+ListLibraryAssetsDep = Annotated[
+    ListLibraryAssets, Depends(container.get_list_library_assets_use_case)
+]
+GetLibraryAssetDep = Annotated[GetLibraryAsset, Depends(container.get_get_library_asset_use_case)]
+UpdateLibraryAssetDep = Annotated[
+    UpdateLibraryAsset, Depends(container.get_update_library_asset_use_case)
+]
+DeleteLibraryAssetDep = Annotated[
+    DeleteLibraryAsset, Depends(container.get_delete_library_asset_use_case)
+]
+RecordLibraryAssetUseDep = Annotated[
+    RecordLibraryAssetUse, Depends(container.get_record_library_asset_use_use_case)
+]
 
 # ---- Use-case dependencies (Slice α5c — Scenes) -----------------------
 

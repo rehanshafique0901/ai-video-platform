@@ -23,6 +23,7 @@ provider pre-flight):
    17. creator_dashboard         (α8.9c — read-only owner-scoped dashboard summary)
    18. creator_analytics         (α9.0 — analytics outbox projection + summary read)
    19. ai_publish_metadata       (α9.1 — AI caption/hashtag suggestion + deterministic fallback)
+   20. media_library             (α9.2 — owner-scoped folders + library assets over media)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -711,6 +712,28 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/publishing/test_ai_publish_metadata.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 20 (α9.2) — Media Library. Proves the deterministic, owner-scoped Asset Library
+        # (ADR-0037 CR-8) against a DB at head: the real LibraryRepository + library use cases
+        # honour (parent, name) / media_asset_id uniqueness, version-fenced OCC, keyset
+        # pagination, the tag GIN ANY-of browse, hiding entries with soft-deleted media,
+        # folder-move cycle rejection, folder-delete asset detachment, and idempotent reuse — and
+        # the real /api/v1/library/* endpoints serve the authenticated owner. Per the "each new
+        # slice earns its own stage" discipline (Stages 15-19) it gets its own stage. Its tests
+        # seed committed identity/media/projects and delete the rows they created on teardown, so
+        # the destructive-migration guard is untouched.
+        Stage(
+            number=20,
+            title="media library integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/library/test_media_library.py",
             ],
             requires_db=True,
         ),
