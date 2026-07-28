@@ -78,6 +78,9 @@ async def create_publish_job(
     if the export has no completed delivery artifact, the account is not connected, or the
     platform has no registered destination adapter. An optional ``publish_at`` (timezone-aware,
     future) schedules the platform-native go-live (α8.9b) — the upload still runs immediately.
+    An optional ``thumbnail_media_asset_id`` (α9.3) names an owned image asset to set as the
+    video's thumbnail (best-effort, after the primary upload succeeds); a non-owned id is ``404``
+    and a non-image asset is ``422``.
     """
     result = await use_case.execute(
         owner_user_id=current_user.id,
@@ -89,6 +92,7 @@ async def create_publish_job(
         tags=tuple(body.tags) if body.tags is not None else None,
         visibility=body.visibility,
         publish_at=body.publish_at,
+        thumbnail_media_asset_id=body.thumbnail_media_asset_id,
         ip=client_ip(request),
     )
     code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK

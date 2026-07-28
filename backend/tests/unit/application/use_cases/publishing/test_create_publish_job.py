@@ -8,7 +8,7 @@ source resolution/readiness, unsupported platform, idempotent replay, and that a
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any, Self
 from uuid import UUID, uuid4
 
@@ -120,6 +120,22 @@ class _FakeProjects:
         return self._project
 
 
+class _FakeMedia:
+    """Minimal owner-scoped media read for the α9.3 thumbnail validation path."""
+
+    def __init__(self, asset: Any | None) -> None:
+        self._asset = asset
+        self.calls: list[tuple[Any, Any, Any]] = []
+
+    async def get_owned(self, media_asset_id, tenant_id, owner_user_id) -> Any | None:
+        self.calls.append((media_asset_id, tenant_id, owner_user_id))
+        return self._asset
+
+
+def _image_asset(asset_id: UUID, *, kind: str = "image") -> SimpleNamespace:
+    return SimpleNamespace(id=asset_id, kind=kind, mime_type="image/jpeg", size_bytes=2048)
+
+
 class _FakeOutbox:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -137,10 +153,12 @@ class _FakeUoW:
         active: PublishJob | None = None,
         project: Project | None = None,
         conflict: bool = False,
+        thumbnail_asset: Any | None = None,
     ) -> None:
         self.social_accounts = _FakeSocialAccounts(account)
         self.publish_jobs = _FakePublishJobs(source=source, active=active, conflict=conflict)
         self.projects = _FakeProjects(project)
+        self.media = _FakeMedia(thumbnail_asset)
         self.outbox = _FakeOutbox()
         self.committed = False
 
@@ -411,3 +429,93 @@ async def test_idempotent_replay_ignores_new_publish_at() -> None:
     assert result.job.id == existing.id
     assert result.job.content_package.publish_at is None  # unchanged by the replay
     assert uow.publish_jobs.added == []
+
+
+# ---- α9.3 — Publish Thumbnail Support (thumbnail_media_asset_id) -----------
+
+
+@pytest.mark.unit
+async def test_absent_thumbnail_leaves_content_package_thumbnail_none() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+    )
+    result = await _run(uow, social_account_id=account_id)
+    assert result.job.content_package.thumbnail_media_asset_id is None
+    assert uow.media.calls == []  # no media read when no thumbnail requested
+
+
+@pytest.mark.unit
+async def test_owned_image_thumbnail_is_captured_into_content_package() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    thumb_id = uuid4()
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+        thumbnail_asset=_image_asset(thumb_id),
+    )
+    result = await _run(uow, social_account_id=account_id, thumbnail_media_asset_id=thumb_id)
+    assert result.job.content_package.thumbnail_media_asset_id == thumb_id
+    (added,) = uow.publish_jobs.added
+    assert added["content_package"].thumbnail_media_asset_id == thumb_id
+    # Owner-scoped lookup used the caller's tenant/user.
+    assert uow.media.calls == [(thumb_id, _TENANT, _USER)]
+
+
+@pytest.mark.unit
+async def test_non_owned_thumbnail_is_404() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+        thumbnail_asset=None,  # not the caller's / missing
+    )
+    with pytest.raises(NotFoundError):
+        await _run(uow, social_account_id=account_id, thumbnail_media_asset_id=uuid4())
+
+
+@pytest.mark.unit
+async def test_non_image_thumbnail_is_422() -> None:
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    thumb_id = uuid4()
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        project=_project(project_id),
+        thumbnail_asset=_image_asset(thumb_id, kind="video"),
+    )
+    with pytest.raises(ValidationFailedError):
+        await _run(uow, social_account_id=account_id, thumbnail_media_asset_id=thumb_id)
+
+
+@pytest.mark.unit
+async def test_idempotent_replay_ignores_new_thumbnail() -> None:
+    # A replay returns the existing job unchanged; the replay's thumbnail is not applied and the
+    # media repo is never consulted (the pre-check returns before validation).
+    account_id = uuid4()
+    project_id = uuid4()
+    media_id = uuid4()
+    existing = _existing_job(media_id, account_id)  # its package.thumbnail_media_asset_id is None
+    uow = _FakeUoW(
+        account=_account(account_id),
+        source=_source(project_id, media_id),
+        active=existing,
+        project=_project(project_id),
+        thumbnail_asset=_image_asset(uuid4()),
+    )
+    result = await _run(uow, social_account_id=account_id, thumbnail_media_asset_id=uuid4())
+    assert result.created is False
+    assert result.job.content_package.thumbnail_media_asset_id is None
+    assert uow.media.calls == []

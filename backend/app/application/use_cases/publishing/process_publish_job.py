@@ -39,6 +39,7 @@ from app.application.interfaces.destination_publisher import (
     IDestinationRegistry,
     PublishResult,
     UploadMedia,
+    UploadThumbnail,
 )
 from app.application.interfaces.object_storage import ObjectStorageError
 from app.application.interfaces.social_credential_store import (
@@ -179,12 +180,46 @@ class ProcessPublishJob:
 
         adapter = self._destinations.for_platform(job.platform)
 
+        # Phase 2c (α9.3) — resolve the optional creator-supplied thumbnail (owner-scoped).
+        # Best-effort: a missing/soft-deleted thumbnail never blocks the video publish (ADR-0050
+        # Invariants 2/7). Resolution happens in the worker; the adapter never reads media_assets.
+        thumb_asset: Any = None
+        thumb_id = job.content_package.thumbnail_media_asset_id
+        if thumb_id is not None:
+            async with self._uow:
+                thumb_asset = await self._uow.media.get_owned(
+                    thumb_id, job.tenant_id, job.requested_by_user_id
+                )
+            if thumb_asset is None:
+                _LOGGER.info(
+                    "publish.thumbnail_unavailable",
+                    publish_job_id=str(job.id),
+                    thumbnail_media_asset_id=str(thumb_id),
+                )
+
         with tempfile.TemporaryDirectory(dir=self._workspace_dir) as tmp:
             artifact_path = await self._materialize(asset, Path(tmp) / "artifact")
+            thumbnail: UploadThumbnail | None = None
+            if thumb_asset is not None:
+                try:
+                    thumb_path = await self._materialize(thumb_asset, Path(tmp) / "thumbnail")
+                    thumbnail = UploadThumbnail(
+                        path=thumb_path,
+                        mime_type=thumb_asset.mime_type,
+                        size_bytes=thumb_asset.size_bytes,
+                    )
+                except ObjectStorageError as exc:
+                    # Best-effort: proceed without a thumbnail rather than fail the publish.
+                    _LOGGER.warning(
+                        "publish.thumbnail_materialize_failed",
+                        publish_job_id=str(job.id),
+                        error=str(exc)[:500],
+                    )
             upload = UploadMedia(
                 path=artifact_path,
                 mime_type=asset.mime_type,
                 size_bytes=asset.size_bytes,
+                thumbnail=thumbnail,
             )
             result: PublishResult = await adapter.publish(
                 package=job.content_package, auth=auth, media=upload

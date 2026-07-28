@@ -15,12 +15,17 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from app.application.interfaces.destination_publisher import DestinationError, UploadMedia
+from app.application.interfaces.destination_publisher import (
+    DestinationError,
+    UploadMedia,
+    UploadThumbnail,
+)
 from app.application.interfaces.social_credential_store import AuthorizedContext
 from app.domain.publishing.content_package import Visibility, build_content_package
 from app.infrastructure.publishing.destinations.youtube import YouTubeDestination
 
 _INITIATE_PATH = "/upload/youtube/v3/videos"
+_THUMBNAIL_PATH = "/upload/youtube/v3/thumbnails/set"
 _SESSION_URL = "https://upload.googleapis.com/resumable/session/abc"
 
 
@@ -247,3 +252,119 @@ async def test_put_success_without_video_id_is_permanent_pub11(tmp_path: Path) -
         await dest.publish(package=pkg, auth=_auth(), media=_media(tmp_path))
     assert exc.value.retryable is False
     assert exc.value.code == "ambiguous_upload_outcome"
+
+
+# ---- α9.3 — best-effort thumbnails.set after a successful videos.insert -----
+
+
+def _media_with_thumb(tmp_path: Path, *, size: int = 2048, thumb_size: int = 512) -> UploadMedia:
+    artifact = tmp_path / "artifact.mp4"
+    artifact.write_bytes(b"x" * size)
+    thumb = tmp_path / "thumb.jpg"
+    thumb.write_bytes(b"t" * thumb_size)
+    return UploadMedia(
+        path=str(artifact),
+        mime_type="video/mp4",
+        size_bytes=size,
+        thumbnail=UploadThumbnail(path=str(thumb), mime_type="image/jpeg", size_bytes=thumb_size),
+    )
+
+
+def _upload_then_thumbnail(
+    thumbnail: Callable[[httpx.Request], httpx.Response] | httpx.Response,
+    *,
+    captured: list[httpx.Request] | None = None,
+):
+    """initiate → 200 + session; PUT → video id; thumbnails.set → given response/handler."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if captured is not None:
+            captured.append(request)
+        if request.method == "POST" and request.url.path == _INITIATE_PATH:
+            return httpx.Response(200, headers={"Location": _SESSION_URL})
+        if request.method == "PUT":
+            return httpx.Response(200, json={"id": "vid_123"})
+        if request.method == "POST" and request.url.path == _THUMBNAIL_PATH:
+            if isinstance(thumbnail, httpx.Response):
+                return thumbnail
+            return thumbnail(request)
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    return handler
+
+
+@pytest.mark.unit
+async def test_thumbnail_set_after_successful_upload(tmp_path: Path) -> None:
+    captured: list[httpx.Request] = []
+    dest = _dest(_upload_then_thumbnail(httpx.Response(200, json={}), captured=captured))
+    pkg = build_content_package(media_asset_id=uuid4(), project_title="P")
+    result = await dest.publish(package=pkg, auth=_auth(), media=_media_with_thumb(tmp_path))
+
+    assert result.external_post_id == "vid_123"
+    thumb_reqs = [r for r in captured if r.url.path == _THUMBNAIL_PATH]
+    assert len(thumb_reqs) == 1
+    req = thumb_reqs[0]
+    assert req.method == "POST"
+    assert req.url.params.get("videoId") == "vid_123"
+    assert req.headers["Authorization"] == "Bearer ya29.bearer"
+    assert req.headers["Content-Type"] == "image/jpeg"
+    assert req.content == b"t" * 512
+
+
+@pytest.mark.unit
+async def test_thumbnail_non_2xx_does_not_fail_publish(tmp_path: Path) -> None:
+    dest = _dest(_upload_then_thumbnail(httpx.Response(403, json={"error": "x"})))
+    pkg = build_content_package(media_asset_id=uuid4(), project_title="P")
+    # Best-effort: a thumbnail rejection must NOT raise and must NOT change the publish outcome.
+    result = await dest.publish(package=pkg, auth=_auth(), media=_media_with_thumb(tmp_path))
+    assert result.external_post_id == "vid_123"
+
+
+@pytest.mark.unit
+async def test_thumbnail_transport_error_does_not_fail_publish(tmp_path: Path) -> None:
+    def raise_on_thumbnail(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("thumbnail endpoint down")
+
+    dest = _dest(_upload_then_thumbnail(raise_on_thumbnail))
+    pkg = build_content_package(media_asset_id=uuid4(), project_title="P")
+    result = await dest.publish(package=pkg, auth=_auth(), media=_media_with_thumb(tmp_path))
+    assert result.external_post_id == "vid_123"
+
+
+@pytest.mark.unit
+async def test_thumbnail_missing_local_file_is_best_effort(tmp_path: Path) -> None:
+    captured: list[httpx.Request] = []
+    dest = _dest(_upload_then_thumbnail(httpx.Response(200, json={}), captured=captured))
+    media = UploadMedia(
+        path=str(tmp_path / "artifact.mp4"),
+        mime_type="video/mp4",
+        size_bytes=2048,
+        thumbnail=UploadThumbnail(
+            path=str(tmp_path / "does-not-exist.jpg"), mime_type="image/jpeg", size_bytes=10
+        ),
+    )
+    (tmp_path / "artifact.mp4").write_bytes(b"x" * 2048)
+    pkg = build_content_package(media_asset_id=uuid4(), project_title="P")
+    result = await dest.publish(package=pkg, auth=_auth(), media=media)
+    assert result.external_post_id == "vid_123"
+    # The unreadable file short-circuits before any thumbnails.set call.
+    assert [r for r in captured if r.url.path == _THUMBNAIL_PATH] == []
+
+
+@pytest.mark.unit
+async def test_thumbnail_not_set_when_primary_upload_fails(tmp_path: Path) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "POST" and request.url.path == _INITIATE_PATH:
+            return httpx.Response(200, headers={"Location": _SESSION_URL})
+        if request.method == "PUT":
+            return httpx.Response(500)  # ambiguous outcome per PUB-11
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    pkg = build_content_package(media_asset_id=uuid4(), project_title="P")
+    with pytest.raises(DestinationError) as exc:
+        await _dest(handler).publish(package=pkg, auth=_auth(), media=_media_with_thumb(tmp_path))
+    assert exc.value.code == "ambiguous_upload_outcome"
+    assert [r for r in captured if r.url.path == _THUMBNAIL_PATH] == []

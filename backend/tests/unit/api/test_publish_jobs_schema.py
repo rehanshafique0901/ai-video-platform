@@ -63,3 +63,28 @@ def test_past_datetime_is_rejected() -> None:
     past = datetime.now(UTC) - timedelta(hours=1)
     with pytest.raises(ValidationError, match="future"):
         PublishJobCreateRequest.model_validate(_base(publish_at=past.isoformat()))
+
+
+# ---- α9.3 — optional thumbnail_media_asset_id (owner/kind validated in the use case) ----
+
+
+def test_thumbnail_absent_is_none() -> None:
+    req = PublishJobCreateRequest.model_validate(_base())
+    assert req.thumbnail_media_asset_id is None
+
+
+def test_thumbnail_explicit_null_is_none() -> None:
+    req = PublishJobCreateRequest.model_validate(_base(thumbnail_media_asset_id=None))
+    assert req.thumbnail_media_asset_id is None
+
+
+def test_thumbnail_uuid_is_accepted() -> None:
+    tid = "33333333-3333-3333-3333-333333333333"
+    req = PublishJobCreateRequest.model_validate(_base(thumbnail_media_asset_id=tid))
+    assert req.thumbnail_media_asset_id is not None
+    assert str(req.thumbnail_media_asset_id) == tid
+
+
+def test_thumbnail_non_uuid_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PublishJobCreateRequest.model_validate(_base(thumbnail_media_asset_id="not-a-uuid"))

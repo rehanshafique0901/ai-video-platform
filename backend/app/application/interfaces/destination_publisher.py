@@ -37,17 +37,38 @@ class DestinationError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class UploadThumbnail:
+    """A materialised thumbnail image to set on the created post (α9.3, ADR-0050).
+
+    Same shape as :class:`UploadMedia` — a local path + non-secret descriptors of an owned image
+    ``MediaAsset`` the **worker** has already resolved (owner-scoped) and materialised to the temp
+    workspace. The adapter never resolves it, never touches storage, and never generates it; it
+    only uploads these bytes (best-effort) after the primary video upload succeeds.
+    """
+
+    path: str
+    mime_type: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class UploadMedia:
     """The finished delivery artifact to upload — a local path + its non-secret descriptors.
 
     The worker materialises the export-delivery ``MediaAsset`` bytes to a temp workspace
     (outside any DB transaction, mirroring the export worker) and hands the adapter this
     handle. No provider URLs, checkpoints, or storage internals cross the boundary (PUB-1).
+
+    ``thumbnail`` (α9.3, ADR-0050) is an **optional additive** field: when the creator supplied a
+    thumbnail the worker materialises it too and attaches it here. Adapters that do not support
+    thumbnails simply ignore it — the ``IDestinationPublisher.publish`` method signature is
+    unchanged and existing adapters remain behaviourally identical (ADR-0050 §Boundary verification).
     """
 
     path: str
     mime_type: str
     size_bytes: int
+    thumbnail: UploadThumbnail | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +125,7 @@ class IDestinationRegistry(ABC):
 
 __all__ = [
     "DestinationError",
+    "UploadThumbnail",
     "UploadMedia",
     "PublishResult",
     "IDestinationPublisher",
