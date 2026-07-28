@@ -37,7 +37,7 @@ _USER = uuid4()
 _NOW = datetime(2026, 7, 27, tzinfo=UTC)
 
 
-def _package(media_id: UUID) -> ContentPackage:
+def _package(media_id: UUID, *, thumbnail_id: UUID | None = None) -> ContentPackage:
     return ContentPackage.from_dict(
         {
             "media_asset_id": str(media_id),
@@ -45,13 +45,15 @@ def _package(media_id: UUID) -> ContentPackage:
             "description": "d",
             "tags": [],
             "visibility": "private",
-            "thumbnail_media_asset_id": None,
+            "thumbnail_media_asset_id": str(thumbnail_id) if thumbnail_id is not None else None,
             "publish_at": None,
         }
     )
 
 
-def _job(*, media_id: UUID, attempt: int = 0, max_attempts: int = 5) -> PublishJob:
+def _job(
+    *, media_id: UUID, attempt: int = 0, max_attempts: int = 5, thumbnail_id: UUID | None = None
+) -> PublishJob:
     return PublishJob(
         id=uuid4(),
         tenant_id=_TENANT,
@@ -65,7 +67,7 @@ def _job(*, media_id: UUID, attempt: int = 0, max_attempts: int = 5) -> PublishJ
         scheduled_at=None,
         attempt=attempt,
         max_attempts=max_attempts,
-        content_package=_package(media_id),
+        content_package=_package(media_id, thumbnail_id=thumbnail_id),
         platform_post_id=None,
         platform_post_url=None,
         error=None,
@@ -96,6 +98,33 @@ def _media(media_id: UUID) -> MediaAsset:
         width=1920,
         height=1080,
         duration_seconds=12.0,
+        checksum_sha256=b"\x00" * 32,
+        source="generated",
+        source_metadata={},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _image_media(media_id: UUID, *, bucket: str = "media") -> MediaAsset:
+    return MediaAsset(
+        id=media_id,
+        tenant_id=_TENANT,
+        owner_user_id=_USER,
+        kind="image",
+        project_id=uuid4(),
+        scene_id=None,
+        prompt_id=None,
+        model_id=None,
+        provider=None,
+        storage_backend="local",
+        storage_bucket=bucket,
+        storage_key=f"thumbnails/{media_id}.jpg",
+        mime_type="image/jpeg",
+        size_bytes=1234,
+        width=1280,
+        height=720,
+        duration_seconds=None,
         checksum_sha256=b"\x00" * 32,
         source="generated",
         source_metadata={},
@@ -183,10 +212,18 @@ class _FakePublishJobs:
 
 
 class _FakeMedia:
-    def __init__(self, asset: MediaAsset | None) -> None:
+    def __init__(
+        self,
+        asset: MediaAsset | None,
+        *,
+        by_id: dict[UUID, MediaAsset | None] | None = None,
+    ) -> None:
         self._asset = asset
+        self._by_id = by_id or {}
 
     async def get_owned(self, media_id, tenant_id, owner_user_id) -> MediaAsset | None:
+        if media_id in self._by_id:
+            return self._by_id[media_id]
         return self._asset
 
 
@@ -424,3 +461,68 @@ async def test_missing_artifact_fails() -> None:
     result = await proc.process(project_id=job.project_id, publish_job_id=job.id)
     assert result.status == "failed"
     assert uow.publish_jobs.failed[0]["error"]["code"] == "artifact_unavailable"
+
+
+# ---- α9.3 — Publish Thumbnail Support (materialisation + best-effort) ------
+
+
+@pytest.mark.unit
+async def test_thumbnail_materialised_and_passed_to_adapter() -> None:
+    media_id, thumb_id = uuid4(), uuid4()
+    job = _job(media_id=media_id, thumbnail_id=thumb_id)
+    dest = _RecordingDestination(mode="ok")
+    proc, uow = _build(job, destination=dest)
+    # Delivery asset for the video id; image asset for the thumbnail id (both in the "media" bucket).
+    uow.media = _FakeMedia(  # type: ignore[assignment]
+        _media(media_id), by_id={thumb_id: _image_media(thumb_id)}
+    )
+    result = await proc.process(project_id=job.project_id, publish_job_id=job.id)
+    assert result.status == "published"
+    assert dest.seen_media is not None
+    assert dest.seen_media.thumbnail is not None
+    assert dest.seen_media.thumbnail.mime_type == "image/jpeg"
+    assert dest.seen_media.thumbnail.size_bytes == 1234
+
+
+@pytest.mark.unit
+async def test_absent_thumbnail_passes_none_to_adapter() -> None:
+    media_id = uuid4()
+    job = _job(media_id=media_id)  # no thumbnail
+    dest = _RecordingDestination(mode="ok")
+    proc, uow = _build(job, destination=dest)
+    result = await proc.process(project_id=job.project_id, publish_job_id=job.id)
+    assert result.status == "published"
+    assert dest.seen_media is not None
+    assert dest.seen_media.thumbnail is None
+
+
+@pytest.mark.unit
+async def test_missing_thumbnail_asset_is_best_effort_publish_still_succeeds() -> None:
+    media_id, thumb_id = uuid4(), uuid4()
+    job = _job(media_id=media_id, thumbnail_id=thumb_id)
+    dest = _RecordingDestination(mode="ok")
+    proc, uow = _build(job, destination=dest)
+    # Thumbnail asset resolves to None (e.g. soft-deleted after create) → skip, video still publishes.
+    uow.media = _FakeMedia(_media(media_id), by_id={thumb_id: None})  # type: ignore[assignment]
+    result = await proc.process(project_id=job.project_id, publish_job_id=job.id)
+    assert result.status == "published"
+    assert dest.seen_media is not None
+    assert dest.seen_media.thumbnail is None
+    assert uow.publish_jobs.succeeded and not uow.publish_jobs.failed
+
+
+@pytest.mark.unit
+async def test_thumbnail_materialise_failure_is_best_effort() -> None:
+    media_id, thumb_id = uuid4(), uuid4()
+    job = _job(media_id=media_id, thumbnail_id=thumb_id)
+    dest = _RecordingDestination(mode="ok")
+    proc, uow = _build(job, destination=dest)
+    # Thumbnail asset is in a bucket the resolver cannot serve → _materialize raises → best-effort skip.
+    uow.media = _FakeMedia(  # type: ignore[assignment]
+        _media(media_id), by_id={thumb_id: _image_media(thumb_id, bucket="other-bucket")}
+    )
+    result = await proc.process(project_id=job.project_id, publish_job_id=job.id)
+    assert result.status == "published"
+    assert dest.seen_media is not None
+    assert dest.seen_media.thumbnail is None
+    assert uow.publish_jobs.succeeded and not uow.publish_jobs.failed

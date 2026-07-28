@@ -28,15 +28,19 @@ import asyncio
 from pathlib import Path
 
 import httpx
+import structlog
 
 from app.application.interfaces.destination_publisher import (
     DestinationError,
     IDestinationPublisher,
     PublishResult,
     UploadMedia,
+    UploadThumbnail,
 )
 from app.application.interfaces.social_credential_store import AuthorizedContext
 from app.domain.publishing.content_package import ContentPackage
+
+_LOGGER = structlog.get_logger(__name__)
 
 _PLATFORM = "youtube"
 _WATCH_URL = "https://www.youtube.com/watch?v="
@@ -75,7 +79,15 @@ class YouTubeDestination(IDestinationPublisher):
 
         body = self._build_request_body(package)  # validates platform limits (permanent on breach)
         session_url = await self._initiate(auth.access_token, body, media)
-        return await self._transmit(session_url, media)
+        result = await self._transmit(session_url, media)
+        # α9.3 — best-effort thumbnail set AFTER the video is durably created (ADR-0050 D3).
+        # A thumbnail failure never raises and never re-runs videos.insert — retrying that would
+        # risk a duplicate public video, which PUB-11 forbids (Invariants 7/8).
+        if media.thumbnail is not None:
+            await self._try_set_thumbnail(
+                result.external_post_id, auth.access_token, media.thumbnail
+            )
+        return result
 
     def _build_request_body(self, package: ContentPackage) -> dict[str, object]:
         """Map the platform-agnostic ``ContentPackage`` → a ``videos.insert`` body (§4)."""
@@ -194,6 +206,49 @@ class YouTubeDestination(IDestinationPublisher):
                 code="ambiguous_upload_outcome",
             )
         return self._parse_result(response)
+
+    async def _try_set_thumbnail(
+        self, video_id: str, access_token: str, thumbnail: UploadThumbnail
+    ) -> None:
+        """Best-effort ``thumbnails.set`` for a just-created video (α9.3, ADR-0050 D3).
+
+        Invoked **only** after ``videos.insert`` has durably created the video, so the post
+        already exists. **Any** failure — transport, non-2xx, or a missing local file — is
+        swallowed and logged (``publish.thumbnail_failed``); it **never** raises
+        :class:`DestinationError` and never re-enters the upload path. This preserves PUB-11
+        (a retry would re-run ``videos.insert`` and risk a duplicate public video) and the
+        best-effort invariants (7/8): the thumbnail phase can never fail or retry the publish.
+        """
+        url = f"{self._api_base_url}/upload/youtube/v3/thumbnails/set"
+        try:
+            data = await asyncio.to_thread(Path(thumbnail.path).read_bytes)
+            response = await self._http.post(
+                url,
+                params={"videoId": video_id, "uploadType": "media"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": thumbnail.mime_type,
+                    "Content-Length": str(thumbnail.size_bytes),
+                },
+                content=data,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            _LOGGER.warning(
+                "publish.thumbnail_failed",
+                platform=_PLATFORM,
+                external_post_id=video_id,
+                error=str(exc)[:500],
+            )
+            return
+        if response.status_code not in (httpx.codes.OK, httpx.codes.CREATED):
+            _LOGGER.warning(
+                "publish.thumbnail_failed",
+                platform=_PLATFORM,
+                external_post_id=video_id,
+                status_code=response.status_code,
+            )
+            return
+        _LOGGER.info("publish.thumbnail_set", platform=_PLATFORM, external_post_id=video_id)
 
     @staticmethod
     def _raise_for_permanent_status(status_code: int, *, phase: str) -> None:

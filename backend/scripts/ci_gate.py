@@ -24,6 +24,7 @@ provider pre-flight):
    18. creator_analytics         (α9.0 — analytics outbox projection + summary read)
    19. ai_publish_metadata       (α9.1 — AI caption/hashtag suggestion + deterministic fallback)
    20. media_library             (α9.2 — owner-scoped folders + library assets over media)
+   21. publish_thumbnail         (α9.3 — optional best-effort thumbnail carried to the destination)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -734,6 +735,30 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/library/test_media_library.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 21 (α9.3) — Publish Thumbnail Support. Proves the additive, best-effort thumbnail
+        # path (ADR-0050) against a DB at head: CreatePublishJob verifies the nominated image is
+        # the caller's own (404 non-owned / 422 non-image) and captures it immutably into the
+        # ContentPackage; the publish runtime resolves + materialises it in the *worker* (never the
+        # adapter) and hands the credential-blind destination an UploadMedia carrying an
+        # UploadThumbnail — and when the image is soft-deleted before publish the video still
+        # succeeds with NO thumbnail (advisory, never blocks). Plus HTTP-contract checks that the
+        # additive request field parses / is validated at the ingress. Per the "each new slice earns
+        # its own stage" discipline (Stages 15-20) it gets its own stage rather than expanding Stage
+        # 14. Each test rolls back inside a SAVEPOINT on teardown, so the destructive-migration
+        # restoration guard is untouched.
+        Stage(
+            number=21,
+            title="publish thumbnail integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/publishing/test_publish_thumbnail.py",
             ],
             requires_db=True,
         ),

@@ -4,12 +4,14 @@ Contract:
 
     POST /api/v1/publish-jobs
       body:  { export_job_id, social_account_id, title?, description?, tags?, visibility?,
-               publish_at? }
+               publish_at?, thumbnail_media_asset_id? }
       → 201  { data: PublishJobPublic, meta }              (new publish queued)
       → 200  { data: PublishJobPublic, meta }              (idempotent replay — existing job)
-      → 404  { error: NOT_FOUND }                          (export/account not the caller's)
+      → 404  { error: NOT_FOUND }                          (export/account/thumbnail not the
+                                                            caller's)
       → 422  { error: VALIDATION_FAILED }                  (export not ready / account not
-                                                            connected / unsupported platform)
+                                                            connected / unsupported platform /
+                                                            thumbnail not an image)
       → 401  { error: UNAUTHENTICATED }                    (via CurrentUserDep)
 
 Creates the publish job in ``queued`` (the α8.6b publish worker drives execution). Publishing
@@ -80,6 +82,7 @@ class CreatePublishJob:
         tags: tuple[str, ...] | None = None,
         visibility: Visibility | None = None,
         publish_at: datetime | None = None,
+        thumbnail_media_asset_id: UUID | None = None,
         ip: str | None = None,
     ) -> CreatePublishJobResult:
         async with self._uow:
@@ -145,9 +148,31 @@ class CreatePublishJob:
             )
             project_title = project.name if project is not None else None
 
+            # α9.3 — validate the optional creator-supplied thumbnail (ADR-0050 Option A):
+            # it must be the caller's own image asset. Verified once here, before the job is
+            # queued; the id is then captured into the immutable ContentPackage (Invariants 3/4).
+            if thumbnail_media_asset_id is not None:
+                thumb = await self._uow.media.get_owned(
+                    thumbnail_media_asset_id, tenant_id, owner_user_id
+                )
+                if thumb is None:
+                    raise NotFoundError(
+                        "thumbnail media asset not found",
+                        details={"thumbnail_media_asset_id": str(thumbnail_media_asset_id)},
+                    )
+                if thumb.kind != "image":
+                    raise ValidationFailedError(
+                        "thumbnail media asset must be an image",
+                        details={
+                            "thumbnail_media_asset_id": str(thumbnail_media_asset_id),
+                            "kind": thumb.kind,
+                        },
+                    )
+
             package = build_content_package(
                 media_asset_id=source_media_asset_id,
                 project_title=project_title,
+                thumbnail_media_asset_id=thumbnail_media_asset_id,
                 title=title,
                 description=description,
                 tags=tags,

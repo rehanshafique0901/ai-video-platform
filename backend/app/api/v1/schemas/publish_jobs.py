@@ -33,6 +33,9 @@ class PublishJobCreateRequest(BaseModel):
     tags: list[str] | None = Field(default=None, max_length=50)
     visibility: Visibility | None = None
     publish_at: datetime | None = None
+    # α9.3 — optional creator-supplied thumbnail (ADR-0050 Option A). Owner + image-kind are
+    # verified in CreatePublishJob (they need a DB read → 404/422); no boundary validator here.
+    thumbnail_media_asset_id: UUID | None = None
 
     @field_validator("publish_at")
     @classmethod

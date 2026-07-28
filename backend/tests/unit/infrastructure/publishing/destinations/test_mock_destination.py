@@ -7,7 +7,11 @@ from uuid import uuid4
 
 import pytest
 
-from app.application.interfaces.destination_publisher import DestinationError, UploadMedia
+from app.application.interfaces.destination_publisher import (
+    DestinationError,
+    UploadMedia,
+    UploadThumbnail,
+)
 from app.application.interfaces.social_credential_store import AuthorizedContext
 from app.domain.publishing.content_package import build_content_package
 from app.infrastructure.publishing.destinations.mock_destination import MockDestination
@@ -20,8 +24,10 @@ def _auth(token: str = "bearer-xyz") -> AuthorizedContext:
     )
 
 
-def _media(size: int = 1024) -> UploadMedia:
-    return UploadMedia(path="/tmp/artifact", mime_type="video/mp4", size_bytes=size)
+def _media(size: int = 1024, *, thumbnail: UploadThumbnail | None = None) -> UploadMedia:
+    return UploadMedia(
+        path="/tmp/artifact", mime_type="video/mp4", size_bytes=size, thumbnail=thumbnail
+    )
 
 
 @pytest.mark.unit
@@ -35,6 +41,19 @@ async def test_publish_is_deterministic() -> None:
     assert r1.external_post_id == f"mock-post-{media_id.hex[:12]}"
     assert r1.post_url is not None and r1.external_post_id in r1.post_url
     assert dest.platform == "mock"
+
+
+@pytest.mark.unit
+async def test_publish_with_thumbnail_is_deterministic_and_ignores_identity() -> None:
+    # α9.3 — a thumbnail is best-effort and must not change the returned post identity.
+    dest = MockDestination()
+    media_id = uuid4()
+    pkg = build_content_package(media_asset_id=media_id, project_title="P")
+    thumb = UploadThumbnail(path="/tmp/thumb.jpg", mime_type="image/jpeg", size_bytes=512)
+    with_thumb = await dest.publish(package=pkg, auth=_auth(), media=_media(thumbnail=thumb))
+    without_thumb = await dest.publish(package=pkg, auth=_auth(), media=_media())
+    assert with_thumb == without_thumb
+    assert with_thumb.external_post_id == f"mock-post-{media_id.hex[:12]}"
 
 
 @pytest.mark.unit

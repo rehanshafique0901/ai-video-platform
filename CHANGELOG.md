@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+### α9.3 — Publish Thumbnail Support (`0.4.46-phase3-alpha9.3`, 2026-07-28)
+
+**Optional, best-effort custom thumbnail for a publish.** A creator may nominate one of their own
+`image` media assets as the destination video's thumbnail. Governed by
+[`ADR-0050`](docs/decisions/ADR-0050-publish-thumbnail-source-and-delivery-boundary.md) (Option A —
+creator-supplied) and [`PHASE3_ALPHA9_3_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_3_PREFLIGHT.md).
+**Strictly additive: no migration (`content_package.thumbnail_media_asset_id` already existed), no AI,
+no thumbnail generation, no lineage resolution, no new providers; the frozen `IDestinationPublisher.publish`
+signature is unchanged — only the `UploadMedia` DTO gains an optional `thumbnail` handle.**
+
+#### Added
+- **API** — optional `thumbnail_media_asset_id` on `POST /api/v1/publish-jobs`
+  (`api/v1/schemas/publish_jobs.py`, `routers/publish_jobs.py`).
+- **`CreatePublishJob`** — owner-scoped validation (a non-owned id → `404`; a non-image → `422`),
+  captured immutably into the existing `ContentPackage` before the job is queued.
+- **Boundary** — `UploadThumbnail` DTO + optional `UploadMedia.thumbnail`
+  (`application/interfaces/destination_publisher.py`); additive and backward-compatible.
+- **`ProcessPublishJob`** — resolves + materialises the owned image **in the worker** (owner-scoped),
+  attaches it to `UploadMedia`; a missing/soft-deleted image or a materialisation failure is
+  best-effort (the video still publishes with no thumbnail).
+- **Adapters** — `YouTubeDestination` performs `thumbnails.set` **after** a durable `videos.insert`
+  (any failure is swallowed + logged, never retried — preserves PUB-11); `MockDestination`
+  deterministically acknowledges a present thumbnail. Adapters never resolve or generate thumbnails.
+- **Tests** — unit (schema, create validation, worker materialisation + best-effort, YouTube
+  `thumbnails.set`, mock) and CI **Stage 21** (`publish thumbnail integration`).
+
+#### Invariants (ADR-0050)
+- Thumbnail is advisory and optional; it never blocks or retries the primary publish.
+- Ownership + `kind='image'` verified once at create; the reference is immutable thereafter.
+- Deterministic, unchanged publish behaviour when no thumbnail is supplied.
+
 ### α9.2 — Media Library Foundation (`0.4.45-phase3-alpha9.2`, 2026-07-28)
 
 **Deterministic, owner-scoped Media Library over registered `media_assets`.** Realises the Asset

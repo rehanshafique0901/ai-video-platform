@@ -15,6 +15,8 @@ upload → settle → events) without any external platform, and is the CI defau
 
 from __future__ import annotations
 
+import structlog
+
 from app.application.interfaces.destination_publisher import (
     DestinationError,
     IDestinationPublisher,
@@ -23,6 +25,8 @@ from app.application.interfaces.destination_publisher import (
 )
 from app.application.interfaces.social_credential_store import AuthorizedContext
 from app.domain.publishing.content_package import ContentPackage
+
+_LOGGER = structlog.get_logger(__name__)
 
 _PLATFORM = "mock"
 _POST_BASE_URL = "https://mock.publish.local/watch"
@@ -54,6 +58,15 @@ class MockDestination(IDestinationPublisher):
         if media.size_bytes <= 0:
             raise DestinationError("media artifact is empty", retryable=False, code="empty_media")
         external_post_id = f"mock-post-{package.media_asset_id.hex[:12]}"
+        # α9.3 — thumbnail is best-effort and optional; the mock deterministically "sets" it when
+        # present (network-free). Its presence never changes the returned post identity.
+        if media.thumbnail is not None:
+            _LOGGER.info(
+                "publish.thumbnail_set",
+                platform=_PLATFORM,
+                external_post_id=external_post_id,
+                thumbnail_size_bytes=media.thumbnail.size_bytes,
+            )
         return PublishResult(
             external_post_id=external_post_id,
             post_url=f"{_POST_BASE_URL}?v={external_post_id}",
