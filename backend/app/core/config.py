@@ -388,6 +388,16 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- AI publish-metadata suggestions (α9.1, ADR-0049) --------------------
+    # Timeout for one advisory LLM caption/hashtag suggestion. Kept short: the capability is
+    # opt-in and advisory, so a slow provider degrades to the deterministic template rather than
+    # making the creator wait. Configuration-blind adapters receive this; they never read Settings.
+    llm_metadata_timeout_seconds: float = Field(
+        default=15.0,
+        description="Per-request timeout for one advisory LLM publish-metadata suggestion.",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
