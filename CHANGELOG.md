@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.3 — Publish Thumbnail Support (`0.4.46-phase3-alpha9.3-dev`, 2026-07-28)
+### α9.3 — Publish Thumbnail Support (`0.4.46-phase3-alpha9.3`, 2026-07-28)
 
 **Optional, best-effort custom thumbnail for a publish.** A creator may nominate one of their own
 `image` media assets as the destination video's thumbnail. Governed by
