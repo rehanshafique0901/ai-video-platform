@@ -22,6 +22,7 @@ provider pre-flight):
    16. publish_notifications     (α8.9a — publish terminal events → in-app notifications)
    17. creator_dashboard         (α8.9c — read-only owner-scoped dashboard summary)
    18. creator_analytics         (α9.0 — analytics outbox projection + summary read)
+   19. ai_publish_metadata       (α9.1 — AI caption/hashtag suggestion + deterministic fallback)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -686,6 +687,30 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/analytics/test_creator_analytics.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 19 (α9.1) — AI Publish Metadata. Proves the advisory caption/hashtag suggestion
+        # pipeline against a DB at head: GeneratePublishMetadata reads a committed, owner-scoped,
+        # ready export through a real UoW and produces a deterministic suggestion via the real
+        # LlmPublishMetadataGenerator over the default (mock) LLM capability — degrading to the
+        # deterministic template on any AI failure — and the real POST
+        # /api/v1/publish-metadata/suggestions returns it for the authenticated owner (404 for a
+        # foreign/unknown export, 422 for a not-ready export/malformed body). It bridges the
+        # Publishing plane to the AI plane (ADR-0049), so — per the "each new slice earns its own
+        # stage" discipline (Stages 15-18) — it gets its own stage rather than expanding Stage 14.
+        # Its use-case tests commit their seed and delete the rows they created on teardown, so the
+        # destructive-migration guard is untouched.
+        Stage(
+            number=19,
+            title="ai publish metadata integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/publishing/test_ai_publish_metadata.py",
             ],
             requires_db=True,
         ),

@@ -74,6 +74,7 @@ from app.application.use_cases.publishing.complete_social_connection import (
     CompleteSocialConnection,
 )
 from app.application.use_cases.publishing.create_publish_job import CreatePublishJob
+from app.application.use_cases.publishing.generate_publish_metadata import GeneratePublishMetadata
 from app.application.use_cases.publishing.get_publish_job import GetPublishJob
 from app.application.use_cases.publishing.list_publish_jobs import ListPublishJobs
 from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
@@ -292,6 +293,12 @@ CreatePublishJobDep = Annotated[
 ]
 GetPublishJobDep = Annotated[GetPublishJob, Depends(container.get_get_publish_job_use_case)]
 ListPublishJobsDep = Annotated[ListPublishJobs, Depends(container.get_list_publish_jobs_use_case)]
+
+# ---- Use-case dependencies (Slice α9.1 — AI publish metadata) ---------
+
+GeneratePublishMetadataDep = Annotated[
+    GeneratePublishMetadata, Depends(container.get_generate_publish_metadata_use_case)
+]
 
 # ---- Use-case dependencies (Slice α8.9c — Creator dashboard) ----------
 

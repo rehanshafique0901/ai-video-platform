@@ -428,3 +428,26 @@ forbidden_modules = [
 # that itself wrote ``import app.application.use_cases.media`` (or the media domain / repo)
 # would be a direct edge and would fail this contract.
 allow_indirect_imports = "True"
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α9.1 (ADR-0049) — the AI plane never imports the Publishing bounded context.
+# α9.1 lets the *Publishing* application plane consume the AI LLM plane to *suggest* publish
+# metadata, but the dependency must stay strictly one-way: Publishing owns the
+# ``IPublishMetadataGenerator`` port (with neutral DTOs); the AI subsystem supplies the adapter
+# (``app.infrastructure.ai.metadata``) by implementing that port. This pins the mirror invariant —
+# no AI module may reach into Publishing (its domain, use cases, or infrastructure) — so the AI
+# adapter can never quietly grow a dependency on the Publishing bounded context.
+name = "AI plane never imports the Publishing bounded context (ADR-0049)"
+type = "forbidden"
+source_modules = ["app.infrastructure.ai"]
+forbidden_modules = [
+    "app.domain.publishing",
+    "app.application.use_cases.publishing",
+    "app.infrastructure.publishing",
+]
+# Only *direct* AI→Publishing edges are forbidden. The neutral port + DTOs the adapter implements
+# live in ``app.application.interfaces`` (whose aggregated ``repositories`` module references the
+# publishing domain for repo-port typing) — an indirect chain that is allowed by design, exactly
+# like the execution→media contract above. An AI module that itself imported a Publishing domain /
+# use-case / infrastructure module would be a direct edge and would fail this contract.
+allow_indirect_imports = "True"

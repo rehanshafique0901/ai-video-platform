@@ -6,7 +6,52 @@
 
 ## [Unreleased]
 
-### α9.0 — Creator Analytics Foundation (`0.4.43-phase3-alpha9.0`, 2026-07-28)
+### α9.1 — AI Caption & Hashtag Generation (`0.4.44-phase3-alpha9.1-dev`, 2026-07-28)
+
+**Opt-in, advisory AI suggestions for publish metadata (title / description / hashtags).** The first
+real consumer of the `Capability.LLM` seam: a creator may *suggest* metadata for a finished, owned
+export through one authenticated `POST /api/v1/publish-metadata/suggestions`, then accept, edit, or
+discard it before creating a publish job through the **existing** overrides. Governed by
+[`PHASE3_ALPHA9_1_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_1_PREFLIGHT.md) and
+[`ADR-0049`](docs/decisions/ADR-0049-ai-publish-metadata-boundary.md) (the publishing→AI boundary +
+determinism invariants). **Strictly additive: no migration, no frozen-runtime change; the AI
+capability is advisory only and always degrades to the existing deterministic template (PUB-9).**
+
+#### Added
+- **`IPublishMetadataGenerator`** (`application/interfaces/publish_metadata_generator.py`) — a
+  **Publishing-owned** port with **neutral, `ContentPackage`-free** DTOs (`PublishMetadataRequest`,
+  `GeneratedPublishMetadata`, ephemeral `MetadataProvenance`, `PublishMetadataGenerationError`). The
+  AI subsystem supplies the adapter; the dependency is strictly one-way (ADR-0049).
+- **`LlmPublishMetadataGenerator`** (`infrastructure/ai/metadata/`) — the sole publishing→AI bridge:
+  resolves `Capability.LLM` from the registry (deterministic `MockLLMProvider` by default), isolates
+  all prompt text (`prompt_template_version = "cap-hashtag/v1"`), deterministically parses a
+  completion into title/description/tags **within the strictest destination caps** (title ≤100, tags
+  ≤500 total chars), and maps **every** provider error / timeout / non-terminal-or-empty / empty-title
+  to `PublishMetadataGenerationError`. Cancellation-safe (`asyncio.wait_for`; `CancelledError`
+  propagates, no leaked task); logs a coarse `reason` only (never prompts/text/tokens).
+- **`GeneratePublishMetadata`** (`application/use_cases/publishing/`) — owner-scoped, advisory use
+  case: cheap validation first (ownership `404` → export readiness `422`, the same gate as
+  `CreatePublishJob`), then the AI call **after** the read UoW closes, with a **mandatory
+  deterministic template fallback** (`build_content_package`, `provenance.is_fallback=True`) on any
+  AI failure. Reads only — persists nothing.
+- **`POST /api/v1/publish-metadata/suggestions`** (`api/v1/routers/publish_metadata.py`,
+  `schemas/publish_metadata.py`) — thin authenticated endpoint returning
+  `PublishMetadataSuggestionPublic` (`extra="forbid"` request; explicit `provenance` contract). Wired
+  through `get_generate_publish_metadata_use_case` + `GeneratePublishMetadataDep`.
+- **`llm_metadata_timeout_seconds`** (config only, default 15.0) — per-suggestion timeout.
+
+#### Enforcement
+- **Import-linter contract** "AI plane never imports the Publishing bounded context (ADR-0049)" —
+  mechanically pins the one-way boundary (`app.infrastructure.ai` ✗→ publishing domain/use-cases/
+  infrastructure).
+- **Tests** — use-case units (LLM happy path within caps, project-description context, `404`/`422`
+  raised **before** any AI work, deterministic-template fallback, default title); adapter units
+  (determinism over the mock, cap enforcement, every failure mode → domain error, timeout +
+  cancellation safety); DTO validation; and a DB-backed integration suite (**Stage 19**):
+  deterministic suggestion over live PostgreSQL, owner isolation (`404`), not-ready export (`422`),
+  generator-failure fallback, and the real endpoint end-to-end (`200` / `401` / `404` / `422`).
+
+**No migration, no frozen-runtime change; one new port + one import-linter contract; ADR-0049.**
 
 **Activates the dormant, partitioned `analytics_events` table as a downstream outbox consumer.** The
 foundation for creator analytics: publish/export lifecycle events are projected into owner-scoped

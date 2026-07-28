@@ -45,6 +45,7 @@ from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.preview_clipper import IPreviewClipper
 from app.application.interfaces.provider_dispatcher import ProviderDispatcherPort
 from app.application.interfaces.providers import Capability
+from app.application.interfaces.publish_metadata_generator import IPublishMetadataGenerator
 from app.application.interfaces.publisher import PublisherPort
 from app.application.interfaces.renderer import IRenderer
 from app.application.interfaces.repositories import IUserRepository
@@ -125,6 +126,7 @@ from app.application.use_cases.publishing.complete_social_connection import (
     CompleteSocialConnection,
 )
 from app.application.use_cases.publishing.create_publish_job import CreatePublishJob
+from app.application.use_cases.publishing.generate_publish_metadata import GeneratePublishMetadata
 from app.application.use_cases.publishing.get_publish_job import GetPublishJob
 from app.application.use_cases.publishing.list_publish_jobs import ListPublishJobs
 from app.application.use_cases.publishing.list_social_accounts import ListSocialAccounts
@@ -176,6 +178,9 @@ from app.application.use_cases.workflow.receive_provider_webhook import ReceiveP
 from app.application.use_cases.workflow.resume_workflow_run import ResumeWorkflowRun
 from app.core.config import Settings
 from app.infrastructure.ai.dispatcher import StepCommandDispatcher
+from app.infrastructure.ai.metadata.llm_publish_metadata_generator import (
+    LlmPublishMetadataGenerator,
+)
 from app.infrastructure.ai.providers.fal import FalVideoProvider, FalWebhookVerifier
 from app.infrastructure.ai.providers.mocks import (
     MockImageProvider,
@@ -293,6 +298,10 @@ _destination_registry: DestinationRegistry | None = None
 # built lazily iff YouTube is configured and closed in shutdown(). None on the common
 # (unconfigured) path, so tests open no client they must close.
 _youtube_client: httpx.AsyncClient | None = None
+# α9.1 (ADR-0049): the AI adapter behind the Publishing-owned IPublishMetadataGenerator port.
+# Built lazily over the process-wide provider registry (LLM capability); advisory-only, so it is
+# never a boot dependency. Reset in reset()/shutdown() so tests rebuild it cleanly.
+_publish_metadata_generator: IPublishMetadataGenerator | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -442,7 +451,7 @@ async def shutdown() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
-    global _destination_registry, _youtube_client
+    global _destination_registry, _youtube_client, _publish_metadata_generator
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -484,6 +493,7 @@ async def shutdown() -> None:
     _video_probe = None
     _destination_registry = None
     _youtube_client = None
+    _publish_metadata_generator = None
     _settings = None
 
 
@@ -497,7 +507,7 @@ def reset() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
-    global _destination_registry, _youtube_client
+    global _destination_registry, _youtube_client, _publish_metadata_generator
     _settings = None
     _engine = None
     _session_factory = None
@@ -535,6 +545,7 @@ def reset() -> None:
     _video_probe = None
     _destination_registry = None
     _youtube_client = None
+    _publish_metadata_generator = None
 
 
 def _require_init() -> None:
@@ -632,6 +643,32 @@ def get_step_command_dispatcher() -> ProviderDispatcherPort:
     into provider calls.
     """
     return StepCommandDispatcher(get_provider_registry())
+
+
+def _get_publish_metadata_generator() -> IPublishMetadataGenerator:
+    """The AI adapter behind the Publishing-owned metadata port (α9.1, ADR-0049).
+
+    Memoised over the process-wide provider registry so it uses whichever provider serves
+    ``Capability.LLM`` (the deterministic mock by default). Configuration-blind: the injected
+    timeout is read from settings here at the composition root, never inside the adapter.
+    """
+    global _publish_metadata_generator
+    _require_init()
+    if _publish_metadata_generator is None:
+        settings = _get_settings()
+        _publish_metadata_generator = LlmPublishMetadataGenerator(
+            get_provider_registry(),
+            timeout_seconds=settings.llm_metadata_timeout_seconds,
+        )
+    return _publish_metadata_generator
+
+
+def get_generate_publish_metadata_use_case() -> GeneratePublishMetadata:
+    """Factory: the α9.1 advisory publish-metadata suggestion use case (own UoW + AI port)."""
+    return GeneratePublishMetadata(
+        uow=get_unit_of_work(),
+        generator=_get_publish_metadata_generator(),
+    )
 
 
 def get_usage_recorder_service() -> UsageRecorderService:
