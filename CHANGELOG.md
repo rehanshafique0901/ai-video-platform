@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.1 — AI Caption & Hashtag Generation (`0.4.44-phase3-alpha9.1-dev`, 2026-07-28)
+### α9.1 — AI Caption & Hashtag Generation (`0.4.44-phase3-alpha9.1`, 2026-07-28)
 
 **Opt-in, advisory AI suggestions for publish metadata (title / description / hashtags).** The first
 real consumer of the `Capability.LLM` seam: a creator may *suggest* metadata for a finished, owned
