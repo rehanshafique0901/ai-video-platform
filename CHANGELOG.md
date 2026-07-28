@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.2 — Media Library Foundation (`0.4.45-phase3-alpha9.2-dev`, 2026-07-28)
+### α9.2 — Media Library Foundation (`0.4.45-phase3-alpha9.2`, 2026-07-28)
 
 **Deterministic, owner-scoped Media Library over registered `media_assets`.** Realises the Asset
 Library reserved by [`ADR-0037`](docs/decisions/ADR-0037-media-generation-outputs.md) **CR-8**:
@@ -38,6 +38,20 @@ no frozen-boundary change.**
   (`parent_folder_id IS NULL`) gap left by the frozen partial-unique index's default NULL-distinct
   semantics, so duplicate names are a uniform `409` at every level; the DB index remains the
   race-safe backstop for the non-null-parent case.
+
+#### Known limitation (accepted)
+- **Root-folder name uniqueness is application-enforced, not database-enforced.** The frozen
+  `0001_baseline` index `uq_library_folders_parent_folder_id_name` is keyed on `(parent_folder_id,
+  name)` and, by PostgreSQL's default NULL-distinct semantics, does **not** constrain root folders
+  (`parent_folder_id IS NULL`); it also omits `owner_user_id`, so a `NULLS NOT DISTINCT` variant on
+  the existing columns would incorrectly make root names globally unique across tenants. Under
+  α9.2's **no-migration** constraint the app-level pre-check is the only viable enforcement, which
+  leaves a **narrow TOCTOU race for root folders only** (READ COMMITTED): two concurrent creates of
+  the same root name for one owner may both succeed. This is **non-corrupting** — assets reference
+  folders by id, and no FK/OCC/referential invariant is affected — and **child-folder uniqueness
+  remains database-enforced**. The permanent fix is a **future migration** adding a per-owner
+  partial unique index (`(owner_user_id, name) WHERE parent_folder_id IS NULL AND deleted_at IS
+  NULL`) with matching ORM metadata; no ADR is required.
 
 #### Enforcement
 - **Tests** — 38 use-case + DTO units (folder/asset CRUD, cycle guard, OCC, tag normalisation,
