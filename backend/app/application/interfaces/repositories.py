@@ -42,6 +42,8 @@ from app.domain.export.export_job import ExportJob, ExportJobClaim
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.library.library_asset import LibraryAsset
+from app.domain.library.library_folder import LibraryFolder
 from app.domain.media.media_asset import MediaAsset
 from app.domain.notifications.notification import Notification
 from app.domain.projects.project import Project
@@ -2530,5 +2532,236 @@ class IPublishJobRepository(ABC):
         version=version+1 WHERE id=:id AND status='running'``. The bumped ``attempt`` (from
         :meth:`mark_running`) is preserved; the last transient ``error`` is recorded for
         observability. Returns the requeued job, or ``None`` when no row matched.
+        """
+        ...
+
+
+class ILibraryRepository(ABC):
+    """Persistence surface for the Media Library (``library_folders`` /
+    ``library_assets`` / ``library_asset_projects``) — Slice α9.2, ADR-0037 CR-8.
+
+    Every method is **owner-scoped** (``tenant_id`` + ``owner_user_id``) and excludes
+    soft-deleted rows, mirroring :class:`IMediaRepository` / :class:`IProjectRepository`.
+    Authorization is the caller's responsibility: the use case has already resolved
+    ``owner_user_id`` / ``tenant_id`` from ``CurrentUserDep``. The library is a sibling
+    *over* registered ``media_assets`` — it never writes the Media table.
+
+    Folder methods are last-writer-wins (``library_folders`` has no ``VersionMixin``);
+    asset ``update_asset`` is a version-fenced CAS (``library_assets`` carries OCC),
+    identical in shape to :meth:`IProjectRepository.update_owned`.
+    """
+
+    # --- folders ----------------------------------------------------------------
+
+    @abstractmethod
+    async def add_folder(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        parent_folder_id: UUID | None,
+        name: str,
+    ) -> LibraryFolder:
+        """Create a folder owned by the caller and return it.
+
+        Raises ``ConflictError`` if a live folder with the same ``name`` already exists
+        under the same ``parent_folder_id`` for this owner (the live-row partial-unique
+        index ``uq_library_folders_parent_folder_id_name``) → ``409``.
+        """
+        ...
+
+    @abstractmethod
+    async def get_folder(
+        self, folder_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> LibraryFolder | None:
+        """Return the owner's live folder, or ``None`` (missing / soft-deleted / another's)."""
+        ...
+
+    @abstractmethod
+    async def folder_name_conflicts(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        parent_folder_id: UUID | None,
+        name: str,
+        exclude_folder_id: UUID | None = None,
+    ) -> bool:
+        """Return ``True`` if a live folder with ``name`` already exists under ``parent_folder_id``.
+
+        The application-level uniqueness pre-check. The DB index
+        ``uq_library_folders_parent_folder_id_name`` enforces this for a non-null parent, but
+        (per PostgreSQL's default NULL-distinct semantics) it does **not** constrain root
+        folders (``parent_folder_id IS NULL``). This check closes that gap so duplicate names
+        are a uniform ``409`` at any level (α9.2). ``exclude_folder_id`` skips the row being
+        renamed. It is a best-effort pre-check for the root case; the DB index remains the
+        race-safe backstop for the non-null-parent case.
+        """
+        ...
+
+    @abstractmethod
+    async def list_folders(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        parent_folder_id: UUID | None,
+        filter_by_parent: bool,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[LibraryFolder]:
+        """Return up to ``limit`` of the owner's live folders, newest first (keyset).
+
+        ``filter_by_parent`` selects the three-state filter: ``False`` → all folders;
+        ``True`` with ``parent_folder_id=None`` → root folders (``parent_folder_id IS
+        NULL``); ``True`` with a UUID → that parent's children. Ordering is
+        ``created_at DESC, id DESC``; ``after`` is the decoded cursor position.
+        """
+        ...
+
+    @abstractmethod
+    async def update_folder(
+        self,
+        folder_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        changes: Mapping[str, Any],
+    ) -> LibraryFolder | None:
+        """Last-writer-wins partial update of the owner's live folder (``name`` / parent).
+
+        Returns the updated folder, or ``None`` when no live owned row matched. Raises
+        ``ConflictError`` on the ``(parent_folder_id, name)`` uniqueness violation → ``409``.
+        ``changes`` contains only mutable columns (never identity/ownership/timestamps).
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_folder(
+        self, folder_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> bool:
+        """Soft-delete the owner's live folder. Returns ``True`` iff a row was marked."""
+        ...
+
+    @abstractmethod
+    async def folder_has_children(
+        self, folder_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> bool:
+        """Return ``True`` if the owner has any live *sub-folder* under ``folder_id``.
+
+        Used by ``DeleteLibraryFolder`` to refuse deleting a non-empty parent (α9.2 §7.4:
+        child folders are not cascade-deleted in v1). Contained *assets* do not block the
+        delete — they are detached to unfiled (``library_folder_id = NULL``).
+        """
+        ...
+
+    @abstractmethod
+    async def detach_assets_from_folder(
+        self, folder_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> int:
+        """Set ``library_folder_id = NULL`` on the owner's live assets in ``folder_id``.
+
+        Returns the number of assets detached. Called within the same UoW as
+        :meth:`soft_delete_folder` so folder deletion never orphans or deletes assets
+        (α9.2 §7.4).
+        """
+        ...
+
+    # --- assets -----------------------------------------------------------------
+
+    @abstractmethod
+    async def add_asset(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        media_asset_id: UUID,
+        library_folder_id: UUID | None,
+        name: str,
+        description: str | None,
+        tags: tuple[str, ...],
+    ) -> LibraryAsset:
+        """Create a library entry wrapping one registered media asset; return it (``version=1``).
+
+        Raises ``ConflictError`` if a library entry for ``media_asset_id`` already exists
+        (``uq_library_assets_media_asset_id``) → ``409``. The caller has already verified
+        the media asset and folder are the caller's own live rows.
+        """
+        ...
+
+    @abstractmethod
+    async def get_asset(
+        self, asset_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> LibraryAsset | None:
+        """Return the owner's live library asset, or ``None``.
+
+        A library entry whose underlying ``media_asset`` has been soft-deleted is treated
+        as absent (``None``) — the library never surfaces a dangling entry (α9.2 §7.2).
+        """
+        ...
+
+    @abstractmethod
+    async def list_assets(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        folder_id: UUID | None,
+        filter_by_folder: bool,
+        tags: tuple[str, ...] | None,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[LibraryAsset]:
+        """Return up to ``limit`` of the owner's live library assets, newest first (keyset).
+
+        Entries whose underlying ``media_asset`` is soft-deleted are excluded (α9.2 §7.2).
+        ``filter_by_folder`` is the three-state folder filter (see :meth:`list_folders`).
+        ``tags`` (when non-empty) is an **ANY-of** match over the ``tags`` GIN index
+        (array overlap ``tags && :tags``). Ordering is ``created_at DESC, id DESC``.
+        """
+        ...
+
+    @abstractmethod
+    async def update_asset(
+        self,
+        asset_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> LibraryAsset | None:
+        """Version-fenced CAS update of the owner's live library asset (mirrors projects).
+
+        Applies ``changes`` (``name`` / ``description`` / ``tags`` / ``library_folder_id``)
+        to the row matching id + owner + ``deleted_at IS NULL`` + ``version =
+        expected_version``, bumping ``version`` by exactly 1. Returns the updated asset, or
+        ``None`` when the CAS matched no row (stale version or concurrent delete) → ``412``
+        at the use case (which has already established visibility → 404-before-412).
+        """
+        ...
+
+    @abstractmethod
+    async def soft_delete_asset(self, asset_id: UUID, tenant_id: UUID, owner_user_id: UUID) -> bool:
+        """Soft-delete the owner's live library asset. Returns ``True`` iff a row was marked.
+
+        The underlying ``media_asset`` is untouched (the library is a sibling over media).
+        """
+        ...
+
+    @abstractmethod
+    async def record_use(
+        self,
+        asset_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        project_id: UUID,
+    ) -> LibraryAsset | None:
+        """Record that the owner reused a library asset in a project; return the updated asset.
+
+        Increments ``usage_count``, stamps ``last_used_at = now()``, and upserts the
+        ``library_asset_projects (library_asset_id, project_id)`` junction (``ON CONFLICT
+        DO NOTHING`` — idempotent per pair). Returns ``None`` when no live owned asset
+        matched (→ ``404``). The caller has verified the project is the caller's own.
         """
         ...

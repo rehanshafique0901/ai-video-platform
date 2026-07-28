@@ -76,6 +76,17 @@ from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.export.process_export_job import ProcessExportJob
 from app.application.use_cases.generation.capability_resolver import ResolverCapabilityResolver
 from app.application.use_cases.generation.generate_video import GenerateVideo
+from app.application.use_cases.library.add_library_asset import AddLibraryAsset
+from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
+from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
+from app.application.use_cases.library.delete_library_folder import DeleteLibraryFolder
+from app.application.use_cases.library.get_library_asset import GetLibraryAsset
+from app.application.use_cases.library.get_library_folder import GetLibraryFolder
+from app.application.use_cases.library.list_library_assets import ListLibraryAssets
+from app.application.use_cases.library.list_library_folders import ListLibraryFolders
+from app.application.use_cases.library.record_library_asset_use import RecordLibraryAssetUse
+from app.application.use_cases.library.update_library_asset import UpdateLibraryAsset
+from app.application.use_cases.library.update_library_folder import UpdateLibraryFolder
 from app.application.use_cases.media.delete_media import DeleteMedia
 from app.application.use_cases.media.enrich_generated_media import EnrichGeneratedMedia
 from app.application.use_cases.media.enrichers import (
@@ -810,6 +821,55 @@ def get_update_project_use_case() -> UpdateProject:
 
 def get_delete_project_use_case() -> DeleteProject:
     return DeleteProject(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α9.2 — Media Library Foundation)
+# ---------------------------------------------------------------------
+
+
+def get_create_library_folder_use_case() -> CreateLibraryFolder:
+    return CreateLibraryFolder(uow=get_unit_of_work())
+
+
+def get_list_library_folders_use_case() -> ListLibraryFolders:
+    return ListLibraryFolders(uow=get_unit_of_work())
+
+
+def get_get_library_folder_use_case() -> GetLibraryFolder:
+    return GetLibraryFolder(uow=get_unit_of_work())
+
+
+def get_update_library_folder_use_case() -> UpdateLibraryFolder:
+    return UpdateLibraryFolder(uow=get_unit_of_work())
+
+
+def get_delete_library_folder_use_case() -> DeleteLibraryFolder:
+    return DeleteLibraryFolder(uow=get_unit_of_work())
+
+
+def get_add_library_asset_use_case() -> AddLibraryAsset:
+    return AddLibraryAsset(uow=get_unit_of_work())
+
+
+def get_list_library_assets_use_case() -> ListLibraryAssets:
+    return ListLibraryAssets(uow=get_unit_of_work())
+
+
+def get_get_library_asset_use_case() -> GetLibraryAsset:
+    return GetLibraryAsset(uow=get_unit_of_work())
+
+
+def get_update_library_asset_use_case() -> UpdateLibraryAsset:
+    return UpdateLibraryAsset(uow=get_unit_of_work())
+
+
+def get_delete_library_asset_use_case() -> DeleteLibraryAsset:
+    return DeleteLibraryAsset(uow=get_unit_of_work())
+
+
+def get_record_library_asset_use_use_case() -> RecordLibraryAssetUse:
+    return RecordLibraryAssetUse(uow=get_unit_of_work())
 
 
 # ---------------------------------------------------------------------
