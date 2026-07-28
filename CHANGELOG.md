@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.4 — Multi-Destination Publishing (`0.4.47-phase3-alpha9.4-dev`, 2026-07-28)
+### α9.4 — Multi-Destination Publishing (`0.4.47-phase3-alpha9.4`, 2026-07-28)
 
 **Publish one finished export to many connected accounts in a single action.** A creator fans out
 a publish to N of their own connected destination accounts at once — the natural capstone of the
