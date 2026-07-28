@@ -6,6 +6,38 @@
 
 ## [Unreleased]
 
+### α9.4 — Multi-Destination Publishing (`0.4.47-phase3-alpha9.4-dev`, 2026-07-28)
+
+**Publish one finished export to many connected accounts in a single action.** A creator fans out
+a publish to N of their own connected destination accounts at once — the natural capstone of the
+publishing workflow (captions α9.1 + thumbnails α9.3 + scheduling α8.9b all compose once and apply
+to every channel). Governed by
+[`PHASE3_ALPHA9_4_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_4_PREFLIGHT.md).
+**Strictly additive orchestration: no migration, no ADR, no new port, no frozen-runtime change; the
+single-create `POST /publish-jobs` endpoint is unchanged.** The batch endpoint composes the existing
+`CreatePublishJob` once per account — it duplicates no validation, idempotency, or persistence logic.
+
+#### Added
+- **API** — new additive `POST /api/v1/publish-jobs/batch` (`api/v1/schemas/publish_jobs.py`,
+  `routers/publish_jobs.py`): body `{ export_job_id, social_account_ids[1..20], <shared metadata
+  overrides>, publish_at?, thumbnail_media_asset_id? }`; the list is bounded + duplicate-free (`422`).
+- **`CreatePublishJobs`** (`application/use_cases/publishing/create_publish_jobs.py`) — orchestration
+  fan-out over `CreatePublishJob`. A **shared** prerequisite failure (the export, or the optional
+  thumbnail) aborts the whole request (fail-fast `404`/`422`); a **per-account** failure (account not
+  owned / not connected / unsupported platform) is recorded as that item's outcome so one bad account
+  never blocks the rest. Failures are classified from the existing error `details` keys — the single
+  validation source is untouched.
+- **Response** — `data` is an ordered per-account outcome array (`PublishJobBatchItemPublic`): each
+  item is `created` (freshly queued), an idempotent replay (`created=false` + `publish_job`), or a
+  neutral per-account `error{code,message}` — so callers never infer outcomes. Overall `201`.
+- **Automatic downstream reuse** — every created job is an ordinary `PublishJob`, so scheduling,
+  captions, thumbnails, notifications (α8.9a), and analytics (α9.0) all apply with **no**
+  batch-specific logic. Idempotency (PUB-7) is unchanged — each account replays its own existing job.
+- **Tests** — unit (fan-out orchestration: all-created, mixed replay, isolated per-account errors,
+  shared fail-fast; batch schema cardinality/dedupe) and CI **Stage 22** (`multi-destination
+  publishing integration`: two accounts → two jobs both drain; best-effort isolation; unknown-export
+  fail-fast; HTTP auth + shape validators).
+
 ### α9.3 — Publish Thumbnail Support (`0.4.46-phase3-alpha9.3`, 2026-07-28)
 
 **Optional, best-effort custom thumbnail for a publish.** A creator may nominate one of their own

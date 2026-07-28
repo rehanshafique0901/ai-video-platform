@@ -137,6 +137,7 @@ from app.application.use_cases.publishing.complete_social_connection import (
     CompleteSocialConnection,
 )
 from app.application.use_cases.publishing.create_publish_job import CreatePublishJob
+from app.application.use_cases.publishing.create_publish_jobs import CreatePublishJobs
 from app.application.use_cases.publishing.generate_publish_metadata import GeneratePublishMetadata
 from app.application.use_cases.publishing.get_publish_job import GetPublishJob
 from app.application.use_cases.publishing.list_publish_jobs import ListPublishJobs
@@ -1855,6 +1856,11 @@ def get_create_publish_job_use_case() -> CreatePublishJob:
         uow=get_unit_of_work(),
         supported_platforms=_get_destination_registry().supported_platforms(),
     )
+
+
+def get_create_publish_jobs_use_case() -> CreatePublishJobs:
+    """Factory: the α9.4 multi-destination fan-out (orchestration over ``CreatePublishJob``)."""
+    return CreatePublishJobs(create_one=get_create_publish_job_use_case())
 
 
 def get_get_publish_job_use_case() -> GetPublishJob:
