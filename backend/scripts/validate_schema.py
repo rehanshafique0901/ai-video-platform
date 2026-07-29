@@ -86,6 +86,11 @@ EXTRA_EXPECTED_INDEXES = {
     "ix_library_assets_embedding_hnsw",
     "ix_analytics_events_properties_gin",
     "ix_agent_memory_embedding_hnsw",
+    # α9.7 (0016) — generations is ORM-less/allowlisted, so its indexes are invisible to the
+    # ORM-driven index check. Registered here so the gate actually asserts the owner-scoped
+    # keyset read path and the DB-enforced create idempotency exist.
+    "ix_generations_owner_created",
+    "uq_generations_owner_idempotency_key",
 }
 
 

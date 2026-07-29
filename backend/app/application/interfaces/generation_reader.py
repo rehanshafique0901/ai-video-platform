@@ -70,13 +70,23 @@ class IGenerationReader(ABC):
     """Read-only access to an execution-plane generation's final rendered video."""
 
     @abstractmethod
-    async def load_final_video(self, generation_id: UUID) -> PromotableGenerationVideo | None:
-        """Return the generation head + its final video artefact, or ``None``.
+    async def load_final_video(
+        self, *, generation_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> PromotableGenerationVideo | None:
+        """Return the **caller's** generation head + its final video artefact, or ``None``.
 
-        ``None`` means no ``generations`` row exists for ``generation_id``. A row that
-        exists but has no ``final_video_asset_id`` is returned with the physical fields
-        set to ``None`` (``has_final_video`` is ``False``) so the caller can distinguish
-        "unknown generation" (404) from "nothing promotable yet" (422). Side-effect-free.
+        ``None`` means no ``generations`` row matches this id *for this owner* — a row owned
+        by somebody else is indistinguishable from one that does not exist, so an id cannot be
+        probed. A row that exists but has no ``final_video_asset_id`` is returned with the
+        physical fields set to ``None`` (``has_final_video`` is ``False``) so the caller can
+        distinguish "unknown generation" (404) from "nothing promotable yet" (422).
+        Side-effect-free.
+
+        **Owner scoping is load-bearing** (α9.7 / ADR-0052 D1). Before generation ids were
+        client-visible, promotion authorised only the target *project*; anyone who learned an
+        id could promote it into a project they owned. Ingress makes ids visible, so the read
+        itself is now owner-scoped. Legacy ownerless generations match no owner and are
+        therefore not promotable — the intended consequence of never inferring ownership.
         """
         ...
 

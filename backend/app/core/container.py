@@ -76,7 +76,14 @@ from app.application.use_cases.export.export_worker import ExportWorker
 from app.application.use_cases.export.get_export_job import GetExportJob
 from app.application.use_cases.export.process_export_job import ProcessExportJob
 from app.application.use_cases.generation.capability_resolver import ResolverCapabilityResolver
+from app.application.use_cases.generation.create_generation import CreateGeneration
 from app.application.use_cases.generation.generate_video import GenerateVideo
+from app.application.use_cases.generation.generation_worker import GenerationWorker
+from app.application.use_cases.generation.read_generations import (
+    CancelGeneration,
+    GetGeneration,
+    ListGenerations,
+)
 from app.application.use_cases.library.add_library_asset import AddLibraryAsset
 from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
 from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
@@ -219,7 +226,9 @@ from app.infrastructure.delivery import (
 )
 from app.infrastructure.export import FfmpegExporter
 from app.infrastructure.generation.execution_runtime_store import SqlExecutionRuntimeStore
+from app.infrastructure.generation.generation_job_store import SqlGenerationJobStore
 from app.infrastructure.generation.generation_reader import GenerationReader
+from app.infrastructure.generation.generation_runner import SessionScopedGenerationRunner
 from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
 from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
@@ -1538,6 +1547,52 @@ def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
         storage=_get_object_storage(),
         model_manager=ModelCacheManager(session_factory),
         store=SqlExecutionRuntimeStore(session_factory),
+    )
+
+
+def _get_generation_job_store() -> SqlGenerationJobStore:
+    """Factory: the α9.7 ingress-owned ``generations`` store (its own short sessions).
+
+    Stateless over an ``async_sessionmaker``, so it is built per call rather than memoised —
+    the same shape as :class:`GenerationReader`.
+    """
+    return SqlGenerationJobStore(get_session_factory())
+
+
+def get_create_generation_use_case() -> CreateGeneration:
+    """Factory: the α9.7 generation ingress (queues a ``queued`` row; never generates)."""
+    return CreateGeneration(store=_get_generation_job_store())
+
+
+def get_get_generation_use_case() -> GetGeneration:
+    return GetGeneration(store=_get_generation_job_store())
+
+
+def get_list_generations_use_case() -> ListGenerations:
+    return ListGenerations(store=_get_generation_job_store())
+
+
+def get_cancel_generation_use_case() -> CancelGeneration:
+    return CancelGeneration(store=_get_generation_job_store())
+
+
+def get_generation_worker() -> GenerationWorker:
+    """Factory: the α9.7 generation poll ingress (``run_once`` reaps, then claims and runs).
+
+    The runner is handed :func:`get_generate_video_use_case` as a builder rather than a session,
+    so the pipeline gets a fresh session per generation and the worker itself stays free of any
+    infrastructure type. Leases come from the UoW (``distributed_locks``); generation state comes
+    from the ingress-owned store — each collaborator writes only what it owns.
+    """
+    settings = _get_settings()
+    return GenerationWorker(
+        uow=get_unit_of_work(),
+        store=_get_generation_job_store(),
+        runner=SessionScopedGenerationRunner(get_session_factory(), get_generate_video_use_case),
+        batch_size=settings.generation_worker_batch_size,
+        lease=timedelta(seconds=settings.generation_lease_seconds),
+        heartbeat=timedelta(seconds=settings.generation_heartbeat_seconds),
+        reap_grace=timedelta(seconds=settings.generation_reap_grace_seconds),
     )
 
 

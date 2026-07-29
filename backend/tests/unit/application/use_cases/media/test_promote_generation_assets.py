@@ -32,12 +32,18 @@ _VIDEO_BYTES = b"FAKE-MP4-BYTES"
 
 
 class _FakeGenerationReader(IGenerationReader):
+    """Owner-scoped fake (α9.7): records the full owner triple each call was made with."""
+
     def __init__(self, video: PromotableGenerationVideo | None) -> None:
         self._video = video
         self.calls: list[UUID] = []
+        self.owner_scopes: list[tuple[UUID, UUID]] = []
 
-    async def load_final_video(self, generation_id: UUID) -> PromotableGenerationVideo | None:
+    async def load_final_video(
+        self, *, generation_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> PromotableGenerationVideo | None:
         self.calls.append(generation_id)
+        self.owner_scopes.append((tenant_id, owner_user_id))
         return self._video
 
 
@@ -236,6 +242,26 @@ async def test_no_final_video_is_422() -> None:
             owner_user_id=env.owner_user_id,
         )
     assert len(env.media._media) == 0
+
+
+async def test_generation_read_is_owner_scoped() -> None:
+    """α9.7 / AP9 — the generation read carries the caller's owner triple.
+
+    Before generation ids were client-visible, promotion authorised only the project, so
+    anyone who learned an id could promote it. The reader is now owner-scoped; this pins the
+    scope actually reaching it, so the check cannot be silently dropped.
+    """
+    gen_id = uuid4()
+    env, _storage, reader, uc = _wire(_video(gen_id, final_video_asset_id=uuid4()))
+
+    await uc.execute(
+        generation_id=gen_id,
+        project_id=env.project_id,
+        tenant_id=env.tenant_id,
+        owner_user_id=env.owner_user_id,
+    )
+
+    assert reader.owner_scopes == [(env.tenant_id, env.owner_user_id)]
 
 
 async def test_foreign_project_is_422() -> None:

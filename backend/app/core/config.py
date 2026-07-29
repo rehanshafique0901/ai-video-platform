@@ -256,6 +256,34 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Generation ingress + worker (α9.7, ADR-0052) --------------------------
+    # One generation execution is one external spend opportunity, so the lease must
+    # outlive the run (renewed by heartbeat) and an abandoned run is terminalised
+    # rather than retried. Every value is defaulted: no configuration is required.
+    generation_worker_batch_size: int = Field(
+        default=5,
+        description="Max queued generations a single GenerationWorker.run_once() claims.",
+        gt=0,
+    )
+    generation_lease_seconds: float = Field(
+        default=300.0,
+        description="TTL of the generation:<id> lease, renewed while the run is in flight.",
+        gt=0,
+    )
+    generation_heartbeat_seconds: float = Field(
+        default=60.0,
+        description="Interval at which a running generation renews its lease.",
+        gt=0,
+    )
+    generation_reap_grace_seconds: float = Field(
+        default=120.0,
+        description=(
+            "How long a claimed generation may go without a status update before the "
+            "worker treats it as abandoned and terminalises it as failed (never retried)."
+        ),
+        gt=0,
+    )
+
     # --- Media enrichment (α8.4c) ---------------------------------------------
     # The enrichment worker derives a thumbnail + scalar metadata for generated
     # videos via IThumbnailer (FFmpeg adapter, reusing the render binary config).

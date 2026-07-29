@@ -99,6 +99,21 @@ read/written through explicit raw-SQL repositories.
 | `model_cache` | Persistent local-model registry (version/sha/size/backend/tier/capabilities) | 1 / model |
 | `generation_resolution_ledger` | Resolution provenance (α8.5e — **reused**, not re-created) | 1 / resolution |
 
+### Ingress-owned columns on `generations` (α9.7, migration `0016`)
+
+`generations` carries four columns the Execution Runtime **does not own and never writes**:
+
+| Column | Owner | Purpose |
+|---|---|---|
+| `tenant_id`, `owner_user_id` | Generation **ingress** | Who asked for this generation (ADR-0052 D1). Nullable: legacy rows predate ingress and their owner must never be inferred |
+| `idempotency_key` | Generation **ingress** | Client-supplied create idempotency, backed by `uq_generations_owner_idempotency_key` (ADR-0052 D4) |
+| `request` | Generation **ingress** | The creator's asserted `GenerateVideoRequest`, persisted verbatim so a worker can reconstruct it exactly — the `publish_jobs.content_package` pattern |
+
+**Ingress owns identity; the Execution Runtime owns execution state.** Neither writes the
+other's columns. The runtime remains completely ownership-blind: `GenerateVideoRequest` carries
+no tenant/owner field, `IExecutionRuntimeStore`'s signature is unchanged, and no execution-plane
+module knows what a user is.
+
 **Reused, not owned:** the `StorageResolver` (local/s3/r2) is the storage abstraction —
 Execution never writes bytes to disk directly. `generation_resolution_ledger.generation_id`
 remains a **logical** reference (no DB FK): every pre-Increment-4 ledger row predates
@@ -130,7 +145,35 @@ any state → cancelled     (external request)
 `repairing` loops back to `verifying` for the affected shot; `verifying`↔`repairing` is
 the only backward edge. `failed`/`cancelled`/`completed` are terminal. The machine is
 persisted (`generations.status`) so future work (resume, cancellation, UI progress,
-retries, distributed execution) has a durable anchor — none of which is built now.
+retries, distributed execution) has a durable anchor.
+
+### Where the lifecycle begins (α9.7 — ADR-0052 D2-B)
+
+The runtime's lifecycle now **begins with an already-created `queued` generation supplied by
+ingress.** `POST /api/v1/generations` inserts the owned row; a worker claims it (`queued →
+planning` CAS under a `generation:<id>` lease) and only then runs the pipeline. **The runtime is
+no longer responsible for establishing the existence of a generation — only for executing one.**
+
+Accordingly, `IExecutionRuntimeStore.begin()` is an **idempotent state-initialisation
+operation, not a generic upsert** (pre-flight GEN-1). It:
+
+1. **may create** the row when it is absent — the direct-invocation path (`scripts/generate_demo.py`,
+   integration tests) remains fully supported, so ingress is not mandatory;
+2. **may initialise runtime-owned execution fields** when the row already exists — the ingress path;
+3. **must never overwrite** ownership, identity, the persisted `request`, `idempotency_key`,
+   `created_at`, or any other ingress-owned metadata;
+4. **must never permit** a queued generation to be rebound to another owner or another request;
+5. **must remain safe** when called repeatedly for the same `generation_id`, converging on the same
+   runtime state.
+
+The `ON CONFLICT (id) DO UPDATE` clause enumerates only runtime-owned columns, so (3) and (4) hold
+by construction rather than by convention.
+
+There is **no job-level retry**: `max_attempts = 1` (ADR-0052 D2) is enforced structurally — the
+claim is a `queued → planning` CAS and nothing ever writes a row back to `queued`. A generation
+abandoned by a crashed worker is *terminalised* to `failed` by the worker's reap phase, never
+re-run, because one execution equals one external spend opportunity. Shot-level repair
+(`DEFAULT_MAX_ATTEMPTS = 3`) is intra-run and unaffected.
 
 ---
 

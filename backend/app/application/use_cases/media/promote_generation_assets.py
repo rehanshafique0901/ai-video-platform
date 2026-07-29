@@ -21,10 +21,14 @@ Boundaries (α8.8 pre-flight):
 * **AP5 — idempotent.** The deterministic key makes re-promotion collide on the
   ``media_assets`` storage-coordinate uniqueness; the conflict is caught and the existing
   asset returned (``status='noop'``). No new constraint, no migration.
-* **AP9 — project-asserted, generation-unowned.** ``generations`` carry no ownership
-  (ADR-0046 Q1), so promotion authorizes the *project* (owned by the caller) but does not
-  bind the *generation* to an owner; that is deferred to the future generation-trigger
-  slice.
+* **AP9 — doubly authorized (α9.7).** Superseded the original "project-asserted,
+  generation-unowned" posture. ``generations`` now carry ownership (ADR-0052 D1), so promotion
+  authorizes **both**: the *project* must be the caller's (``validate_media_links``) **and** the
+  *generation* must be the caller's (the owner-scoped :class:`IGenerationReader`). Under the
+  original posture, anyone who learned a ``generation_id`` could promote it into a project they
+  owned — harmless while ids were server-internal, exploitable the moment generation ingress
+  made them client-visible. Legacy ownerless generations are consequently not promotable, which
+  is the intended outcome of never inferring ownership.
 
 Storage note: promotion reads the source bytes through
 ``storage.resolve(<persisted backend>)``. Today both planes share the one active object
@@ -114,8 +118,12 @@ class PromoteGenerationAssets:
                 validate_model=False,
             )
 
-        # Phase 2 — load the promotable final video (read-only, execution plane).
-        video = await self._reader.load_final_video(generation_id)
+        # Phase 2 — load the promotable final video (read-only, execution plane). Owner-scoped:
+        # a generation the caller does not own reads as absent, so promotion cannot be used to
+        # reach another creator's output (α9.7 / AP9).
+        video = await self._reader.load_final_video(
+            generation_id=generation_id, tenant_id=tenant_id, owner_user_id=owner_user_id
+        )
         if video is None:
             raise NotFoundError(
                 "generation not found",

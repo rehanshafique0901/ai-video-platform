@@ -27,6 +27,8 @@ provider pre-flight):
    21. publish_thumbnail         (α9.3 — optional best-effort thumbnail carried to the destination)
    22. multi_destination_publish (α9.4 — one export fanned out to N connected accounts)
    23. notification_email        (α9.5 — out-of-band email delivery worker + read-model sanitisation)
+   24. tiktok_destination        (α9.6 — second destination adapter through the real publish runtime)
+   25. generation_ingress        (α9.7 — owner-scoped generation queue, worker, reaper, GEN-1)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -827,6 +829,26 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/publishing/test_tiktok_destination_runtime.py",
+            ],
+            requires_db=True,
+        ),
+        # α9.7 — generation ingress against the live DB: the 0016 columns and indexes, the
+        # GEN-1 boundary (begin() adopts an ingress row without overwriting an ingress-owned
+        # column), owner-scoped reads including the invisibility and non-promotability of
+        # legacy ownerless rows, the F3 authorisation fix, DB-enforced create idempotency,
+        # keyset paging, queued-only cancel, and the reaper terminalising an abandoned run
+        # without ever re-running it. The provider pipeline is stubbed; every persistence
+        # boundary the slice introduces is real, which is where its guarantees live.
+        Stage(
+            number=25,
+            title="generation ingress integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/api/test_generation_ingress.py",
             ],
             requires_db=True,
         ),

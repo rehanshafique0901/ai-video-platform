@@ -6,6 +6,71 @@
 
 ## [Unreleased]
 
+### α9.7 — Generation Ingress (`0.4.50-phase3-alpha9.7`, 2026-07-29)
+
+**Creators can finally ask the platform to make a video.** Until now the core capability —
+`GenerateVideo` — could only be invoked from a script: there was no HTTP surface, no queue, no
+worker, and `generations` rows carried no owner. This slice closes that gap and, in doing so,
+resolves the ownership deferral recorded by ADR-0046 Q1 and α8.8 AP9. Governed by
+[ADR-0052](docs/decisions/ADR-0052-generation-ingress-ownership-execution-and-read-contract.md),
+[`PHASE3_ALPHA9_7_GROUNDING.md`](docs/engineering/PHASE3_ALPHA9_7_GROUNDING.md) and
+[`PHASE3_ALPHA9_7_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_7_PREFLIGHT.md).
+**Includes migration `0016` — the first since α9.0, and a deliberate architectural evolution
+rather than something engineered around.**
+
+#### Added
+- **`POST /api/v1/generations`** — queue a generation. Returns in milliseconds with a `queued`
+  row (`201`, or `200` replaying a client `idempotency_key`); a run takes minutes, so execution
+  belongs to the worker.
+- **`GET /api/v1/generations/{id}` and `GET /api/v1/generations`** — owner-scoped polling and a
+  keyset-paginated list, newest first, with an optional `status` filter.
+- **`POST /api/v1/generations/{id}/cancel`** — cancel a generation that has not been claimed yet.
+- **`GenerationWorker`** — `run_once()` reaps abandoned runs, then claims and executes queued
+  ones under a `generation:<id>` lease renewed by heartbeat for as long as the run lasts.
+- **Migration `0016`** — `generations` gains `tenant_id`, `owner_user_id`, `idempotency_key` and
+  a `request` JSONB payload, plus an owner-scoped keyset index and a partial unique index backing
+  create idempotency.
+- **CI Stage 25** — `generation ingress integration`, exercising every persistence boundary the
+  slice introduces against the live database.
+
+#### Behaviour
+- **One execution is one external spend opportunity.** Job-level retries do not exist:
+  `max_attempts = 1` is structural, because claiming is a `queued → planning` CAS and nothing
+  ever writes a row back to `queued`. A run abandoned by a crashed worker is *terminalised* to
+  `failed` by the reaper — visible, diagnosable, and never silently repeated.
+- **Idempotency is explicit creator intent, never inferred from content.** Asking twice for the
+  same prompt is a legitimate second take; only a supplied `idempotency_key` collapses two
+  requests into one. This is the deliberate opposite of publishing's natural-key dedup (PUB-7),
+  which can rely on a natural key because publishing the same artefact twice is meaningless.
+- **Ingress owns identity; the execution runtime owns execution state (GEN-1).**
+  `IExecutionRuntimeStore.begin()` became an idempotent *state-initialisation* operation: it
+  creates the row when absent (the demo/test path is unchanged), initialises runtime-owned fields
+  when ingress already created one, and can never overwrite ownership, the persisted request, the
+  idempotency key, or `created_at`. The runtime remains entirely ownership-blind.
+- **The read contract is curated, not a row dump.** `provenance`, resolver internals, adapter and
+  provider identities, component versions, and `final_video_asset_id` stay internal — the ADR-0051
+  read-model hygiene lesson applied to a second bounded context. A regression test pins the exact
+  public field set.
+
+#### Fixed
+- **Promotion authorises the generation, not only the project.** `PromoteGenerationAssets`
+  previously loaded a generation by id alone, so anyone who learned an id could promote another
+  creator's output into their own project — harmless while ids were server-internal, exploitable
+  the moment ingress made them client-visible. `IGenerationReader` is now owner-scoped, and
+  promotion requires both project membership **and** generation ownership.
+
+#### Known limitations (accepted)
+- **Legacy ownerless generations are invisible and non-promotable.** Rows written before this
+  slice have no owner, and ADR-0052 forbids inferring one — no heuristic, no attribution, no
+  backfill. The rows remain intact for administrative inspection outside `/api/v1`; owner-scoped
+  reads are the sole supported read model.
+- **Cancellation is queued-only.** Mid-run cancellation requires the pipeline to poll a flag
+  between shots and is a deliberate future capability; a claimed generation returns `409` rather
+  than reporting a stop that did not happen.
+- **v1 identity is a seed plus a global style.** Characters, locations, props and reference images
+  belong to Identity-Runtime authoring, a separate slice. The request codec rejects unknown keys
+  so that slice extends the payload additively.
+
 ### α9.6 — TikTok Destination Adapter (`0.4.49-phase3-alpha9.6`, 2026-07-29)
 
 **The platform's second real publish destination.** TikTok joins YouTube behind the same frozen
