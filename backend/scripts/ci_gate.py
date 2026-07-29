@@ -852,6 +852,25 @@ def _stages() -> list[Stage]:
             ],
             requires_db=True,
         ),
+        # α9.8 — the worker runtime host against the live DB. This is the first stage in which
+        # background work executes without a test calling ``run_once()``: a real WorkerHost
+        # schedules real workers, drains a real queued generation and a real outbox event, honours
+        # a mid-flight stop, and — across two connections — proves the ADR-0053 D4 replica-safety
+        # claim rather than asserting it. The provider pipeline is stubbed as in Stage 25; the
+        # scheduling, drain, and shutdown paths are production code, unmodified.
+        Stage(
+            number=26,
+            title="worker runtime host integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/runtime/test_worker_host.py",
+            ],
+            requires_db=True,
+        ),
     ]
 
 

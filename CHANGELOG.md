@@ -6,6 +6,68 @@
 
 ## [Unreleased]
 
+### α9.8 — Worker Runtime Host (`0.4.51-phase3-alpha9.8`, 2026-07-29)
+
+**No background work has ever run in production, and this slice is why it now does.** Across α8.1
+through α9.7 the platform accumulated seven poll workers — relay, generation, render, export,
+enrichment, publish, email — every one of them a `run_once()` library primitive with **zero
+production callers**. The outbox never relayed, so notifications and analytics were dormant behind
+a working fan-out. No video ever rendered or exported. No publish ever left the queue. Each
+capability was correct and tested; nothing turned the crank. Governed by
+[ADR-0053](docs/decisions/ADR-0053-worker-runtime-host.md) and
+[`PHASE3_ALPHA9_8_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_8_PREFLIGHT.md).
+
+#### Added
+- **`app/runtime/`** — a delivery layer peer to `app/api/`. The API turns HTTP requests into
+  application calls; the runtime turns elapsed time into them. An import-linter contract pins the
+  direction: nothing may import `app.runtime`.
+- **`WorkerHost`** — supervises one task per worker with per-worker idle and failure backoff,
+  contains exceptions, and drains within bounded budgets on shutdown. It knows nothing about any
+  worker: a pass is an opaque awaitable and its result an opaque object.
+- **`worker_registry`** — the single type-aware component, holding the seven specs, the selector,
+  and the `found_work` predicate for each real result type.
+- **`scripts/run_worker.py`** — the worker entrypoint. `--workers` selects a subset, so splitting a
+  worker onto its own nodes is a deployment change rather than a code change.
+- **CI Stage 26** — `worker runtime host integration`: the first test in the repository where
+  background work executes **without a test calling `run_once()`**, including two hosts contending
+  over one queue to demonstrate ADR-0053 D4 replica safety rather than assert it.
+
+#### Behaviour
+- **The worker contract (ADR-0053 invariant 2).** A worker processes available work; scheduling,
+  supervision, restart, and shutdown coordination belong exclusively to the host. A worker that
+  raises has not violated its contract — which matters, because four of the seven did exactly that.
+- **HOST-1 — registration is immutable for the process lifetime.** The worker set is computed at
+  startup and never re-read; configuration changes take effect on the next process start, as they
+  already do for the API.
+- **HOST-2 — a worker's failure never suppresses another's scheduling.** Each worker gets its own
+  task, backoff state, and drain budget. Nothing awaits across workers.
+- **Shutdown stops claiming immediately, then drains what is in flight.** An idling worker wakes at
+  once rather than serving out its ceiling. A pass that outlives its budget is cancelled, logged,
+  and reported — the process exits `75` (`EX_TEMPFAIL`) so an abandoned generation is visible to the
+  orchestrator instead of looking like a clean shutdown.
+- **A disabled worker is not registered.** `email_delivery_enabled=false` removes the worker rather
+  than leaving it to no-op each pass, so its logs, liveness marker, and counters cannot lie about it.
+- **An unknown `--workers` name fails startup.** The alternative failure mode is the one this whole
+  slice exists to end: a process that boots healthy while a capability silently never runs.
+
+#### Changed
+- **Per-item isolation in render, export, enrichment, and publish.** All four let an unclassified
+  exception escape `run_once()`, discarding every item behind the failing one. Each now isolates
+  per item, matching what relay, email, and generation already did. PUB-11 is unaffected — this
+  changes nothing about how an ambiguous upload outcome is classified.
+- **Batch size is now chosen by shutdown semantics, not throughput.** Render, export, enrichment,
+  publish, and generation default to one item per pass: where a work item is far longer than the
+  queue scan that finds it, a multi-item pass would keep claiming work long after the host asked it
+  to stop. Relay and email keep batching, because their items are sub-second and the scan dominates.
+  Throughput comes from replicas.
+
+#### Accepted limitations
+- **A generation in flight during a deploy can still be lost** if the drain budget is exceeded or
+  the orchestrator's grace period is shorter than it. GEN-2 forbids retrying it. Bounded, logged,
+  and materially improved by one in-flight generation per host instead of five.
+- **No container artifacts.** Deploying the worker process is a follow-up; the entrypoint,
+  selector, and liveness markers it will need all exist.
+
 ### α9.7 — Generation Ingress (`0.4.50-phase3-alpha9.7`, 2026-07-29)
 
 **Creators can finally ask the platform to make a video.** Until now the core capability —

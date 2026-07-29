@@ -487,3 +487,22 @@ source_modules = [
 ]
 forbidden_modules = ["aiosmtplib"]
 allow_indirect_imports = "True"
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α9.8 (ADR-0053 PF1) — the worker runtime is an entrypoint, never a dependency.
+# ``app.runtime`` is a delivery layer peer to ``app.api``: the API turns HTTP requests into
+# application calls, the runtime turns elapsed time into them. Both consume the layers below and
+# are consumed by nothing. This pins the direction so no use case, adapter, or endpoint can reach
+# into the scheduler — a worker must never be able to enqueue itself, inspect the host, or make
+# business behaviour depend on which process it happens to be running in (ADR-0053 invariant 2:
+# the worker owns business logic, the host owns the execution lifecycle).
+name = "The worker runtime is an entrypoint, never a dependency (ADR-0053)"
+type = "forbidden"
+source_modules = [
+    "app.domain",
+    "app.application",
+    "app.infrastructure",
+    "app.api",
+    "app.core",
+]
+forbidden_modules = ["app.runtime"]

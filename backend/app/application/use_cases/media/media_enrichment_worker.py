@@ -17,12 +17,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import structlog
+
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.media.enrich_generated_media import (
     CURRENT_ENRICHMENT_VERSION,
     EnrichGeneratedMedia,
     EnrichGeneratedMediaResult,
 )
+
+_LOGGER = structlog.get_logger(__name__)
 
 _DEFAULT_BATCH = 10
 
@@ -58,5 +62,13 @@ class MediaEnrichmentWorker:
 
         outcomes: list[EnrichGeneratedMediaResult] = []
         for asset in assets:
-            outcomes.append(await self._enrich.execute(asset=asset))
+            try:
+                outcomes.append(await self._enrich.execute(asset=asset))
+            except Exception:
+                # α9.8 PF8: the use case already isolates per *enricher*; this isolates per *asset*
+                # so a failure outside the enricher loop (lease, materialisation) cannot discard the
+                # batch. Enrichment is idempotent under its version marker, so a later pass retries.
+                _LOGGER.warning(
+                    "media.enrichment_error", media_asset_id=str(asset.id), exc_info=True
+                )
         return MediaEnrichmentPollResult(scanned=len(assets), outcomes=outcomes)

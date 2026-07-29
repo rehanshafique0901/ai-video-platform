@@ -15,11 +15,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import structlog
+
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.render.process_render_job import (
     ProcessRenderJob,
     ProcessRenderJobResult,
 )
+
+_LOGGER = structlog.get_logger(__name__)
 
 _DEFAULT_BATCH = 10
 
@@ -53,7 +57,13 @@ class RenderWorker:
 
         outcomes: list[ProcessRenderJobResult] = []
         for job in jobs:
-            outcomes.append(
-                await self._process.process(project_id=job.project_id, render_job_id=job.id)
-            )
+            try:
+                outcomes.append(
+                    await self._process.process(project_id=job.project_id, render_job_id=job.id)
+                )
+            except Exception:
+                # α9.8 PF8: one unclassified failure (ffmpeg, storage) must not discard the rest of
+                # the batch. The job keeps its own state — its lease expires and it is retried on a
+                # later pass — so isolation here loses nothing but the batch-mates' progress.
+                _LOGGER.warning("render.process_error", render_job_id=str(job.id), exc_info=True)
         return RenderPollResult(scanned=len(jobs), outcomes=outcomes)
