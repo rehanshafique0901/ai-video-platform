@@ -15,11 +15,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import structlog
+
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.export.process_export_job import (
     ProcessExportJob,
     ProcessExportJobResult,
 )
+
+_LOGGER = structlog.get_logger(__name__)
 
 _DEFAULT_BATCH = 10
 
@@ -53,9 +57,18 @@ class ExportWorker:
 
         outcomes: list[ProcessExportJobResult] = []
         for claim in claims:
-            outcomes.append(
-                await self._process.process(
-                    project_id=claim.project_id, export_job_id=claim.export_job_id
+            try:
+                outcomes.append(
+                    await self._process.process(
+                        project_id=claim.project_id, export_job_id=claim.export_job_id
+                    )
                 )
-            )
+            except Exception:
+                # α9.8 PF8: isolate one unclassified failure (ffmpeg, storage) so it cannot discard
+                # the batch. The job's lease expires and a later pass retries it.
+                _LOGGER.warning(
+                    "export.process_error",
+                    export_job_id=str(claim.export_job_id),
+                    exc_info=True,
+                )
         return ExportPollResult(scanned=len(claims), outcomes=outcomes)

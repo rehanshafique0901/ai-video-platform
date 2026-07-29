@@ -17,11 +17,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+import structlog
+
 from app.application.interfaces.unit_of_work import IUnitOfWork
 from app.application.use_cases.publishing.process_publish_job import (
     ProcessPublishJob,
     ProcessPublishJobResult,
 )
+
+_LOGGER = structlog.get_logger(__name__)
 
 _DEFAULT_BATCH = 10
 
@@ -58,9 +62,20 @@ class PublishWorker:
 
         outcomes: list[ProcessPublishJobResult] = []
         for claim in claims:
-            outcomes.append(
-                await self._process.process(
-                    project_id=claim.project_id, publish_job_id=claim.publish_job_id
+            try:
+                outcomes.append(
+                    await self._process.process(
+                        project_id=claim.project_id, publish_job_id=claim.publish_job_id
+                    )
                 )
-            )
+            except Exception:
+                # α9.8 PF8: isolate one unclassified failure (credentials, storage, destination
+                # HTTP) so it cannot discard the batch. PUB-11 is unaffected — this changes nothing
+                # about how an ambiguous upload outcome is classified, only whether the *other*
+                # jobs in the batch get their turn.
+                _LOGGER.warning(
+                    "publish.process_error",
+                    publish_job_id=str(claim.publish_job_id),
+                    exc_info=True,
+                )
         return PublishPollResult(scanned=len(claims), outcomes=outcomes)

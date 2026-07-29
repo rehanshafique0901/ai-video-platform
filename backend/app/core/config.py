@@ -251,7 +251,11 @@ class Settings(BaseSettings):
         description="Parent dir for per-job render temp workspaces (None = system tmp).",
     )
     render_batch_size: int = Field(
-        default=10,
+        # α9.8 PF4 — batch size is chosen by shutdown semantics, not throughput. A render is far
+        # longer than the queue scan that finds it, so a multi-item pass would keep claiming new
+        # work long after the host asked it to stop. One item per pass is what makes the host's
+        # "stop claiming immediately" promise honest. Throughput comes from replicas (D4).
+        default=1,
         description="Max queued render jobs a single RenderWorker.run_once() claims.",
         gt=0,
     )
@@ -261,7 +265,7 @@ class Settings(BaseSettings):
     # outlive the run (renewed by heartbeat) and an abandoned run is terminalised
     # rather than retried. Every value is defaulted: no configuration is required.
     generation_worker_batch_size: int = Field(
-        default=5,
+        default=1,  # α9.8 PF4 — see render_batch_size. Most acute here: GEN-2 forbids retrying.
         description="Max queued generations a single GenerationWorker.run_once() claims.",
         gt=0,
     )
@@ -293,7 +297,7 @@ class Settings(BaseSettings):
         ge=0,
     )
     enrichment_batch_size: int = Field(
-        default=10,
+        default=1,  # α9.8 PF4 — see render_batch_size.
         description="Max generated videos a single MediaEnrichmentWorker.run_once() claims.",
         gt=0,
     )
@@ -324,7 +328,7 @@ class Settings(BaseSettings):
     # The export worker transcodes a completed render's master into a delivery encoding via
     # IExporter (FFmpeg adapter, reusing the render binary + workspace + timeout config).
     export_batch_size: int = Field(
-        default=10,
+        default=1,  # α9.8 PF4 — see render_batch_size.
         description="Max queued export jobs a single ExportWorker.run_once() claims.",
         gt=0,
     )
@@ -333,7 +337,7 @@ class Settings(BaseSettings):
     # The publish worker uploads a finished export-delivery MediaAsset to a connected
     # destination via IDestinationPublisher (Mock in α8.6b; YouTube in α8.6c).
     publish_batch_size: int = Field(
-        default=10,
+        default=1,  # α9.8 PF4 — see render_batch_size.
         description="Max due queued publish jobs a single PublishWorker.run_once() claims.",
         gt=0,
     )
@@ -528,8 +532,12 @@ class Settings(BaseSettings):
         description="Use implicit TLS (SMTPS, typically port 465). Otherwise STARTTLS is used.",
     )
     email_batch_size: int = Field(
-        default=20,
-        description="Max deliverable notifications one NotificationEmailWorker.run_once() claims.",
+        default=1,
+        description=(
+            "Max deliverable notifications one NotificationEmailWorker.run_once() claims. "
+            "One, per PF4: an SMTP send is bounded by email_send_timeout_seconds and is therefore "
+            "materially longer than a queue scan, so a batch cannot finish inside a drain budget."
+        ),
         gt=0,
     )
     email_send_timeout_seconds: float = Field(
@@ -555,6 +563,63 @@ class Settings(BaseSettings):
     email_delivery_lease_seconds: int = Field(
         default=120,
         description="Per-notification email delivery lease TTL (one sender per row at a time).",
+        gt=0,
+    )
+
+    # --- Worker runtime host (α9.8, ADR-0053) ---------------------------------
+    # The process that actually runs the seven poll workers. Every value is defaulted: a worker
+    # process boots with no configuration beyond what the API already needs.
+    #
+    # Each worker gets a base poll interval, an idle ceiling it backs off toward when it finds
+    # nothing, and a drain budget bounding how long shutdown waits for a pass already in flight.
+    # The budgets are sized by *work-item duration*, not importance: relay and email items are
+    # sub-second, a publish upload is a network round trip, and a generation is minutes of paid
+    # external work that GEN-2 forbids re-running — so it gets by far the largest budget.
+    worker_poll_interval_seconds: float = Field(
+        default=1.0,
+        description="Base interval between passes for every worker unless overridden below.",
+        gt=0,
+    )
+    worker_idle_ceiling_seconds: float = Field(
+        default=30.0,
+        description="Backoff ceiling a worker doubles toward while it keeps finding no work.",
+        gt=0,
+    )
+    worker_liveness_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory for per-worker <name>.alive touch files (ADR-0053 D5). "
+            "None disables liveness markers."
+        ),
+    )
+    worker_drain_budget_seconds: float = Field(
+        default=60.0,
+        description=(
+            "Default shutdown grace for a pass already in flight (relay, email). Exceeds "
+            "email_send_timeout_seconds so a single in-flight send finishes and is stamped rather "
+            "than being cut and redelivered on the next start (ADR-0051 duplicate window)."
+        ),
+        gt=0,
+    )
+    worker_generation_drain_budget_seconds: float = Field(
+        default=900.0,
+        description=(
+            "Shutdown grace for an in-flight generation. Large by design: GEN-2 forbids retrying "
+            "an abandoned run, so cutting one short discards spend the creator has already paid."
+        ),
+        gt=0,
+    )
+    worker_publish_drain_budget_seconds: float = Field(
+        default=180.0,
+        description=(
+            "Shutdown grace for an in-flight publish. Sized to let an upload finish rather than "
+            "leave PUB-11's ambiguous-outcome window open across a deploy."
+        ),
+        gt=0,
+    )
+    worker_media_drain_budget_seconds: float = Field(
+        default=300.0,
+        description="Shutdown grace for in-flight transcode/export/enrichment (ffmpeg) passes.",
         gt=0,
     )
 

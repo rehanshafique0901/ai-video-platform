@@ -158,3 +158,35 @@ def test_settings_rejects_non_positive_ttls(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("JWT_ACCESS_TTL_SECONDS", "0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+def test_shipped_worker_defaults_satisfy_the_pf4_shutdown_principle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """α9.8 PF4 — batch size is chosen by shutdown semantics, not throughput.
+
+    A pass must be able to finish inside its drain budget, or the host will routinely cut it off
+    mid-batch on every deploy. For email that is not merely untidy: an interrupted pass has sent
+    messages it never got to stamp, so ADR-0051's rare-duplicate window becomes an ordinary
+    consequence of shipping. The shipped defaults are the ones that have to hold, so they are what
+    this asserts.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h:5432/d")
+    monkeypatch.setenv("JWT_SECRET", _VALID_JWT_SECRET)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    # Email is the only worker that both batches and has a bounded per-item cost, so its
+    # worst-case pass is computable — and must fit in the budget it is actually given.
+    worst_case_email_pass = s.email_batch_size * s.email_send_timeout_seconds
+    assert worst_case_email_pass <= s.worker_drain_budget_seconds, (
+        f"an email pass can take {worst_case_email_pass}s but is drained after "
+        f"{s.worker_drain_budget_seconds}s: sends would be cut off and redelivered every deploy"
+    )
+
+    # The long-running workers claim one item per pass for the same reason (PF4).
+    assert s.generation_worker_batch_size == 1
+    assert s.render_batch_size == 1
+    assert s.export_batch_size == 1
+    assert s.enrichment_batch_size == 1
+    assert s.publish_batch_size == 1
