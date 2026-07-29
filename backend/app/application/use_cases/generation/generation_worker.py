@@ -177,15 +177,20 @@ class GenerationWorker:
         task = asyncio.create_task(self._runner.run(request))
         try:
             return await self._heartbeat_until_done(task, lease)
-        except asyncio.CancelledError:
-            # Shutdown reached us (the host's drain budget expired). Stopping the pipeline is not a
-            # retry and does not refund the spend: the row stays non-terminal and the reaper
-            # terminalises it as failed on the next start, exactly as after a crash. GEN-2 holds —
-            # this execution consumed its one spend opportunity and gets no second one.
-            task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
-            raise
+        finally:
+            # There are two ways to leave early and one obligation. Shutdown cancels us when the
+            # host's drain budget expires; a database hiccup during renewal raises. Either way
+            # ``asyncio.wait`` has not touched the pipeline, so leaving it detaches a task that
+            # keeps calling paid providers for a generation the caller is about to record as
+            # failed, and that outlives the engine it writes through.
+            #
+            # Stopping it is not a retry and refunds nothing — the row is terminalised here or by
+            # the reaper on the next start, exactly as after a crash — so GEN-2's one execution,
+            # one spend opportunity still holds.
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
 
     async def _heartbeat_until_done(
         self, task: asyncio.Task[GenerateVideoResult], lease: Lease

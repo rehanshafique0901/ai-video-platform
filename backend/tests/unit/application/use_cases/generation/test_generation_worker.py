@@ -16,6 +16,7 @@ from typing import Self
 import pytest
 
 from app.application.interfaces.generation_runner import IGenerationRunner
+from app.application.interfaces.locks import Lease
 from app.application.use_cases.generation.generation_worker import (
     LOST_WORKER_REASON,
     GenerationWorker,
@@ -373,6 +374,42 @@ async def test_cancelling_a_pass_stops_the_pipeline_instead_of_detaching_it() ->
     await asyncio.sleep(0)
     assert pending == [], f"pipeline left running after cancellation: {pending}"
     assert still_running_after_cancel is False
+
+
+async def test_a_heartbeat_failure_stops_the_pipeline_instead_of_detaching_it() -> None:
+    """A database hiccup during renewal must not leave the pipeline running unowned.
+
+    The renewal call raising is the second way out of the heartbeat, and it is the quieter one:
+    the worker records the generation as failed and moves on while the pipeline carries on
+    spending against providers, then writes through an engine shutdown is about to dispose — for a
+    row that already says it failed. Cancelling is not a retry, so GEN-2 is untouched.
+    """
+    store = FakeGenerationJobStore()
+    store.seed()
+    started = asyncio.Event()
+    ran_past_the_failure = False
+
+    class _SlowRunner(IGenerationRunner):
+        async def run(self, request: GenerateVideoRequest) -> GenerateVideoResult:
+            nonlocal ran_past_the_failure
+            started.set()
+            await asyncio.sleep(0.5)
+            ran_past_the_failure = True
+            raise AssertionError("unreachable")
+
+    class _BrokenLocks(FakeLockManager):
+        async def renew(self, lease: Lease, *, lease_for: timedelta) -> Lease | None:
+            raise RuntimeError("database connection reset during renewal")
+
+    worker, _ = _worker(store, _SlowRunner(), _BrokenLocks(), heartbeat=timedelta(seconds=0.01))
+    result = await worker.run_once()
+
+    leaked = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    assert leaked == [], f"pipeline left running after the heartbeat failed: {leaked}"
+    assert [o.status for o in result.outcomes] == ["failed"]
+
+    await asyncio.sleep(0.05)
+    assert ran_past_the_failure is False, "the pipeline kept spending after the run was recorded"
 
 
 async def test_batch_size_bounds_the_scan() -> None:

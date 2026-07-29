@@ -536,6 +536,42 @@ async def test_a_raising_found_work_is_a_contained_failure_not_a_dead_host() -> 
     assert reports["healthy"].failures == 0
 
 
+async def test_a_pass_that_cannot_even_be_built_is_a_contained_failure() -> None:
+    """A container factory that raises must cost one pass, not the worker.
+
+    Every real spec is ``lambda: container.get_x().run_once()``, so calling ``run_pass`` runs a
+    factory synchronously before any coroutine exists. Outside the contained region that raise
+    killed the supervision task, and because restarts carry no delay it burned the whole restart
+    bound in microseconds and escalated the worker — one transient hiccup permanently removing a
+    capability for the life of the process, which is the failure ADR-0053 was written to end.
+    """
+    factory_calls: list[int] = []
+    healthy_passes: list[int] = []
+
+    def _broken_factory() -> Coroutine[Any, Any, object]:
+        factory_calls.append(1)
+        raise RuntimeError("transient container/factory failure")
+
+    async def _healthy() -> object:
+        healthy_passes.append(1)
+        return None
+
+    host = WorkerHost(
+        [_spec("generation", _broken_factory), _spec("healthy", _healthy)],
+        failure_backoff_cap=_FAST,
+    )
+
+    async with _driving(_stop_after(host, healthy_passes, 10)):
+        result = await asyncio.wait_for(host.run(), timeout=5)
+
+    reports = {r.name: r for r in result.workers}
+    assert reports["generation"].escalated is False, "a transient factory error retired the worker"
+    assert reports["generation"].restarts == 0, "a failed pass must not consume a restart"
+    assert reports["generation"].failures > 1, "the worker stopped retrying after the first failure"
+    assert len(factory_calls) > 1, "the worker never attempted another pass"
+    assert len(healthy_passes) >= 10, "a sibling's factory failure suppressed this worker (HOST-2)"
+
+
 async def test_a_raising_found_work_backs_off_instead_of_hot_looping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -313,7 +313,20 @@ class WorkerHost:
 
     async def _run_one_pass(self, spec: WorkerSpec[Any]) -> _PassOutcome:
         """Run one pass, applying the drain budget only if stop arrives while it is in flight."""
-        task = asyncio.create_task(spec.run_pass(), name=f"pass:{spec.name}")
+        try:
+            pass_coro = spec.run_pass()
+        except Exception:
+            # Building the pass *is* part of the pass. Every real spec is
+            # ``lambda: container.get_x().run_once()``, so this call runs a container factory
+            # synchronously; a transient failure there is an ordinary failed pass. Left outside
+            # this block it would kill the supervision task instead, and — with no delay between
+            # restarts — burn the restart bound in microseconds and retire the worker for the rest
+            # of the process. That is precisely the silent, permanent capability loss ADR-0053
+            # exists to end, so it must be tier one.
+            _LOGGER.error("worker.pass_build_failed", worker=spec.name, exc_info=True)
+            return _PassOutcome(found_work=False, failed=True, abandoned=False)
+
+        task = asyncio.create_task(pass_coro, name=f"pass:{spec.name}")
         stop_watch = asyncio.create_task(self._stopping.wait(), name=f"stop-watch:{spec.name}")
         try:
             await asyncio.wait({task, stop_watch}, return_when=asyncio.FIRST_COMPLETED)

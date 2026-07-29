@@ -44,7 +44,17 @@ capability was correct and tested; nothing turned the crank. Governed by
 - **Shutdown stops claiming immediately, then drains what is in flight.** An idling worker wakes at
   once rather than serving out its ceiling. A pass that outlives its budget is cancelled, logged,
   and reported — the process exits `75` (`EX_TEMPFAIL`) so an abandoned generation is visible to the
-  orchestrator instead of looking like a clean shutdown.
+  orchestrator instead of looking like a clean shutdown. Cancelling a generation pass now stops the
+  pipeline rather than only the wait for it: the heartbeat supervises the run as a separate task,
+  and a detached one would keep calling paid providers, and writing through a disposed engine, for
+  a run the host had already given up on.
+- **Failure is handled in two tiers (ADR-0053 D5).** A pass that fails — including one whose
+  container factory raises before a coroutine exists, or whose `found_work` predicate breaks — is
+  logged, counted, and backed off toward a ceiling, leaving the worker registered and polling. A
+  supervision task that dies anyway is *replaced*, and one that cannot be kept alive is *escalated*:
+  logged at critical, flagged in the host result, its liveness marker left to go stale, and the
+  process exits `70` (`EX_SOFTWARE`). Neither tier silences an exception, and neither lets one
+  worker's trouble reach another.
 - **A disabled worker is not registered.** `email_delivery_enabled=false` removes the worker rather
   than leaving it to no-op each pass, so its logs, liveness marker, and counters cannot lie about it.
 - **An unknown `--workers` name fails startup.** The alternative failure mode is the one this whole
@@ -56,10 +66,14 @@ capability was correct and tested; nothing turned the crank. Governed by
   per item, matching what relay, email, and generation already did. PUB-11 is unaffected — this
   changes nothing about how an ambiguous upload outcome is classified.
 - **Batch size is now chosen by shutdown semantics, not throughput.** Render, export, enrichment,
-  publish, and generation default to one item per pass: where a work item is far longer than the
-  queue scan that finds it, a multi-item pass would keep claiming work long after the host asked it
-  to stop. Relay and email keep batching, because their items are sub-second and the scan dominates.
-  Throughput comes from replicas.
+  publish, generation, and email default to one item per pass: where a work item is far longer than
+  the queue scan that finds it, a multi-item pass would keep claiming work long after the host asked
+  it to stop. Email qualifies because an SMTP send is bounded by `email_send_timeout_seconds`, and a
+  batch of them could not finish inside any sane drain budget — so every deploy would cut a pass
+  between sending a message and stamping it, turning ADR-0051's rare-duplicate window into a routine
+  one. The default drain budget now exceeds the send timeout for the same reason. Only the relay
+  still batches, because its items really are sub-second and the scan dominates. Throughput comes
+  from replicas.
 
 #### Accepted limitations
 - **A generation in flight during a deploy can still be lost** if the drain budget is exceeded or

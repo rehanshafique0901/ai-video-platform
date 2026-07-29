@@ -23,10 +23,12 @@ of surfacing as an inexplicable stream of per-pass failures.
 **The Windows Selector loop** — ``psycopg``'s async driver cannot use the default Proactor loop.
 ``run_dev.py`` already solves this; this script mirrors it rather than inventing a second strategy.
 
-Exit codes: ``0`` clean drain, ``1`` startup failure, ``75`` (``EX_TEMPFAIL``) a pass was abandoned
-at its drain budget. The third is separate on purpose — for generation, an abandoned pass is spend a
-creator has already paid for (GEN-2), so a deploy that causes one should be visible in the
-orchestrator rather than indistinguishable from a clean shutdown.
+Exit codes: ``0`` clean drain, ``1`` startup failure, ``70`` (``EX_SOFTWARE``) a worker could not be
+kept alive and was escalated, ``75`` (``EX_TEMPFAIL``) a pass was abandoned at its drain budget. The
+last two are separate on purpose. An abandoned pass is work that will be retried, but for generation
+it is spend a creator has already paid for (GEN-2), so a deploy that causes one should be visible in
+the orchestrator rather than indistinguishable from a clean shutdown. An escalated worker is worse:
+it stopped running and stayed stopped, which ADR-0053 D5 forbids doing quietly.
 """
 
 from __future__ import annotations
