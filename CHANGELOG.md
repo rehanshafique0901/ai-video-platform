@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.5 — Notification Delivery: Email (`0.4.48-phase3-alpha9.5-dev`, 2026-07-29)
+### α9.5 — Notification Delivery: Email (`0.4.48-phase3-alpha9.5`, 2026-07-29)
 
 **Deliver in-app notifications over email — the platform's first outbound external-communication
 channel that is not a publish destination.** A dedicated poll worker drains undelivered notifications
