@@ -349,44 +349,58 @@ async def test_the_host_relays_an_outbox_event_with_no_manual_poll(
 async def test_stop_drains_the_in_flight_item_and_claims_nothing_further(
     bound: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Invariants 4 and 5 against real rows: finish what is started, start nothing new."""
+    """Invariants 4 and 5 against real rows: finish what is started, start nothing new.
+
+    Which of the two queued rows the worker claims is deliberately not asserted. Both are inserted
+    inside this test's single wrapping transaction, and ``generations.created_at`` defaults to
+    ``now()``, which in PostgreSQL is the *transaction* clock — so the two rows share a timestamp
+    and ``ORDER BY created_at, id`` settles the tie on random UUIDs. Production inserts each
+    generation in its own transaction, so FIFO holds there; pinning an order here would only assert
+    a coin flip.
+    """
     tenant_id, owner_user_id = await _seed_owner(bound)
     store = SqlGenerationJobStore(bound)
     create = CreateGeneration(store)
-    first = await create.execute(
-        tenant_id=tenant_id,
-        owner_user_id=owner_user_id,
-        spec=GenerationRequestSpec(prompt="first", seed=1, title="First"),
-    )
-    second = await create.execute(
-        tenant_id=tenant_id,
-        owner_user_id=owner_user_id,
-        spec=GenerationRequestSpec(prompt="second", seed=2, title="Second"),
-    )
+    created = [
+        (
+            await create.execute(
+                tenant_id=tenant_id,
+                owner_user_id=owner_user_id,
+                spec=GenerationRequestSpec(prompt=prompt, seed=seed, title=prompt.title()),
+            )
+        ).generation.id
+        for prompt, seed in (("first", 1), ("second", 2))
+    ]
 
     runner = _StubRunner(bound)
-    runner.gate = asyncio.Event()  # hold the first generation mid-run
+    runner.gate = asyncio.Event()  # hold whichever generation is claimed mid-run
     host = WorkerHost([_generation_spec(bound, runner)])
 
     run = asyncio.create_task(host.run())
     await asyncio.wait_for(runner.started.wait(), timeout=_TIMEOUT)
 
     host.request_stop()
-    await asyncio.sleep(0.05)  # a host that ignored the stop would claim the second here
+    await asyncio.sleep(0.05)  # a host that ignored the stop would claim the other one here
     runner.gate.set()
     result = await asyncio.wait_for(run, timeout=_TIMEOUT)
 
     assert result.abandoned_any is False, "an item inside its budget was cut short"
-    assert runner.runs == [first.generation.id], "the host claimed work after being told to stop"
+    assert len(runner.runs) == 1, "the host claimed work after being told to stop"
 
-    first_view = await GetGeneration(store).execute(
-        tenant_id=tenant_id, owner_user_id=owner_user_id, generation_id=first.generation.id
-    )
-    second_view = await GetGeneration(store).execute(
-        tenant_id=tenant_id, owner_user_id=owner_user_id, generation_id=second.generation.id
-    )
-    assert first_view.status == ExecutionStatus.COMPLETED.value
-    assert second_view.status == ExecutionStatus.QUEUED.value, "the unclaimed item must survive"
+    claimed = runner.runs[0]
+    untouched = next(g for g in created if g != claimed)
+    statuses = {
+        generation_id: (
+            await GetGeneration(store).execute(
+                tenant_id=tenant_id, owner_user_id=owner_user_id, generation_id=generation_id
+            )
+        ).status
+        for generation_id in (claimed, untouched)
+    }
+    assert (
+        statuses[claimed] == ExecutionStatus.COMPLETED.value
+    ), "the in-flight item was not drained"
+    assert statuses[untouched] == ExecutionStatus.QUEUED.value, "the unclaimed item must survive"
 
 
 # --------------------------------------------------------------------------- #
