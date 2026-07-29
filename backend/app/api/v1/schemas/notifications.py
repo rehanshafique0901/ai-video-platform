@@ -32,6 +32,11 @@ class NotificationPublic(BaseModel):
     ``source_event_id`` is the outbox event that produced the row (provenance, read-only).
     ``archived`` / ``delivered_email_at`` are intentionally not exposed (deferred / later
     slice).
+
+    ``payload`` is the sanitised public payload: reserved ``_``-prefixed bookkeeping keys (e.g. the
+    α9.5 ``_email`` email-delivery retry/terminal state — ADR-0051) are stripped centrally at the
+    repository row→entity boundary, so they can never reach this DTO. That bookkeeping is an
+    implementation detail, never part of the public notification contract.
     """
 
     id: UUID

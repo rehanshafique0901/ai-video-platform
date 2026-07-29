@@ -41,6 +41,10 @@ dependencies = [
     # credentials. Promoted from a transitive dep (pyjwt[crypto]) to a first-class security
     # boundary; import is confined to app/infrastructure/publishing/credentials (import-linter).
     "cryptography>=43.0.0",
+    # Notification delivery — email (α9.5, ADR-0051). Async SMTP transport for the config-gated
+    # SmtpNotifier. Import is confined to app/infrastructure/notifications (import-linter contract);
+    # CI never touches it (the LoggingNotifier mock is wired under the gate).
+    "aiosmtplib>=3.0.0",
 ]
 
 # Two dev groups so CI installs only what it needs.
@@ -450,4 +454,36 @@ forbidden_modules = [
 # publishing domain for repo-port typing) — an indirect chain that is allowed by design, exactly
 # like the execution→media contract above. An AI module that itself imported a Publishing domain /
 # use-case / infrastructure module would be a direct edge and would fail this contract.
+allow_indirect_imports = "True"
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α9.5 (ADR-0051 D4) — notification email adapters are recipient-blind leaves.
+# A notifier adapter is handed a ready ``EmailMessage`` (recipient already resolved by the
+# application) and sends it; it must never reach persistence (repositories / UoW), the use-case
+# layer, or any domain aggregate. It may import only the application-owned ``INotifier`` port +
+# its neutral DTOs. This pins the D4 boundary so a future real transport cannot quietly grow a
+# persistence / orchestration dependency.
+name = "Notification email adapters are recipient-blind leaves (ADR-0051)"
+type = "forbidden"
+source_modules = ["app.infrastructure.notifications"]
+forbidden_modules = [
+    "app.infrastructure.repositories",
+    "app.infrastructure.uow",
+    "app.application.use_cases",
+    "app.domain",
+]
+
+[[tool.importlinter.contracts]]
+# Phase 3 Slice α9.5 (ADR-0051) — the SMTP transport (``aiosmtplib``) is confined to the
+# notifications adapter package, the sole module permitted to talk to an outbound email server.
+# No other layer may import it directly (mirrors the cloud-SDK / encryption confinement contracts).
+name = "SMTP transport is confined to the notifications adapter (ADR-0051)"
+type = "forbidden"
+source_modules = [
+    "app.domain",
+    "app.application",
+    "app.api",
+    "app.core",
+]
+forbidden_modules = ["aiosmtplib"]
 allow_indirect_imports = "True"

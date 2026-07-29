@@ -26,6 +26,7 @@ provider pre-flight):
    20. media_library             (α9.2 — owner-scoped folders + library assets over media)
    21. publish_thumbnail         (α9.3 — optional best-effort thumbnail carried to the destination)
    22. multi_destination_publish (α9.4 — one export fanned out to N connected accounts)
+   23. notification_email        (α9.5 — out-of-band email delivery worker + read-model sanitisation)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -782,6 +783,30 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/infrastructure/publishing/test_multi_destination_publishing.py",
+            ],
+            requires_db=True,
+        ),
+        # Stage 23 (α9.5) — Notification Delivery (Email). Proves the additive, out-of-band email
+        # pipeline (ADR-0051) against a DB at head: the NotificationEmailWorker drains undelivered
+        # rows and, under a per-notification lease, sends via the mock LoggingNotifier and stamps
+        # ``delivered_email_at`` (send-then-stamp) — a delivered row is never re-scanned; a transient
+        # failure records backed-off retry bookkeeping in the reserved ``payload["_email"]`` namespace
+        # and a permanent failure / attempt-ceiling marks it terminal (never re-scanned). Crucially it
+        # asserts the reserved ``_email`` bookkeeping is stripped from every read-model row / API
+        # response (centralised at the repository row→entity boundary). No migration, no relay change.
+        # Per the "each new slice earns its own stage" discipline (Stages 15-22) it gets its own stage.
+        # Each test uses a fresh unique user (immutable-table isolation) / rolls back on teardown, so
+        # the destructive-migration restoration guard is untouched.
+        Stage(
+            number=23,
+            title="notification email delivery integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/notifications/test_email_delivery.py",
             ],
             requires_db=True,
         ),

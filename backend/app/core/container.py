@@ -40,6 +40,7 @@ from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
 from app.application.interfaces.image_generator import IImageGenerator
 from app.application.interfaces.media_downloader import IMediaDownloader
+from app.application.interfaces.notifier import INotifier
 from app.application.interfaces.oauth_state_signer import IOAuthStateSigner
 from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.preview_clipper import IPreviewClipper
@@ -117,8 +118,14 @@ from app.application.use_cases.notifications.mark_all_notifications_read import 
 from app.application.use_cases.notifications.mark_notification_read import (
     MarkNotificationRead,
 )
+from app.application.use_cases.notifications.notification_email_worker import (
+    NotificationEmailWorker,
+)
 from app.application.use_cases.notifications.notification_projection import (
     NotificationProjection,
+)
+from app.application.use_cases.notifications.process_notification_email import (
+    ProcessNotificationEmail,
 )
 from app.application.use_cases.notifications.publish_notification_projection import (
     PublishNotificationProjection,
@@ -217,6 +224,8 @@ from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
 from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
 from app.infrastructure.media import HttpMediaDownloader
+from app.infrastructure.notifications.logging_notifier import LoggingNotifier
+from app.infrastructure.notifications.smtp_notifier import SmtpNotifier
 from app.infrastructure.publisher.in_process_publisher import InProcessPublisher
 from app.infrastructure.publishing.credentials.credential_service import SocialCredentialService
 from app.infrastructure.publishing.credentials.envelope import EnvelopeCipher
@@ -314,6 +323,10 @@ _youtube_client: httpx.AsyncClient | None = None
 # Built lazily over the process-wide provider registry (LLM capability); advisory-only, so it is
 # never a boot dependency. Reset in reset()/shutdown() so tests rebuild it cleanly.
 _publish_metadata_generator: IPublishMetadataGenerator | None = None
+# α9.5 (ADR-0051): the outbound email notifier behind the application-owned INotifier port. Mock-first
+# + fail-soft — the LoggingNotifier is wired unless SMTP is configured, so email delivery is never a
+# boot dependency. Reset in reset()/shutdown() so tests rebuild it cleanly.
+_notifier: INotifier | None = None
 # α8.3: settings retained for the completion engine's lease owner + duration.
 _settings: Settings | None = None
 
@@ -463,7 +476,7 @@ async def shutdown() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
-    global _destination_registry, _youtube_client, _publish_metadata_generator
+    global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -506,6 +519,7 @@ async def shutdown() -> None:
     _destination_registry = None
     _youtube_client = None
     _publish_metadata_generator = None
+    _notifier = None
     _settings = None
 
 
@@ -519,7 +533,7 @@ def reset() -> None:
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
-    global _destination_registry, _youtube_client, _publish_metadata_generator
+    global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
     _settings = None
     _engine = None
     _session_factory = None
@@ -558,6 +572,7 @@ def reset() -> None:
     _destination_registry = None
     _youtube_client = None
     _publish_metadata_generator = None
+    _notifier = None
 
 
 def _require_init() -> None:
@@ -1931,4 +1946,68 @@ def get_publish_worker() -> PublishWorker:
         uow=get_unit_of_work(),
         process=get_process_publish_job_use_case(),
         batch_size=settings.publish_batch_size,
+    )
+
+
+# ---------------------------------------------------------------------
+# Use-case factories (Slice α9.5 — Notification delivery: email)
+# ---------------------------------------------------------------------
+
+
+def _get_notifier() -> INotifier:
+    """The outbound email notifier behind the application-owned ``INotifier`` port (α9.5, ADR-0051).
+
+    MOCK-FIRST + FAIL-SOFT (D5): the deterministic ``LoggingNotifier`` is wired unless a real SMTP
+    transport is fully configured (host + from-address), so email delivery is never a boot gate and
+    the CI gate is fully deterministic. Configuration-blind: the SMTP settings are resolved here at
+    the composition root and injected; the adapter never reads ``Settings`` (W8.1.1).
+    """
+    global _notifier
+    _require_init()
+    if _notifier is None:
+        settings = _get_settings()
+        if settings.email_smtp_host and settings.email_from_address:
+            _notifier = SmtpNotifier(
+                host=settings.email_smtp_host,
+                port=settings.email_smtp_port,
+                from_address=settings.email_from_address,
+                username=settings.email_smtp_username,
+                password=(
+                    settings.email_smtp_password.get_secret_value()
+                    if settings.email_smtp_password is not None
+                    else None
+                ),
+                timeout_seconds=settings.email_send_timeout_seconds,
+                use_tls=settings.email_smtp_use_tls,
+            )
+        else:
+            _notifier = LoggingNotifier()
+    return _notifier
+
+
+def get_process_notification_email_use_case() -> ProcessNotificationEmail:
+    """Factory: the α9.5 single-notification email delivery use case (fresh UoW + notifier)."""
+    settings = _get_settings()
+    return ProcessNotificationEmail(
+        uow=get_unit_of_work(),
+        notifier=_get_notifier(),
+        max_attempts=settings.email_max_attempts,
+        backoff_base_seconds=settings.email_backoff_base_seconds,
+        backoff_cap_seconds=settings.email_backoff_cap_seconds,
+        lease=timedelta(seconds=settings.email_delivery_lease_seconds),
+    )
+
+
+def get_notification_email_worker() -> NotificationEmailWorker:
+    """Factory: the α9.5 email poll ingress (``run_once`` drains deliverable notification emails).
+
+    A dedicated poller (ADR-0051 D2-C) — email is an out-of-band external effect, off the relay
+    fan-out (which owns only the in-app projection write). Downstream-only: reads ``notifications``
+    and delegates; never orchestrates or mutates publish/export/render state.
+    """
+    settings = _get_settings()
+    return NotificationEmailWorker(
+        uow=get_unit_of_work(),
+        process=get_process_notification_email_use_case(),
+        batch_size=settings.email_batch_size,
     )

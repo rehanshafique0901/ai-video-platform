@@ -398,6 +398,72 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- Notification delivery: email (α9.5, ADR-0051) -----------------------
+    # A dedicated poll worker (NotificationEmailWorker) drains undelivered notifications and sends
+    # each via the application-owned INotifier. FAIL-SOFT + MOCK-FIRST (ADR-0051 D5): when SMTP is
+    # unconfigured (no host/from), the composition root wires the LoggingNotifier — email delivery
+    # is best-effort and never a boot gate. Configuration-blind adapters receive these resolved
+    # values; the leaves never read Settings themselves (W8.1.1).
+    email_delivery_enabled: bool = Field(
+        default=True,
+        description="Master switch for the email delivery worker. When false the worker no-ops.",
+    )
+    email_from_address: str | None = Field(
+        default=None,
+        description="Envelope/From address for outbound notification email (required for SMTP).",
+    )
+    email_smtp_host: str | None = Field(
+        default=None,
+        description="SMTP server host. When unset, the LoggingNotifier mock is wired (fail-soft).",
+    )
+    email_smtp_port: int = Field(
+        default=587,
+        description="SMTP server port (587 STARTTLS / 465 implicit TLS).",
+        gt=0,
+    )
+    email_smtp_username: str | None = Field(
+        default=None,
+        description="SMTP auth username (optional; omit for unauthenticated relays).",
+    )
+    email_smtp_password: SecretStr | None = Field(
+        default=None,
+        description="SMTP auth password (optional). Never logged; never written to the database.",
+    )
+    email_smtp_use_tls: bool = Field(
+        default=False,
+        description="Use implicit TLS (SMTPS, typically port 465). Otherwise STARTTLS is used.",
+    )
+    email_batch_size: int = Field(
+        default=20,
+        description="Max deliverable notifications one NotificationEmailWorker.run_once() claims.",
+        gt=0,
+    )
+    email_send_timeout_seconds: float = Field(
+        default=30.0,
+        description="Per-message SMTP send timeout.",
+        gt=0,
+    )
+    email_max_attempts: int = Field(
+        default=5,
+        description="Max send attempts before a notification email is marked terminally failed.",
+        gt=0,
+    )
+    email_backoff_base_seconds: int = Field(
+        default=60,
+        description="Base for the capped exponential retry backoff (base * 2**(attempt-1)).",
+        gt=0,
+    )
+    email_backoff_cap_seconds: int = Field(
+        default=3600,
+        description="Ceiling for the exponential retry backoff between email send attempts.",
+        gt=0,
+    )
+    email_delivery_lease_seconds: int = Field(
+        default=120,
+        description="Per-notification email delivery lease TTL (one sender per row at a time).",
+        gt=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
