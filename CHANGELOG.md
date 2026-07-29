@@ -6,6 +6,50 @@
 
 ## [Unreleased]
 
+### α9.6 — TikTok Destination Adapter (`0.4.49-phase3-alpha9.6`, 2026-07-29)
+
+**The platform's second real publish destination.** TikTok joins YouTube behind the same frozen
+`IDestinationPublisher` boundary, proving the destination seam generalises: no use case, worker,
+scheduler, or API gained a single line of TikTok-specific logic. Governed by
+[`PHASE3_ALPHA9_6_GROUNDING.md`](docs/engineering/PHASE3_ALPHA9_6_GROUNDING.md) and
+[`PHASE3_ALPHA9_6_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_6_PREFLIGHT.md).
+**Strictly additive: no migration, no ADR, no schema change, no frozen-boundary change.**
+
+#### Added
+- **Destination** — `TikTokDestination` (`infrastructure/publishing/destinations/tiktok.py`):
+  Content Posting API "Direct Post" via `FILE_UPLOAD` — `creator_info/query` → `video/init` →
+  chunked `PUT` → `status/fetch` polling. A credential-blind leaf (PUB-5 / ADR-0047 C4) that
+  adapts TikTok's **asynchronous** publish model **entirely within the adapter boundary**, so
+  `publish()` stays one synchronous call under the frozen contract.
+- **OAuth** — `TikTokOAuthClient` (`infrastructure/publishing/oauth/tiktok_oauth_client.py`):
+  connect / refresh / revoke over the existing `ISocialOAuthClient` seam. Handles TikTok's
+  `client_key` naming, comma-separated scopes, `open_id` identity, and — critically — its
+  **rotating refresh tokens**, which are surfaced so the credential service re-encrypts them.
+- **Configuration + wiring** — a `tiktok_*` settings block and composition-root registration that
+  is **fail-soft**: with credentials unset (as in CI) TikTok is simply not registered, so a
+  `platform="tiktok"` publish fails create-time validation and no HTTP client is ever opened.
+- **CI Stage 24** — `tiktok destination integration`, network-free via `httpx.MockTransport`.
+
+#### Behaviour
+- **Exactly three adapter outcomes.** Success (terminal publish inside the polling budget),
+  permanent failure (terminal failure from TikTok), and **indeterminate timeout** (budget expires
+  with no terminal state) — the last is recorded with diagnostics and **never retried**,
+  preserving PUB-11's *never risk duplicate publication* invariant.
+- **The external identifier is stable.** `platform_post_id` always holds the durable `publish_id`
+  minted at init and is **never** overwritten by a later public post id, keeping logs, audits, and
+  any future reconciliation coherent. No post URL is recorded: TikTok's canonical URL requires the
+  creator's username, which a credential-blind adapter never sees, so none is invented.
+- **Nothing is silently downgraded.** An unsupported visibility (or one the creator does not
+  offer) fails validation explicitly, and a `publish_at` schedule is rejected rather than ignored.
+- **`fail_reason="internal"` is treated as permanent** even though TikTok documents it as
+  retryable: it can only surface after our bytes were accepted, and our no-duplicate invariant
+  outranks a provider retry recommendation.
+
+#### Accepted limitations
+- Publishes that outlive the polling budget (slow moderation) settle as `failed` with an
+  `ambiguous_upload_outcome` even if TikTok later publishes them. Reconciliation is deliberately
+  out of scope (no reconciliation worker, no webhook support in this slice).
+
 ### α9.5 — Notification Delivery: Email (`0.4.48-phase3-alpha9.5`, 2026-07-29)
 
 **Deliver in-app notifications over email — the platform's first outbound external-communication

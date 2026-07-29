@@ -235,8 +235,10 @@ from app.infrastructure.publishing.credentials.master_key import (
 )
 from app.infrastructure.publishing.destinations.mock_destination import MockDestination
 from app.infrastructure.publishing.destinations.registry import DestinationRegistry
+from app.infrastructure.publishing.destinations.tiktok import TikTokDestination
 from app.infrastructure.publishing.destinations.youtube import YouTubeDestination
 from app.infrastructure.publishing.oauth.mock_oauth_client import MockSocialOAuthClient
+from app.infrastructure.publishing.oauth.tiktok_oauth_client import TikTokOAuthClient
 from app.infrastructure.publishing.oauth.youtube_oauth_client import YouTubeOAuthClient
 from app.infrastructure.publishing.state_token_signer import JwtOAuthStateSigner
 from app.infrastructure.render import (
@@ -319,6 +321,8 @@ _destination_registry: DestinationRegistry | None = None
 # built lazily iff YouTube is configured and closed in shutdown(). None on the common
 # (unconfigured) path, so tests open no client they must close.
 _youtube_client: httpx.AsyncClient | None = None
+# α9.6: the same story for the real TikTok leaves (OAuth client + destination adapter).
+_tiktok_client: httpx.AsyncClient | None = None
 # α9.1 (ADR-0049): the AI adapter behind the Publishing-owned IPublishMetadataGenerator port.
 # Built lazily over the process-wide provider registry (LLM capability); advisory-only, so it is
 # never a boot dependency. Reset in reset()/shutdown() so tests rebuild it cleanly.
@@ -477,6 +481,7 @@ async def shutdown() -> None:
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
     global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
+    global _tiktok_client
     if _engine is not None:
         await _engine.dispose()
     if _openai_client is not None:
@@ -491,6 +496,8 @@ async def shutdown() -> None:
         await _image_client.aclose()
     if _youtube_client is not None:
         await _youtube_client.aclose()
+    if _tiktok_client is not None:
+        await _tiktok_client.aclose()
     _engine = None
     _session_factory = None
     _provider_registry = None
@@ -518,6 +525,7 @@ async def shutdown() -> None:
     _video_probe = None
     _destination_registry = None
     _youtube_client = None
+    _tiktok_client = None
     _publish_metadata_generator = None
     _notifier = None
     _settings = None
@@ -534,6 +542,7 @@ def reset() -> None:
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
     global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
     global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
+    global _tiktok_client
     _settings = None
     _engine = None
     _session_factory = None
@@ -571,6 +580,7 @@ def reset() -> None:
     _video_probe = None
     _destination_registry = None
     _youtube_client = None
+    _tiktok_client = None
     _publish_metadata_generator = None
     _notifier = None
 
@@ -1751,6 +1761,40 @@ def _get_youtube_http_client() -> httpx.AsyncClient:
     return _youtube_client
 
 
+def _get_tiktok_http_client() -> httpx.AsyncClient:
+    """Lazily build + memoise the shared httpx client for the TikTok leaves (α9.6).
+
+    Mirrors ``_get_youtube_http_client``: built on first use (only when TikTok is configured),
+    disposed in ``shutdown()``, shared by the OAuth client and the destination adapter, and
+    credential-free (the bearer/secret is passed per-request by the leaves).
+    """
+    global _tiktok_client
+    if _tiktok_client is None:
+        settings = _get_settings()
+        _tiktok_client = httpx.AsyncClient(timeout=settings.tiktok_timeout_seconds)
+    return _tiktok_client
+
+
+def _build_tiktok_oauth_client() -> TikTokOAuthClient | None:
+    """The real TikTok OAuth client, or ``None`` when TikTok is unconfigured (fail-soft)."""
+    settings = _get_settings()
+    client_key = settings.tiktok_oauth_client_key
+    client_secret = settings.tiktok_oauth_client_secret
+    if client_key is None or client_secret is None:
+        return None
+    return TikTokOAuthClient(
+        http=_get_tiktok_http_client(),
+        client_key=client_key,
+        client_secret=client_secret.get_secret_value(),
+        clock=get_clock(),
+        scopes=settings.tiktok_oauth_scopes,
+        authorize_url=settings.tiktok_oauth_authorize_url,
+        token_url=settings.tiktok_oauth_token_url,
+        revoke_url=settings.tiktok_oauth_revoke_url,
+        api_base_url=settings.tiktok_api_base_url,
+    )
+
+
 def _build_youtube_oauth_client() -> YouTubeOAuthClient | None:
     """The real YouTube OAuth client, or ``None`` when YouTube is unconfigured (fail-soft)."""
     settings = _get_settings()
@@ -1772,11 +1816,17 @@ def _build_youtube_oauth_client() -> YouTubeOAuthClient | None:
 
 
 def _get_oauth_clients() -> dict[str, ISocialOAuthClient]:
-    """The per-platform OAuth clients (Mock always; YouTube iff configured — α8.6c, fail-soft)."""
+    """The per-platform OAuth clients (Mock always; real ones iff configured — fail-soft).
+
+    α8.6c added YouTube; α9.6 added TikTok behind the identical both-credentials-set condition.
+    """
     clients: dict[str, ISocialOAuthClient] = {"mock": MockSocialOAuthClient(clock=get_clock())}
     youtube = _build_youtube_oauth_client()
     if youtube is not None:
         clients["youtube"] = youtube
+    tiktok = _build_tiktok_oauth_client()
+    if tiktok is not None:
+        clients["tiktok"] = tiktok
     return clients
 
 
@@ -1842,12 +1892,13 @@ def get_list_social_accounts_use_case() -> ListSocialAccounts:
 
 
 def _get_destination_registry() -> DestinationRegistry:
-    """The platform → adapter registry (Mock always; YouTube iff configured — α8.6c).
+    """The platform → adapter registry (Mock always; real adapters iff configured).
 
-    Memoised. The Mock adapter is stateless + network-free; the real YouTube adapter is
-    registered only when its OAuth credentials are configured (fail-soft — an unconfigured
-    ``platform="youtube"`` publish then fails create-time validation, never at runtime). A
-    YAML destination catalogue stays deferred until ≥2 real destinations justify it (§14).
+    Memoised. The Mock adapter is stateless + network-free; a real adapter is registered only
+    when its OAuth credentials are configured (fail-soft — an unconfigured ``platform`` publish
+    then fails create-time validation, never at runtime). YouTube is α8.6c; TikTok is α9.6.
+    A YAML destination catalogue stays deferred even at two real destinations (§14/OQ2): both
+    adapters express their capability differences internally, so nothing upstream needs it.
     """
     global _destination_registry
     if _destination_registry is None:
@@ -1860,6 +1911,17 @@ def _get_destination_registry() -> DestinationRegistry:
             adapters["youtube"] = YouTubeDestination(
                 http=_get_youtube_http_client(),
                 api_base_url=settings.youtube_api_base_url,
+            )
+        if (
+            settings.tiktok_oauth_client_key is not None
+            and settings.tiktok_oauth_client_secret is not None
+        ):
+            adapters["tiktok"] = TikTokDestination(
+                http=_get_tiktok_http_client(),
+                api_base_url=settings.tiktok_api_base_url,
+                chunk_size_bytes=settings.tiktok_chunk_size_bytes,
+                status_poll_interval_seconds=settings.tiktok_status_poll_interval_seconds,
+                status_poll_budget_seconds=settings.tiktok_status_poll_budget_seconds,
             )
         _destination_registry = DestinationRegistry(adapters)
     return _destination_registry
