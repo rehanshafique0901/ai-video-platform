@@ -532,8 +532,12 @@ class Settings(BaseSettings):
         description="Use implicit TLS (SMTPS, typically port 465). Otherwise STARTTLS is used.",
     )
     email_batch_size: int = Field(
-        default=20,
-        description="Max deliverable notifications one NotificationEmailWorker.run_once() claims.",
+        default=1,
+        description=(
+            "Max deliverable notifications one NotificationEmailWorker.run_once() claims. "
+            "One, per PF4: an SMTP send is bounded by email_send_timeout_seconds and is therefore "
+            "materially longer than a queue scan, so a batch cannot finish inside a drain budget."
+        ),
         gt=0,
     )
     email_send_timeout_seconds: float = Field(
@@ -589,8 +593,12 @@ class Settings(BaseSettings):
         ),
     )
     worker_drain_budget_seconds: float = Field(
-        default=30.0,
-        description="Default shutdown grace for a pass already in flight (relay, email, render).",
+        default=60.0,
+        description=(
+            "Default shutdown grace for a pass already in flight (relay, email). Exceeds "
+            "email_send_timeout_seconds so a single in-flight send finishes and is stamped rather "
+            "than being cut and redelivered on the next start (ADR-0051 duplicate window)."
+        ),
         gt=0,
     )
     worker_generation_drain_budget_seconds: float = Field(

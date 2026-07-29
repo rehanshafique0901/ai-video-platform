@@ -28,6 +28,7 @@ shot-level repair budget inside the pipeline is untouched — it is intra-run an
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -166,8 +167,29 @@ class GenerationWorker:
         A lease that expired mid-run would let a second worker start the same generation and
         double the spend — the cost analogue of a duplicate post. Renewal closes that window
         without having to guess a maximum run length up front.
+
+        The pipeline runs in its own task so the heartbeat can tick beside it, which makes
+        cancellation this method's responsibility: ``asyncio.wait`` does not cancel what it waits
+        on, so a cancelled heartbeat would otherwise leave the pipeline running detached — still
+        calling providers, still spending, and eventually touching a disposed engine — after the
+        worker's caller believed the pass was over.
         """
         task = asyncio.create_task(self._runner.run(request))
+        try:
+            return await self._heartbeat_until_done(task, lease)
+        except asyncio.CancelledError:
+            # Shutdown reached us (the host's drain budget expired). Stopping the pipeline is not a
+            # retry and does not refund the spend: the row stays non-terminal and the reaper
+            # terminalises it as failed on the next start, exactly as after a crash. GEN-2 holds —
+            # this execution consumed its one spend opportunity and gets no second one.
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
+
+    async def _heartbeat_until_done(
+        self, task: asyncio.Task[GenerateVideoResult], lease: Lease
+    ) -> GenerateVideoResult:
         current = lease
         while True:
             done, _ = await asyncio.wait({task}, timeout=self._heartbeat.total_seconds())
@@ -175,7 +197,8 @@ class GenerationWorker:
                 return await task
             renewed = await self._renew(current)
             if renewed is None:
-                # Lost the lease. Cancelling would not refund what has already been spent, so
+                # Lost the lease — distinct from shutdown above, and handled differently on
+                # purpose. Cancelling would not refund what has already been spent, so
                 # the run continues; the reaper's staleness window makes a competing
                 # terminalisation unlikely, and a later completion writes the truthful state.
                 logger.warning("generation.lease_lost", extra={"lock_key": current.lock_key})

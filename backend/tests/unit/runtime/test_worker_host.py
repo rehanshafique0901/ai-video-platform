@@ -471,3 +471,166 @@ async def test_liveness_failure_never_takes_down_a_worker(tmp_path: Path) -> Non
 
     assert len(passes) >= 3
     assert result.workers[0].failures == 0
+
+
+# --------------------------------------------------------------------------------------
+# Supervision survival (ADR-0053 D5 — restart, then escalate; never quietly absent)
+# --------------------------------------------------------------------------------------
+
+
+class _ExplodingLiveness(Liveness):
+    """Liveness whose ``touch`` raises for one worker — a failure *outside* the pass.
+
+    ``Liveness.touch`` swallows ``OSError`` by design, so a fault it cannot anticipate is the
+    honest way to make the supervision loop itself die, which is the D5 tier-two case. No private
+    method is patched: the host is driven entirely through a collaborator it really uses.
+    """
+
+    def __init__(self, worker: str, *, times: int) -> None:
+        super().__init__(Path("/nonexistent-liveness-dir"))
+        self._target = worker
+        self._remaining = times
+        self.explosions = 0
+
+    def touch(self, worker: str) -> None:
+        if worker == self._target and self._remaining > 0:
+            self._remaining -= 1
+            self.explosions += 1
+            raise RuntimeError("liveness backend is broken in a way touch() cannot foresee")
+
+
+async def test_a_raising_found_work_is_a_contained_failure_not_a_dead_host() -> None:
+    """A broken predicate must not take down the worker, its siblings, or the host.
+
+    ``found_work`` is host-side interpretation of a worker's result, so it is exactly the kind of
+    code that breaks when a result type drifts. Evaluated in the supervision loop it would escape
+    into ``gather`` and end ``run()`` outright, orphaning every other worker mid-pass and skipping
+    the drain — HOST-2 broken by the scheduler rather than by any worker.
+    """
+    broken_passes: list[int] = []
+    healthy_passes: list[int] = []
+
+    async def _broken() -> object:
+        broken_passes.append(1)
+        return object()
+
+    async def _healthy() -> object:
+        healthy_passes.append(1)
+        return None
+
+    def _explode(_result: Any) -> bool:
+        raise AttributeError("'RelayResult' object has no attribute 'scanned'")
+
+    host = WorkerHost(
+        [_spec("broken", _broken, found_work=_explode), _spec("healthy", _healthy)],
+        failure_backoff_cap=_FAST,
+    )
+
+    async with _driving(_stop_after(host, healthy_passes, 5)):
+        result = await asyncio.wait_for(host.run(), timeout=5)
+
+    reports = {r.name: r for r in result.workers}
+    assert len(healthy_passes) >= 5, "a sibling's broken predicate suppressed this worker (HOST-2)"
+    assert reports["broken"].failures > 0, "a broken predicate must be counted, not swallowed"
+    assert reports["broken"].escalated is False, "a failing pass is tier one, not an escalation"
+    assert reports["healthy"].failures == 0
+
+
+async def test_a_raising_found_work_backs_off_instead_of_hot_looping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Containment alone would hot-loop; D5 requires backing off toward the cap."""
+    passes: list[int] = []
+    delays = _record_sleeps(monkeypatch)
+
+    async def _pass() -> object:
+        passes.append(1)
+        return None
+
+    def _explode(_result: Any) -> bool:
+        raise AttributeError("predicate is deterministically broken")
+
+    host = WorkerHost(
+        [_spec("broken", _pass, found_work=_explode, interval=timedelta(milliseconds=10))],
+        failure_backoff_cap=timedelta(milliseconds=40),
+    )
+    async with _driving(_stop_after(host, passes, 5)):
+        await host.run()
+
+    growth = [d for d in delays if d in (0.01, 0.02, 0.04)]
+    assert growth[:3] == [0.01, 0.02, 0.04], f"expected failure backoff, saw {delays}"
+    assert max(growth) <= 0.04, "a broken predicate must respect the failure cap"
+
+
+async def test_a_dying_supervisor_is_restarted_and_the_worker_keeps_polling() -> None:
+    """D5: "a task that dies anyway is restarted" — replacement, not merely continuation."""
+    passes: list[int] = []
+
+    async def _pass() -> object:
+        passes.append(1)
+        return None
+
+    liveness = _ExplodingLiveness("flaky", times=2)
+    host = WorkerHost([_spec("flaky", _pass)], liveness=liveness, max_supervisor_restarts=3)
+
+    async with _driving(_stop_after(host, passes, 6)):
+        result = await asyncio.wait_for(host.run(), timeout=5)
+
+    report = result.workers[0]
+    assert liveness.explosions == 2
+    assert report.restarts == 2, "the supervision task was not replaced after it died"
+    assert report.escalated is False, "a worker that recovered must not be reported as lost"
+    assert report.passes >= 6, "pass tallies must survive a restart, not reset"
+
+
+async def test_a_supervisor_that_cannot_be_kept_alive_is_escalated_not_silent() -> None:
+    """D5: a worker that cannot be kept alive is escalated — never quietly absent.
+
+    Restarting forever would be a hot loop in disguise, so the bound is the point: once it is
+    exhausted the worker stops and says so, loudly enough for the entrypoint to exit non-zero.
+    """
+    passes: list[int] = []
+
+    async def _pass() -> object:
+        passes.append(1)
+        return None
+
+    # Always explodes. The host is left to finish on its own — no stop is requested — so the run
+    # can only terminate by escalating.
+    liveness = _ExplodingLiveness("doomed", times=10_000)
+    host = WorkerHost([_spec("doomed", _pass)], liveness=liveness, max_supervisor_restarts=2)
+
+    result = await asyncio.wait_for(host.run(), timeout=5)
+
+    report = result.workers[0]
+    assert report.escalated is True
+    assert result.escalated_any is True, "an unrunnable worker must reach the process exit code"
+    assert report.restarts == 2, "escalation must follow a bounded number of restarts"
+    assert liveness.explosions == 3, "one initial death plus two replacements"
+
+
+async def test_one_workers_escalation_leaves_its_siblings_scheduled() -> None:
+    """HOST-2 holds through the worst supervision outcome, not just through pass failures."""
+    healthy_passes: list[int] = []
+
+    async def _pass() -> object:
+        return None
+
+    async def _healthy() -> object:
+        healthy_passes.append(1)
+        return None
+
+    liveness = _ExplodingLiveness("doomed", times=10_000)
+    host = WorkerHost(
+        [_spec("doomed", _pass), _spec("healthy", _healthy)],
+        liveness=liveness,
+        max_supervisor_restarts=1,
+    )
+
+    async with _driving(_stop_after(host, healthy_passes, 20)):
+        result = await asyncio.wait_for(host.run(), timeout=5)
+
+    reports = {r.name: r for r in result.workers}
+    assert reports["doomed"].escalated is True
+    assert len(healthy_passes) >= 20, "a lost worker suppressed a healthy one (HOST-2)"
+    assert reports["healthy"].escalated is False

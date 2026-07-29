@@ -50,6 +50,7 @@ from app.runtime.worker_registry import WORKER_NAMES, UnknownWorkerError, build_
 
 EXIT_OK = 0
 EXIT_STARTUP_FAILED = 1
+EXIT_WORKER_ESCALATED = 70  # EX_SOFTWARE
 EXIT_DRAIN_INCOMPLETE = 75  # EX_TEMPFAIL
 
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
@@ -107,7 +108,16 @@ async def _run(settings: Settings, selected: frozenset[str] | None) -> int:
         _install_signal_handlers(host)
         result = await host.run()
 
-        logger.info("worker_process.stopped", abandoned=result.abandoned_any)
+        logger.info(
+            "worker_process.stopped",
+            abandoned=result.abandoned_any,
+            escalated=[w.name for w in result.workers if w.escalated],
+        )
+        # Escalation outranks an incomplete drain: an abandoned pass is work that will be retried,
+        # whereas an escalated worker stopped running and stayed stopped. ADR-0053 D5 forbids that
+        # being quiet, and a distinct non-zero exit is what a supervisor or orchestrator can see.
+        if result.escalated_any:
+            return EXIT_WORKER_ESCALATED
         return EXIT_DRAIN_INCOMPLETE if result.abandoned_any else EXIT_OK
     finally:
         await container.shutdown()

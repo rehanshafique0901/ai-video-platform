@@ -32,7 +32,18 @@ pytestmark = pytest.mark.unit
 
 
 def _settings(**overrides: object) -> Settings:
-    return Settings(**overrides)  # type: ignore[arg-type]
+    """Build settings from literals only.
+
+    ``_env_file=None`` plus explicit required fields is the established unit-test pattern, and it
+    is load-bearing rather than stylistic: reading the ambient environment made these tests pass on
+    a developer machine holding a ``.env`` and fail in CI, which holds none.
+    """
+    base: dict[str, object] = {
+        "database_url": "postgresql+psycopg://u:p@h:5432/d",
+        "jwt_secret": "test-secret-do-not-use-in-production-32chars",
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)  # type: ignore[call-arg,arg-type]
 
 
 def test_default_registry_runs_every_worker() -> None:
