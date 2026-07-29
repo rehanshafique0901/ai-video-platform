@@ -810,6 +810,26 @@ def _stages() -> list[Stage]:
             ],
             requires_db=True,
         ),
+        # α9.6 — the TikTok destination inside the real publish runtime (second destination).
+        # Proves the new adapter settles through the SAME runtime as YouTube with no upstream
+        # TikTok-specific logic: happy path (durable publish_id as the stable identifier), a
+        # retryable pre-upload failure that requeues with backoff, the PUB-11 indeterminate
+        # outcome that fails WITHOUT retry, and that a rotated refresh token reaches the stored
+        # encrypted credential. Network-free (httpx MockTransport) so the stage stays
+        # deterministic; TikTok is unconfigured in CI, so nothing else changes behaviour.
+        Stage(
+            number=24,
+            title="tiktok destination integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/infrastructure/publishing/test_tiktok_destination_runtime.py",
+            ],
+            requires_db=True,
+        ),
     ]
 
 

@@ -206,7 +206,7 @@ addopts = [
 markers = [
     "unit: pure-Python unit test (no DB, no I/O)",
     "integration: requires a live PostgreSQL + pgvector",
-    "live_smoke: opt-in test hitting a real external API (α8.6c YouTube); EXCLUDED from CI, gated behind an env var",
+    "live_smoke: opt-in test hitting a real external API (α8.6c YouTube, α9.6 TikTok); EXCLUDED from CI, gated behind an env var",
 ]
 asyncio_mode = "auto"
 # Phase 3 Slice α1 — pin the loop scope for async fixtures so the

@@ -388,6 +388,72 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    # --- TikTok destination (α9.6) -------------------------------------------
+    # The second real destination: TikTokOAuthClient (connect/refresh/revoke) +
+    # TikTokDestination (Content Posting API "Direct Post", FILE_UPLOAD). Same shape as the
+    # YouTube block above: configuration-blind (W8.1.1) — injected into the leaves at the
+    # composition root, never read by the leaves; FAIL-SOFT — when the client key/secret are
+    # unset, TikTok is simply not registered (create for platform="tiktok" then fails
+    # create-time validation), so CI runs fully unconfigured and deterministic. Endpoints are
+    # overridable so the opt-in live smoke test can point at a TikTok sandbox.
+    #
+    # NOTE: TikTok names its OAuth client identifier ``client_key`` (not ``client_id``).
+    tiktok_oauth_client_key: str | None = Field(
+        default=None,
+        description="TikTok OAuth 2.0 client key for the TikTok destination.",
+    )
+    tiktok_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        description="TikTok OAuth 2.0 client secret for the TikTok destination.",
+    )
+    tiktok_oauth_scopes: tuple[str, ...] = Field(
+        default=("user.info.basic", "video.publish"),
+        description="OAuth scopes requested when connecting a TikTok account.",
+    )
+    tiktok_oauth_authorize_url: str = Field(
+        default="https://www.tiktok.com/v2/auth/authorize/",
+        description="TikTok OAuth 2.0 authorization (consent) endpoint.",
+        min_length=1,
+    )
+    tiktok_oauth_token_url: str = Field(
+        default="https://open.tiktokapis.com/v2/oauth/token/",
+        description="TikTok OAuth 2.0 token endpoint (code exchange + refresh).",
+        min_length=1,
+    )
+    tiktok_oauth_revoke_url: str = Field(
+        default="https://open.tiktokapis.com/v2/oauth/revoke/",
+        description="TikTok OAuth 2.0 token revocation endpoint.",
+        min_length=1,
+    )
+    tiktok_api_base_url: str = Field(
+        default="https://open.tiktokapis.com",
+        description="Base URL for the TikTok Content Posting API (init/status) + user info.",
+        min_length=1,
+    )
+    tiktok_timeout_seconds: float = Field(
+        default=120.0,
+        description="HTTP timeout for TikTok OAuth + upload requests.",
+        gt=0,
+    )
+    tiktok_chunk_size_bytes: int = Field(
+        default=10_000_000,
+        description="Preferred upload chunk size (TikTok requires 5MB..64MB for multi-chunk).",
+        gt=0,
+    )
+    tiktok_status_poll_interval_seconds: float = Field(
+        default=3.0,
+        description="Delay between TikTok publish-status polls (TikTok caps at 30 req/min).",
+        gt=0,
+    )
+    tiktok_status_poll_budget_seconds: float = Field(
+        default=120.0,
+        description=(
+            "Total budget for polling TikTok publish status. Bounded far below the 900s "
+            "publish lease; exhausting it is an INDETERMINATE outcome (PUB-11: permanent)."
+        ),
+        gt=0,
+    )
+
     # --- AI publish-metadata suggestions (α9.1, ADR-0049) --------------------
     # Timeout for one advisory LLM caption/hashtag suggestion. Kept short: the capability is
     # opt-in and advisory, so a slow provider degrades to the deterministic template rather than
