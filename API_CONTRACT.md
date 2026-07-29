@@ -55,6 +55,7 @@ Error:
 | Scenes | `/projects/{id}/scenes`, `/projects/{id}/scenes/{scene_id}`, `/projects/{id}/scenes/{scene_id}/move` |
 | Prompts (α6.1) | `/projects/{id}/prompts`, `/projects/{id}/prompts/{prompt_id}` |
 | Media (α6.2) | `/media`, `/media/{media_id}` (top-level, owner-scoped) |
+| Generations (α9.7) | `/generations`, `/generations/{id}`, `/generations/{id}/cancel` (top-level, owner-scoped) |
 | AI — Script | `/ai/script` |
 | AI — Storyboard | `/ai/storyboard` |
 | AI — Images | `/ai/images` |
@@ -809,6 +810,41 @@ POST /webhooks/providers/{name}        HMAC-signed by the provider (Veo, Runway,
 ```
 
 All webhook handlers are **idempotent** keyed by `(provider, request_id)`.
+
+### 3.14 Generations (α9.7 — ADR-0052)
+
+Creator-triggered video generation. Top-level and owner-scoped: a generation belongs to a *user*,
+and its association with a project happens later and explicitly, at promotion. Distinct from
+`/workflow-runs` (§3.4), which drives the orchestration pipeline.
+
+```
+POST /generations
+  body: { prompt, idempotency_key?, title?, execution_mode?, global_style?, aspect_ratio?,
+          target_platform?, target_duration_seconds?, per_shot_seconds?,
+          width?, height?, fps?, seed? }
+  → 201 { generation }            # queued; returns immediately, does not generate
+  → 200 { generation }            # idempotent replay of a prior `idempotency_key`
+
+GET  /generations/{id}            → 200 { generation }
+GET  /generations?limit=&cursor=&status=
+                                  → 200 { data: [generation], meta: { next_cursor } }
+POST /generations/{id}/cancel     → 200 { generation }   # 409 once claimed
+```
+
+* **Asynchronous by contract.** `POST` records intent and returns in milliseconds; a run takes
+  minutes. Progress is observed by polling `GET` — realtime transports remain a future additive
+  capability, not a replacement.
+* **Idempotency is explicit.** Only a supplied `idempotency_key` collapses two requests into one:
+  repeating a prompt is a legitimate second take, so it is a second generation.
+* **No retries.** One execution is one external spend opportunity. A generation abandoned by a
+  crashed worker settles `failed` and is never re-run.
+* **Cancellation is queued-only.** Once a worker has claimed the generation, `cancel` returns
+  `409` rather than reporting a stop that did not happen.
+* **The projection is curated.** Execution internals — provenance, resolver/adapter/provider
+  identities, component versions, the internal final-asset id — are never returned. `promotable`
+  is the derived signal that `POST /media/promotions` will succeed.
+* **Owner-scoped reads are the sole read model.** A generation the caller does not own is a `404`,
+  indistinguishable from one that does not exist.
 
 ---
 

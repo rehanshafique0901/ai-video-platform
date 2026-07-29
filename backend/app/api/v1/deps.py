@@ -44,6 +44,12 @@ from app.application.use_cases.dashboard.get_creator_dashboard import GetCreator
 from app.application.use_cases.export.create_export_job import CreateExportJob
 from app.application.use_cases.export.download_export import DownloadExport
 from app.application.use_cases.export.get_export_job import GetExportJob
+from app.application.use_cases.generation.create_generation import CreateGeneration
+from app.application.use_cases.generation.read_generations import (
+    CancelGeneration,
+    GetGeneration,
+    ListGenerations,
+)
 from app.application.use_cases.library.add_library_asset import AddLibraryAsset
 from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
 from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
@@ -340,6 +346,13 @@ CreatePublishJobsDep = Annotated[
 ]
 GetPublishJobDep = Annotated[GetPublishJob, Depends(container.get_get_publish_job_use_case)]
 ListPublishJobsDep = Annotated[ListPublishJobs, Depends(container.get_list_publish_jobs_use_case)]
+
+# ---- Use-case dependencies (Slice α9.7 — Generation ingress) ----------
+
+CreateGenerationDep = Annotated[CreateGeneration, Depends(container.get_create_generation_use_case)]
+GetGenerationDep = Annotated[GetGeneration, Depends(container.get_get_generation_use_case)]
+ListGenerationsDep = Annotated[ListGenerations, Depends(container.get_list_generations_use_case)]
+CancelGenerationDep = Annotated[CancelGeneration, Depends(container.get_cancel_generation_use_case)]
 
 # ---- Use-case dependencies (Slice α9.1 — AI publish metadata) ---------
 

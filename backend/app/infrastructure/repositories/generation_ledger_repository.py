@@ -22,6 +22,21 @@ from app.application.use_cases.generation.request import GenerateVideoRequest
 from app.application.use_cases.generation.results import GenerationProvenance
 from app.domain.generation.execution_state import ExecutionStatus
 
+# GEN-1 (α9.7) — **state initialisation, not a generic upsert.**
+#
+# Since α9.7 a generation may already exist when the runtime starts: ingress inserts an owned
+# `queued` row and a worker claims it before running the pipeline, so `begin()` must adopt that
+# row rather than collide with it. It must equally still *create* the row for the direct-
+# invocation path (`scripts/generate_demo.py`, integration tests), which is why this is an
+# upsert at all.
+#
+# The DO UPDATE clause below enumerates **only runtime-owned execution columns**. `tenant_id`,
+# `owner_user_id`, `idempotency_key`, `request`, `prompt` and `created_at` are ingress-owned and
+# are absent by construction — so a `begin()` call can never rebind a queued generation to a
+# different owner or a different request, no matter how often it is replayed. `prompt` is
+# supplied on INSERT (it is NOT NULL) but never on UPDATE: the creator's prompt is theirs.
+#
+# See docs/engineering/EXECUTION_RUNTIME_CONTRACT.md §4 and PHASE3_ALPHA9_7_PREFLIGHT.md §2.1.
 _INSERT_GENERATION_SQL = text(
     """
     INSERT INTO generations (
@@ -40,6 +55,34 @@ _INSERT_GENERATION_SQL = text(
         :verifier_version, :repair_version, :renderer_version, :score_schema_version,
         :catalogue_version, :manifest_digest, CAST(:provenance AS jsonb), :started_at
     )
+    ON CONFLICT (id) DO UPDATE SET
+        status                 = EXCLUDED.status,
+        title                  = EXCLUDED.title,
+        identity_id            = EXCLUDED.identity_id,
+        execution_mode         = EXCLUDED.execution_mode,
+        execution_tier         = EXCLUDED.execution_tier,
+        chosen_provider        = EXCLUDED.chosen_provider,
+        chosen_adapter         = EXCLUDED.chosen_adapter,
+        seed                   = EXCLUDED.seed,
+        aspect_ratio           = EXCLUDED.aspect_ratio,
+        target_platform        = EXCLUDED.target_platform,
+        width                  = EXCLUDED.width,
+        height                 = EXCLUDED.height,
+        fps                    = EXCLUDED.fps,
+        shot_count             = EXCLUDED.shot_count,
+        planner_version        = EXCLUDED.planner_version,
+        storyboard_version     = EXCLUDED.storyboard_version,
+        prompt_builder_version = EXCLUDED.prompt_builder_version,
+        resolver_version       = EXCLUDED.resolver_version,
+        verifier_version       = EXCLUDED.verifier_version,
+        repair_version         = EXCLUDED.repair_version,
+        renderer_version       = EXCLUDED.renderer_version,
+        score_schema_version   = EXCLUDED.score_schema_version,
+        catalogue_version      = EXCLUDED.catalogue_version,
+        manifest_digest        = EXCLUDED.manifest_digest,
+        provenance             = EXCLUDED.provenance,
+        started_at             = EXCLUDED.started_at,
+        updated_at             = now()
     """
 )
 
@@ -121,6 +164,11 @@ class GenerationLedgerRepository:
         shot_count: int,
         status: ExecutionStatus = ExecutionStatus.PLANNING,
     ) -> None:
+        """Initialise runtime state for a generation, creating the row only if absent (GEN-1).
+
+        Idempotent: repeated calls for the same ``generation_id`` converge on the same runtime
+        state and never touch ingress-owned columns.
+        """
         await self._session.execute(
             _INSERT_GENERATION_SQL,
             {

@@ -39,6 +39,7 @@ from app.api.v1.routers import (
     auth,
     dashboard,
     export_jobs,
+    generations,
     health,
     library,
     media,
@@ -104,7 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="AI Video Platform — backend",
-        version="0.4.49-phase3-alpha9.6",
+        version="0.4.50-phase3-alpha9.7",
         lifespan=lifespan,
     )
 
@@ -121,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(versions.router, prefix="/api/v1")
     app.include_router(prompts.router, prefix="/api/v1")
     app.include_router(media.router, prefix="/api/v1")
+    app.include_router(generations.router, prefix="/api/v1")
     app.include_router(library.router, prefix="/api/v1")
     app.include_router(timeline.router, prefix="/api/v1")
     app.include_router(render_jobs.router, prefix="/api/v1")

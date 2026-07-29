@@ -46,6 +46,8 @@ _LOAD_FINAL_VIDEO_SQL = text(
     FROM generations g
     LEFT JOIN generation_assets a ON a.id = g.final_video_asset_id
     WHERE g.id = CAST(:generation_id AS uuid)
+      AND g.tenant_id = CAST(:tenant_id AS uuid)
+      AND g.owner_user_id = CAST(:owner_user_id AS uuid)
     """
 )
 
@@ -56,12 +58,19 @@ class GenerationReader(IGenerationReader):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def load_final_video(self, generation_id: UUID) -> PromotableGenerationVideo | None:
+    async def load_final_video(
+        self, *, generation_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> PromotableGenerationVideo | None:
         async with self._session_factory() as session:
             row = (
                 (
                     await session.execute(
-                        _LOAD_FINAL_VIDEO_SQL, {"generation_id": str(generation_id)}
+                        _LOAD_FINAL_VIDEO_SQL,
+                        {
+                            "generation_id": str(generation_id),
+                            "tenant_id": str(tenant_id),
+                            "owner_user_id": str(owner_user_id),
+                        },
                     )
                 )
                 .mappings()

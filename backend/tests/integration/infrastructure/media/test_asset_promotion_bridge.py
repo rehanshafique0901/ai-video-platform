@@ -36,14 +36,17 @@ _SOURCE_KEY = "generations/final/fox.mp4"
 _VIDEO_BYTES = b"FAKE-MP4-BYTES-FOR-PROMOTION"
 
 
+# Owned since α9.7: promotion now authorises the *generation* as well as the project (AP9),
+# so a fixture that seeded an ownerless row would be testing a path the API can no longer reach.
 _INSERT_GENERATION_SQL = text(
     """
     INSERT INTO generations (
-        id, status, prompt, title, execution_mode, execution_tier,
+        id, tenant_id, owner_user_id, status, prompt, title, execution_mode, execution_tier,
         chosen_provider, chosen_adapter, seed, target_platform,
         final_video_asset_id, width, height
     ) VALUES (
-        CAST(:id AS uuid), 'completed', :prompt, :title, 'automatic',
+        CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:owner_user_id AS uuid),
+        'completed', :prompt, :title, 'automatic',
         CAST(:tier AS execution_tier), :provider, :adapter, :seed, :platform,
         CAST(:final_video_asset_id AS uuid), :width, :height
     )
@@ -96,6 +99,8 @@ async def _seed(
             _INSERT_GENERATION_SQL,
             {
                 "id": str(generation_id),
+                "tenant_id": str(tenant_id),
+                "owner_user_id": str(user_id),
                 "prompt": "a fox in the snow",
                 "title": "Fox",
                 "tier": "free_remote",

@@ -82,7 +82,24 @@ class IExecutionRuntimeStore(ABC):
         title: str,
         shot_count: int,
     ) -> None:
-        """Insert the ``generations`` aggregate (status ``PLANNING``) + emit start."""
+        """Initialise runtime state for the generation (status ``PLANNING``) + emit start.
+
+        **GEN-1 — state initialisation, not a generic upsert** (α9.7 / ADR-0052 D2-B). Since
+        generation ingress landed, the row may already exist: ingress creates it ``queued`` with
+        its owner and its immutable request, and a worker claims it before the pipeline runs.
+        This operation therefore:
+
+        1. **may create** the row when absent — the direct-invocation path (demo script,
+           integration tests) needs no ingress and stays fully supported;
+        2. **may initialise runtime-owned execution fields** when the row already exists;
+        3. **must never overwrite** ownership, the persisted request, the idempotency key,
+           ``created_at``, or any other ingress-owned metadata;
+        4. **must never** let a queued generation be rebound to another owner or request;
+        5. **must remain safe** when called repeatedly for the same ``generation_id``.
+
+        Ingress owns identity; the execution runtime owns execution state. Neither writes the
+        other's columns — see ``EXECUTION_RUNTIME_CONTRACT.md`` §4.
+        """
         ...
 
     @abstractmethod

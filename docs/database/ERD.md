@@ -1052,6 +1052,14 @@ erDiagram
 > These tables are **execution-owned** and never write into the platform's `media_assets`
 > library — promotion is a future explicit use case, `PublishGenerationAssets` (W8.6.8).
 > `validate_schema.py` lists them as ORM-less extras rather than treating them as drift.
+>
+> **α9.7 (`0016_generation_ownership`).** `generations` gained four **ingress-owned** columns —
+> `tenant_id`, `owner_user_id`, `idempotency_key`, `request` — resolving the ownership deferral
+> of ADR-0046 Q1 / α8.8 AP9 (**ADR-0052** D1). Ingress owns identity; the execution runtime owns
+> only execution state and never writes these columns (pre-flight GEN-1). They are nullable
+> because legacy rows predate ingress and their owner must never be inferred; owner-scoped reads
+> filter on `owner_user_id`, so such rows are invisible to the production API. The cross-cluster
+> FKs to `tenants` / `users` follow this file's convention of eliding cross-cluster edges.
 
 ```mermaid
 erDiagram
@@ -1062,6 +1070,10 @@ erDiagram
 
     generations {
         uuid id PK
+        uuid tenant_id FK "nullable — ingress-owned (0016)"
+        uuid owner_user_id FK "nullable — ingress-owned (0016)"
+        text idempotency_key "nullable — ingress-owned (0016)"
+        jsonb request "ingress-owned (0016)"
         generation_status status
         text prompt
         text title "nullable"
