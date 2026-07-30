@@ -12,7 +12,7 @@ from decimal import Decimal
 import pytest
 
 from app.domain.resolver import ExecutionMode, Pricing, ResolveRequest, RoutingStrategy, resolve
-from app.domain.resolver.models import RuntimeSnapshot
+from app.domain.resolver.models import ExecutableAdapters, RuntimeSnapshot
 from app.infrastructure.repositories.catalogue_reader import (
     adapter_from_row,
     build_snapshot,
@@ -135,7 +135,12 @@ def test_build_snapshot_produces_resolvable_catalogue() -> None:
     assert snapshot.strategy_for("image_generation") is RoutingStrategy.FREE_FIRST
     assert snapshot.adapters[0].fallbacks == ("fal.flux",)
 
-    res = resolve(ResolveRequest(capability="image_generation"), snapshot, RuntimeSnapshot())
+    res = resolve(
+        ResolveRequest(capability="image_generation"),
+        snapshot,
+        RuntimeSnapshot(),
+        ExecutableAdapters(frozenset(a.id for a in snapshot.adapters)),
+    )
     top = res.top
     assert top is not None and top.adapter_id == "pollinations.image"
     assert res.routing_strategy is RoutingStrategy.FREE_FIRST

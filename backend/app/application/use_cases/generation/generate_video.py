@@ -4,12 +4,16 @@ Prompt -> Planner -> Storyboard -> Resolver -> (per shot: Generate -> Verify ->
 Repair)* -> Slideshow assembly -> Video verify -> store, with full provenance.
 
 This is the Execution plane: it *composes* the pure Decision-plane policies
-(planner, prompt builder, verification, repair) with side-effecting ports (image
-generator, feature extractor, renderer, probe, storage, model cache). It contains
+(planner, prompt builder, verification, repair) with side-effecting ports (adapter
+registry, feature extractor, renderer, probe, storage, model cache). It contains
 no provider-specific branching and never scores providers itself — it asks the
 capability resolver for candidates and executes the best eligible one
 (capability-first, ADR-0045). Everything runs behind ports so it is fully
 testable with fakes; real adapters wire in later increments.
+
+Dispatch follows ADR-0054: the chosen ``adapter_id`` is looked up in the adapter registry
+and only ``candidates[0]`` is invoked — no walking, no authored fallback chains. What the
+registry was keyed on is what execution provenance records.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from app.application.interfaces.execution_runtime_store import (
     ShotRecord,
 )
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
-from app.application.interfaces.image_generator import GeneratedImage, IImageGenerator
+from app.application.interfaces.image_generator import GeneratedImage, IImageAdapterRegistry
 from app.application.interfaces.model_manager import IModelManager
 from app.application.interfaces.object_storage import IObjectStorage
 from app.application.interfaces.resolution_ledger import ExecutionOutcome
@@ -90,7 +94,7 @@ class GenerateVideo:
         self,
         *,
         resolver: ICapabilityResolver,
-        image_generator: IImageGenerator,
+        adapter_registry: IImageAdapterRegistry,
         feature_extractor: IImageFeatureExtractor,
         renderer: ISlideshowRenderer,
         video_probe: IVideoProbe,
@@ -99,7 +103,7 @@ class GenerateVideo:
         store: IExecutionRuntimeStore | None = None,
     ) -> None:
         self._resolver = resolver
-        self._image_generator = image_generator
+        self._adapters = adapter_registry
         self._features = feature_extractor
         self._renderer = renderer
         self._probe = video_probe
@@ -179,7 +183,7 @@ class GenerateVideo:
             )
             if not outcome.result.accepted or outcome.image is None:
                 await self._store.record_shot(
-                    _shot_record(generation_id, shot, outcome, chosen, asset_id=None)
+                    _shot_record(generation_id, shot, outcome, asset_id=None)
                 )
                 shot_results.append(outcome.result)
                 log.warning(
@@ -213,7 +217,7 @@ class GenerateVideo:
                 )
             )
             await self._store.record_shot(
-                _shot_record(generation_id, shot, outcome, chosen, asset_id=asset_id)
+                _shot_record(generation_id, shot, outcome, asset_id=asset_id)
             )
             shot_results.append(replace(outcome.result, frame_key=frame_key))
             frames.append(
@@ -348,9 +352,13 @@ class GenerateVideo:
         local_path = await self._ensure_model(chosen)
         seed = shot.seed
         attempts: list[AttemptRecord] = []
+        # ADR-0054: bind the decision to an implementation once, before any attempt. An
+        # unregistered id raises here, so nothing is produced and no producer is recorded.
+        generator = self._adapters.for_adapter(chosen.adapter_id)
+        produced_by: str | None = None
 
         for attempt in range(1, request.max_attempts + 1):
-            image = await self._image_generator.generate(
+            image = await generator.generate(
                 adapter_id=chosen.adapter_id,
                 prompt=shot.prompt_text,
                 seed=seed,
@@ -360,6 +368,9 @@ class GenerateVideo:
                 reference_image_refs=shot.reference_image_refs,
                 local_model_path=local_path,
             )
+            # DISP-2: the binding we dispatched on is the producer, not anything the
+            # artefact reports. Recorded now so it survives a later rejection.
+            produced_by = chosen.adapter_id
             observed: ObservedImage = await self._features.extract(image.data, reference=reference)
             report = verify_image(observed, expectation)
             decision = decide_repair(
@@ -385,12 +396,15 @@ class GenerateVideo:
                     ),
                     image=image,
                     observed=observed,
+                    produced_by=produced_by,
                 )
             if decision.action is RepairAction.RETRY and decision.next_seed is not None:
                 seed = decision.next_seed
                 continue
             break
 
+        # Rejected, but produced: acceptance and production are different events, so the
+        # producer stays recorded even though the artefact is discarded (ADR-0054 D2).
         return _ShotOutcome(
             result=ShotResult(
                 index=shot.index,
@@ -402,6 +416,7 @@ class GenerateVideo:
             ),
             image=None,
             observed=None,
+            produced_by=produced_by,
         )
 
     async def _ensure_model(self, chosen: ResolvedAdapter) -> str | None:
@@ -417,7 +432,7 @@ class GenerateVideo:
 
 
 class _ShotOutcome:
-    __slots__ = ("result", "image", "observed")
+    __slots__ = ("result", "image", "observed", "produced_by")
 
     def __init__(
         self,
@@ -425,20 +440,27 @@ class _ShotOutcome:
         result: ShotResult,
         image: GeneratedImage | None,
         observed: ObservedImage | None,
+        produced_by: str | None = None,
     ) -> None:
         self.result = result
         self.image = image
         self.observed = observed
+        # The registry key that produced bytes; ``None`` when nothing did (ADR-0054 D2).
+        self.produced_by = produced_by
 
 
 def _shot_record(
     generation_id: UUID,
     shot: ShotPrompt,
     outcome: _ShotOutcome,
-    chosen: ResolvedAdapter,
     *,
     asset_id: UUID | None,
 ) -> ShotRecord:
+    """Build the shot's **execution** record.
+
+    Deliberately takes no ``ResolvedAdapter``: with no decision in scope, the decision
+    cannot be copied into an execution field even by accident (ADR-0054 D2).
+    """
     attempts = tuple(asdict(a) for a in outcome.result.attempts)
     return ShotRecord(
         generation_id=generation_id,
@@ -447,7 +469,8 @@ def _shot_record(
         accepted=outcome.result.accepted,
         negative_prompt=shot.negative_prompt,
         reference_images=tuple(shot.reference_image_refs),
-        adapter_used=chosen.adapter_id,
+        # Execution provenance: what produced the bytes, never the decision's choice.
+        adapter_used=outcome.produced_by,
         seed=outcome.result.seed,
         verification={
             "accepted": outcome.result.accepted,

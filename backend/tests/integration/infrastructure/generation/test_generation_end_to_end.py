@@ -13,9 +13,16 @@ Provider independence (the whole point of the architecture): the image bytes com
 from :class:`OfflineDeterministicImageGenerator`, a throwaway ``IImageGenerator``
 that produces real PNGs with Pillow. Nothing in the planner, resolver, verifier,
 repair, renderer, or execution runtime knows or cares which ``IImageGenerator`` is
-wired — Pollinations, ComfyUI, or this offline double are interchangeable. The
-resolver still *chooses* an adapter from the seeded catalogue; the chosen id is
-handed to the generator, which (like any real adapter) simply produces bytes.
+wired — Pollinations, ComfyUI, or this offline double are interchangeable.
+
+Dispatch (ADR-0054): the offline generator is registered in a real
+``ImageAdapterRegistry`` under the adapter id the resolver will select, and the same
+registry declares the deployment's executable set to the resolver. The generator reports
+an identity of its **own**, distinct from the key it is bound under, so an assertion that
+``adapter_used`` equals the binding cannot be satisfied by accident — not from the
+decision, and not from the artefact. A companion test registers it under a key the
+resolver will not select and proves the run fails closed instead of recording provenance
+that never happened; that is the test the previous fixture could not have failed.
 
 Determinism: the request pins ``FREE_REMOTE_ONLY`` and the test seeds one
 free-remote adapter (``golden_provider.image``) whose provider outscores everything
@@ -42,14 +49,20 @@ from PIL import Image, ImageDraw
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.application.interfaces.image_generator import GeneratedImage, IImageGenerator
+from app.application.interfaces.image_generator import (
+    AdapterNotRegisteredError,
+    GeneratedImage,
+    IImageGenerator,
+)
 from app.application.use_cases.generation.capability_resolver import ResolverCapabilityResolver
 from app.application.use_cases.generation.generate_video import GenerateVideo
 from app.application.use_cases.generation.request import GenerateVideoRequest
 from app.application.use_cases.generation.results import GenerateVideoResult, GenerationStatus
+from app.domain.generation.execution import ExecutionMode
 from app.infrastructure.generation.execution_runtime_store import SqlExecutionRuntimeStore
 from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
+from app.infrastructure.generation.registry import ImageAdapterRegistry
 from app.infrastructure.render.ffmpeg_slideshow_renderer import FfmpegSlideshowRenderer
 from app.infrastructure.render.ffprobe_video_probe import FfprobeVideoProbe
 from app.infrastructure.repositories.catalogue_reader import CatalogueReader
@@ -67,6 +80,14 @@ pytestmark = [
 _BUCKET = "generations"
 _PROVIDER_ID = "golden_provider"
 _ADAPTER_ID = "golden_provider.image"
+# A catalogued local adapter with no code behind it. Seeded by the AUTO test rather than
+# borrowed from the real manifest, so the cascade is proven against data this test owns
+# instead of whatever the ambient database happens to have been seeded with.
+_PHANTOM_PROVIDER_ID = "phantom_local_provider"
+_PHANTOM_ADAPTER_ID = "phantom_local_provider.image"
+# What the offline double claims to be. Deliberately not a catalogue id and never equal to
+# the key it is registered under, so a provenance assertion cannot pass by echo.
+_OFFLINE_IDENTITY = "offline_double"
 
 
 # --------------------------------------------------------------------------- #
@@ -102,10 +123,11 @@ def _render_png(index: int, width: int, height: int) -> bytes:
 class OfflineDeterministicImageGenerator(IImageGenerator):
     """Test-only ``IImageGenerator`` — real PNG bytes, no network, deterministic.
 
-    Ignores ``adapter_id`` exactly like a single-provider adapter would: the
-    resolver's choice flows *through* the port, it does not change what an adapter
-    fundamentally does (produce bytes). Records every call so the test can prove the
-    resolver-chosen adapter id reached the generator.
+    Reports ``_OFFLINE_IDENTITY`` rather than echoing the requested ``adapter_id``, which
+    is what makes the selected identity and the producing implementation independently
+    observable. Under ADR-0054 DISP-2 neither of those is the provenance source: the
+    registry key the use case dispatched on is. Records every call so the test can prove
+    which id reached the generator.
     """
 
     def __init__(self) -> None:
@@ -132,7 +154,8 @@ class OfflineDeterministicImageGenerator(IImageGenerator):
         return GeneratedImage(
             data=_render_png(index, width, height),
             content_type="image/png",
-            adapter_id=adapter_id,
+            adapter_id=_OFFLINE_IDENTITY,
+            provider_id=_OFFLINE_IDENTITY,
         )
 
 
@@ -190,6 +213,33 @@ async def _seed_golden_catalogue(session_factory: async_sessionmaker[AsyncSessio
         await s.commit()
 
 
+async def _seed_phantom_local_adapter(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Seed a LOCAL adapter that the catalogue offers and no deployment can build.
+
+    Free and top-scored, so under AUTO it wins the preferred local tier on paper. The
+    registry has no implementation for it, which is the only reason it loses.
+    """
+    async with session_factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO providers (id, name, pricing, score_quality, score_cost, "
+                "score_speed, score_reliability, enabled) "
+                "VALUES (:id, 'Phantom Local Provider', 'free', 100, 100, 100, 100, true) "
+                "ON CONFLICT (id) DO UPDATE SET enabled = true"
+            ),
+            {"id": _PHANTOM_PROVIDER_ID},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO provider_adapters (id, provider_id, capability_id, execution_mode, "
+                "enabled) VALUES (:id, :pid, 'image_generation', 'local', true) "
+                "ON CONFLICT (id) DO UPDATE SET enabled = true, execution_mode = 'local'"
+            ),
+            {"id": _PHANTOM_ADAPTER_ID, "pid": _PHANTOM_PROVIDER_ID},
+        )
+        await s.commit()
+
+
 async def _cleanup(
     session_factory: async_sessionmaker[AsyncSession], generation_ids: list[UUID]
 ) -> None:
@@ -210,8 +260,14 @@ async def _cleanup(
             await s.execute(
                 text("DELETE FROM generations WHERE id = CAST(:g AS uuid)"), {"g": str(gid)}
             )
-        await s.execute(text("DELETE FROM provider_adapters WHERE id = :id"), {"id": _ADAPTER_ID})
-        await s.execute(text("DELETE FROM providers WHERE id = :id"), {"id": _PROVIDER_ID})
+        await s.execute(
+            text("DELETE FROM provider_adapters WHERE id = ANY(:ids)"),
+            {"ids": [_ADAPTER_ID, _PHANTOM_ADAPTER_ID]},
+        )
+        await s.execute(
+            text("DELETE FROM providers WHERE id = ANY(:ids)"),
+            {"ids": [_PROVIDER_ID, _PHANTOM_PROVIDER_ID]},
+        )
         await s.commit()
 
 
@@ -220,20 +276,33 @@ async def _run(
     storage: LocalObjectStorage,
     generator: IImageGenerator,
     request: GenerateVideoRequest,
+    *,
+    bound_as: str = _ADAPTER_ID,
+    dispatch_registry: ImageAdapterRegistry | None = None,
 ) -> GenerateVideoResult:
     """Compose the real runtime and execute one generation.
 
     The resolver reads the catalogue through a dedicated request session; the
     Execution-Runtime store + model cache use their own short-lived sessions
     (generation is long-running — no single transaction spans it, per ADR-0046).
+
+    ``bound_as`` is the registry key the generator is registered under. It is the whole
+    dispatch contract in one argument: it decides what the deployment can execute, what
+    the resolver may therefore select, and what execution provenance will name.
+
+    ``dispatch_registry`` overrides *only* what Execution dispatches against, leaving the
+    resolver its own view. Production shares one instance, so the two can never disagree;
+    the override exists to construct the non-conformant wiring that DISP-1 makes
+    unreachable, and prove it still fails closed.
     """
+    registry = ImageAdapterRegistry({bound_as: generator})
     async with session_factory() as read_session:
         resolver = ResolverCapabilityResolver(
-            CatalogueReader(read_session), RuntimeStateReader(read_session)
+            CatalogueReader(read_session), RuntimeStateReader(read_session), registry
         )
         use_case = GenerateVideo(
             resolver=resolver,
-            image_generator=generator,
+            adapter_registry=dispatch_registry or registry,
             feature_extractor=PillowFeatureExtractor(),
             renderer=FfmpegSlideshowRenderer(),
             video_probe=FfprobeVideoProbe(),
@@ -302,7 +371,7 @@ async def _assert_persistence(
         assert versions["planner"] and versions["resolver"] and versions["renderer"]
         assert versions["score_schema"] is not None
 
-        # generation_shots — one accepted row per shot, all on the chosen adapter.
+        # generation_shots — one accepted row per shot, naming what produced the bytes.
         shots = (
             (
                 await s.execute(
@@ -320,7 +389,12 @@ async def _assert_persistence(
         assert len(shots) == shot_count
         assert [r["shot_number"] for r in shots] == list(range(shot_count))
         assert all(r["accepted"] for r in shots)
+        # ADR-0054 DISP-2: `adapter_used` is the dispatch binding. The producing
+        # implementation calls itself something else entirely, and that name must not
+        # appear here — nor may this be a copy of the decision, which is asserted
+        # separately below to be the same id for an entirely different reason.
         assert all(r["adapter_used"] == _ADAPTER_ID for r in shots)
+        assert all(r["adapter_used"] != _OFFLINE_IDENTITY for r in shots)
         assert all(r["asset_id"] is not None for r in shots)
         # α8.7: every shot persisted its own derived seed (no single-seed scene).
         assert len({r["seed"] for r in shots}) == shot_count
@@ -465,6 +539,156 @@ async def test_generation_end_to_end(
         created.append(result2.generation_id)
         assert result2.status is GenerationStatus.SUCCEEDED, result2.reason
         _assert_reproducible(result1, result2)
+    finally:
+        await _cleanup(session_factory, created)
+
+
+async def _ledger_row(session_factory: async_sessionmaker[AsyncSession], gid: UUID) -> dict:
+    async with session_factory() as s:
+        shots = (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM generation_shots WHERE generation_id = CAST(:g AS uuid)"
+                ),
+                {"g": str(gid)},
+            )
+        ).scalar_one()
+        led = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT chosen_adapter, execution_result "
+                        "FROM generation_resolution_ledger "
+                        "WHERE generation_id = CAST(:g AS uuid)"
+                    ),
+                    {"g": str(gid)},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return {"shots": shots, **dict(led)}
+
+
+async def test_a_wrong_binding_is_caught_before_anything_executes(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path
+) -> None:
+    """Register the generator under a key the catalogue's winner does not use.
+
+    This is the case the previous fixture could not express. With dispatch ignored the run
+    would have *succeeded* and written ``adapter_used = golden_provider.image`` for bytes
+    that adapter never produced. Under DISP-1 the misbinding is caught one plane earlier:
+    the adapter is not executable, so it is never selected, and the run fails for the
+    honest reason that this deployment can serve nothing.
+    """
+    storage = LocalObjectStorage(root=str(tmp_path), bucket=_BUCKET)
+    await _seed_golden_catalogue(session_factory)
+    created: list[UUID] = []
+    try:
+        result = await _run(
+            session_factory,
+            storage,
+            OfflineDeterministicImageGenerator(),
+            fox_request(generation_id=uuid4()),
+            bound_as="some.other.adapter",
+        )
+        created.append(result.generation_id)
+
+        assert result.status is GenerationStatus.FAILED
+        assert result.reason is not None and "no eligible provider" in result.reason
+
+        row = await _ledger_row(session_factory, result.generation_id)
+        assert row["shots"] == 0  # nothing produced ⇒ nothing claims to have produced
+        assert row["chosen_adapter"] is None
+        # A decision field: resolution yielded no selection (ADR-0054 D2 / PF6).
+        assert row["execution_result"] == "none"
+    finally:
+        await _cleanup(session_factory, created)
+
+
+async def test_desynchronised_wiring_fails_closed_without_claiming_a_producer(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path
+) -> None:
+    """The fail-closed assertion behind DISP-1, exercised by breaking DISP-1 deliberately.
+
+    A conformant deployment cannot reach this: the resolver and the use case share one
+    registry, so a selected adapter is by construction constructible. Tell the resolver
+    the adapter is executable while giving Execution a registry without it, and the
+    guarantee is gone — what must survive is that nothing is *claimed*. No shot row is
+    written, so no execution record names an adapter that never ran, while the decision
+    made before dispatch stays fully on record.
+    """
+    storage = LocalObjectStorage(root=str(tmp_path), bucket=_BUCKET)
+    await _seed_golden_catalogue(session_factory)
+    request = fox_request(generation_id=uuid4())
+    created: list[UUID] = [request.generation_id]
+    try:
+        with pytest.raises(AdapterNotRegisteredError) as excinfo:
+            await _run(
+                session_factory,
+                storage,
+                OfflineDeterministicImageGenerator(),
+                request,
+                dispatch_registry=ImageAdapterRegistry({}),
+            )
+        assert excinfo.value.adapter_id == _ADAPTER_ID
+        assert excinfo.value.retryable is False  # permanent: a retry builds nothing new
+
+        row = await _ledger_row(session_factory, request.generation_id)
+        assert row["shots"] == 0
+        assert row["chosen_adapter"] == _ADAPTER_ID
+        assert row["execution_result"] == "success"
+    finally:
+        await _cleanup(session_factory, created)
+
+
+async def test_auto_cascades_past_adapters_this_deployment_cannot_execute(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path
+) -> None:
+    """AUTO over a catalogue whose best option this deployment cannot build.
+
+    AUTO prefers LOCAL, and the seeded local adapter outscores everything — on paper it
+    wins outright. No code implements it, so it is dropped as ``not_executable``, the
+    local tier empties, and the cascade reaches the free-remote tier where the registry
+    does have an implementation. Before α9.9 the local adapter would have been selected
+    and execution would have run the remote double against it.
+    """
+    storage = LocalObjectStorage(root=str(tmp_path), bucket=_BUCKET)
+    await _seed_golden_catalogue(session_factory)
+    await _seed_phantom_local_adapter(session_factory)
+    created: list[UUID] = []
+    try:
+        generator = OfflineDeterministicImageGenerator()
+        result = await _run(
+            session_factory,
+            storage,
+            generator,
+            fox_request(generation_id=uuid4(), execution_mode=ExecutionMode.AUTO),
+        )
+        created.append(result.generation_id)
+
+        assert result.status is GenerationStatus.SUCCEEDED, result.reason
+        assert result.provenance.chosen_adapter == _ADAPTER_ID
+        assert result.provenance.execution_tier == "free_remote"
+
+        async with session_factory() as s:
+            candidates = (
+                await s.execute(
+                    text(
+                        "SELECT candidate_list FROM generation_resolution_ledger "
+                        "WHERE generation_id = CAST(:g AS uuid)"
+                    ),
+                    {"g": str(result.generation_id)},
+                )
+            ).scalar_one()
+            if isinstance(candidates, str):
+                candidates = json.loads(candidates)
+        by_id = {c["adapter_id"]: c for c in candidates}
+        # The rejected adapter is present and explained, which is what lets the ledger
+        # account for the decision without recording the executable set (D1).
+        phantom = by_id[_PHANTOM_ADAPTER_ID]
+        assert phantom["eligible"] is False
+        assert phantom["ineligible_reason"] == "not_executable"
     finally:
         await _cleanup(session_factory, created)
 

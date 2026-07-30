@@ -7,6 +7,7 @@ from app.domain.resolver.models import (
     AdapterMetrics,
     CatalogueSnapshot,
     DeviceProfile,
+    ExecutableAdapters,
     ExecutionMode,
     Pricing,
     ProviderHealth,
@@ -123,3 +124,13 @@ def runtime(
         quota=quota or {},
         metrics=metrics or {},
     )
+
+
+def all_executable(cat: CatalogueSnapshot) -> ExecutableAdapters:
+    """Every adapter in ``cat`` is constructible — for tests not about executability."""
+    return ExecutableAdapters(adapter_ids=frozenset(a.id for a in cat.adapters))
+
+
+def executable(*adapter_ids: str) -> ExecutableAdapters:
+    """Declare an explicit executable set — for tests that *are* about executability."""
+    return ExecutableAdapters(adapter_ids=frozenset(adapter_ids))

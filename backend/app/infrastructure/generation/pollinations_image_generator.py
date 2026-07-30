@@ -23,6 +23,9 @@ from app.application.interfaces.image_generator import (
 )
 
 PROVIDER_ID = "pollinations"
+# The catalogue's adapter id, and therefore the registry key this adapter is bound under
+# (ADR-0054). CI asserts the two agree; nothing here may diverge from the manifest.
+ADAPTER_ID = "pollinations.image"
 
 
 class PollinationsImageGenerator(IImageGenerator):

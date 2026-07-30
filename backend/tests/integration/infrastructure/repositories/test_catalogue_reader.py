@@ -19,7 +19,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.resolver import ExecutionMode, Pricing, ResolveRequest, RoutingStrategy, resolve
+from app.domain.resolver import (
+    ExecutableAdapters,
+    ExecutionMode,
+    Pricing,
+    ResolveRequest,
+    RoutingStrategy,
+    resolve,
+)
 from app.domain.resolver.models import RuntimeSnapshot
 from app.infrastructure.repositories.catalogue_reader import CatalogueReader
 
@@ -139,6 +146,13 @@ async def test_c2_seeded_catalogue_materialises_snapshot(session: AsyncSession) 
     assert snapshot.strategy_for(keys["cap"]) is RoutingStrategy.FREE_FIRST
     assert snapshot.devices[keys["dev"]].ram_gb == 16
 
-    # End-to-end: the resolver consumes the materialised snapshot.
-    res = resolve(ResolveRequest(capability=keys["cap"]), snapshot, RuntimeSnapshot())
+    # End-to-end: the resolver consumes the materialised snapshot. Executability is a
+    # deployment fact, not a catalogue one — this test is about materialisation, so
+    # everything the reader produced is declared constructible.
+    res = resolve(
+        ResolveRequest(capability=keys["cap"]),
+        snapshot,
+        RuntimeSnapshot(),
+        ExecutableAdapters(frozenset(a.id for a in snapshot.adapters)),
+    )
     assert {c.adapter_id for c in res.eligible} == {keys["a1"], keys["a2"]}

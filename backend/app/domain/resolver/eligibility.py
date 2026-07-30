@@ -10,6 +10,7 @@ from __future__ import annotations
 from app.domain.resolver.models import (
     AdapterInfo,
     CatalogueSnapshot,
+    ExecutableAdapters,
     ExecutionMode,
     Pricing,
     ProviderInfo,
@@ -30,9 +31,18 @@ def ineligibility_reason(
     request: ResolveRequest,
     runtime: RuntimeSnapshot,
     catalogue: CatalogueSnapshot,
+    executable: ExecutableAdapters,
     strategy: ResolverStrategy,
 ) -> str | None:
     """Return the first failing hard-constraint reason, or ``None`` if eligible."""
+    # ADR-0054 D1 — executability is checked first, and the order is load-bearing: only
+    # the *first* failing constraint is reported, so checking here is what makes the
+    # recorded reason a complete account of executability. Every candidate is then either
+    # labelled ``not_executable`` or known to have passed the check, which is why the
+    # ADR can decline to persist the executable set separately.
+    if not executable.can_execute(adapter.id):
+        return "not_executable"
+
     if not provider.enabled:
         return "provider_disabled"
     if not adapter.enabled:

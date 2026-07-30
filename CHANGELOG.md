@@ -6,6 +6,78 @@
 
 ## [Unreleased]
 
+### α9.9 — Execution Adapter Dispatch (`0.4.52-phase3-alpha9.9-dev`)
+
+**The resolver has been choosing an adapter, and the runtime has been ignoring it.** Since α8.5e the
+Decision plane has produced an ordered, scored, fully explainable candidate list, and `GenerateVideo`
+has passed the winner's `adapter_id` to a single hard-wired Pollinations client that discards it.
+Two consequences followed. Provenance could lie: `generation_shots.adapter_used` recorded the
+adapter the resolver *chose*, not the one that produced the bytes, so a run could truthfully-looking
+claim a provider that never ran. And the resolver could recommend an adapter that does not exist in
+the build — under `AUTO` it prefers the LOCAL tier and would return `comfyui.flux_schnell`, which has
+no code — with nothing anywhere to notice. Governed by
+[ADR-0054](docs/decisions/ADR-0054-execution-adapter-dispatch.md) and
+[`PHASE3_ALPHA9_9_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA9_9_PREFLIGHT.md).
+
+#### Added
+- **`ExecutableAdapters`** — a third resolver input beside the catalogue and runtime snapshots. The
+  catalogue is manifest-derived and identified by its digest; the runtime snapshot is
+  measurement-derived; what a deployment can *construct* is build-derived, and folding it into
+  either would have made that object's identity or origin incoherent. The resolver stays pure: it
+  receives data, never a registry.
+- **`IImageAdapterRegistry` + `ImageAdapterRegistry`** — a keyed adapter-id → generator lookup on the
+  `DestinationRegistry` pattern, port in the application layer, implementation in infrastructure,
+  populated at the composition root. A closed table: no runtime `importlib`, no `import_path`
+  loading, and an unregistered key raises `AdapterNotRegisteredError` rather than falling back.
+- **`not_executable`** — a new ineligibility reason, and the **first** eligibility check. Position is
+  load-bearing rather than stylistic: only the first failing constraint is reported, so checking
+  executability first is what makes each recorded reason a complete account of executability. That
+  is why nothing new has to be persisted to explain the decision later.
+- **Registry/catalogue reconciliation in provider validation** — every adapter id this build can
+  construct must be a real catalogue adapter id. The converse (every `implemented: true` manifest
+  adapter having code) waits on ADR-0045 F5's protocol mismatch.
+
+#### Behaviour
+- **DISP-1 — the Decision plane cannot name an adapter Execution cannot build.** The resolver and the
+  use case share one registry instance, so the executable set and the dispatch table are the same
+  object. Both Decision-plane entry points — `ResolverCapabilityResolver` and `ResolverService` —
+  take it.
+- **DISP-2 — producer identity comes from the dispatch binding.** `adapter_used` is now the registry
+  key the use case dispatched on, captured at invocation rather than read back off the artefact.
+  An adapter's self-report is never the source: today's sole adapter echoes the id it was asked for,
+  so a misbinding would produce an artefact that corroborates its own error.
+- **A rejected image still records its producer.** Acceptance and production are different events.
+  Verification failure discards the bytes, and capturing identity at invocation is what keeps the
+  execution history from being discarded with them.
+- **A construction failure records no producer.** No shot row is written, so no execution record
+  claims an adapter ran. The decision fields, written before dispatch, stay populated.
+- **`execution_result` is a decision field.** It records whether resolution produced a selection, not
+  what a provider did; it is written before any adapter is invoked, and `FAILURE`/`FALLBACK` are
+  unreachable on that column by construction. No rename, no migration — the ADR's classification
+  table is the normative statement, not the column name.
+- **Only `candidates[0]` executes.** No walking, no authored fallback-chain execution, no
+  re-scoring in Execution. `AdapterInfo.fallbacks` stays loaded, unread by Execution, and available
+  as future resolver input.
+
+#### Changed
+- **An adapter that is both unconstructible and disabled now reports `not_executable`** where it
+  previously reported `adapter_disabled`. The ledger's `candidate_list` is API-visible, so this is a
+  visible output change for such rows.
+- **Stage 13 no longer asserts the defect.** Its previous check passed because the offline double
+  echoed back whatever id it was handed. The fixture now registers that double under the id the
+  resolver selects, has it report an identity of its own so the binding and the self-report are
+  independently observable, and adds two tests the old shape could not express: a wrong binding must
+  fail closed, and `AUTO` must cascade past adapters this deployment cannot execute.
+
+#### Accepted limitations
+- **The tier cascade is still unexplained in the ledger.** The recorded `candidate_list` is the pure
+  resolver's, while `chosen_adapter` is the winner *after* the application-layer cascade, so a row
+  can name a `chosen_adapter` that is not the top of its own list. α9.9 improves this — every
+  `not_executable` verdict is now in the recorded list — without closing it. Closing it means either
+  losing the filtered candidates the ledger exists to keep, or a migration.
+- **No fallback walking, no usage metering, no additional real adapters.** Dispatch is the slice; a
+  second adapter is what would make walking worth building.
+
 ### α9.8 — Worker Runtime Host (`0.4.51-phase3-alpha9.8`, 2026-07-29)
 
 **No background work has ever run in production, and this slice is why it now does.** Across α8.1
