@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from app.application.interfaces.capability_resolver import ICapabilityResolver
+from app.application.interfaces.image_generator import AdapterNotRegisteredError
 from app.application.use_cases.generation.generate_video import GenerateVideo
 from app.application.use_cases.generation.request import GenerateVideoRequest
 from app.application.use_cases.generation.results import GenerationStatus
@@ -15,6 +16,7 @@ from app.domain.generation.execution import ExecutionMode, ExecutionTier
 from app.domain.generation.identity import Character, GlobalStyle, IdentityProfile, Location
 
 from ._fakes import (
+    FakeAdapterRegistry,
     FakeCapabilityResolver,
     FakeFeatureExtractor,
     FakeImageGenerator,
@@ -65,6 +67,7 @@ def _use_case(
     generator: FakeImageGenerator | None = None,
     resolver: ICapabilityResolver | None = None,
     store: RecordingExecutionRuntimeStore | None = None,
+    registry: FakeAdapterRegistry | None = None,
 ) -> tuple[GenerateVideo, dict[str, object]]:
     gen = generator or FakeImageGenerator()
     ext = extractor or FakeFeatureExtractor()
@@ -73,9 +76,12 @@ def _use_case(
     obj = storage or FakeObjectStorage()
     res = resolver or FakeCapabilityResolver(candidates)
     runtime_store = store or RecordingExecutionRuntimeStore()
+    # Bind the generator under every candidate id, so whichever the decision picks is
+    # constructible — a deployment conformant with DISP-1.
+    reg = registry or FakeAdapterRegistry({c.adapter_id: gen for c in candidates})
     uc = GenerateVideo(
         resolver=res,
-        image_generator=gen,
+        adapter_registry=reg,
         feature_extractor=ext,
         renderer=rnd,
         video_probe=prb,
@@ -91,6 +97,7 @@ def _use_case(
         "storage": obj,
         "resolver": res,
         "store": runtime_store,
+        "registry": reg,
     }
 
 
@@ -294,6 +301,72 @@ async def test_shot_failure_records_failed_shot_to_store() -> None:
     assert store.shots[0].accepted is False
     assert store.shots[0].asset_id is None
     assert "failed" in store.statuses
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch + execution provenance (ADR-0054)
+# --------------------------------------------------------------------------- #
+async def test_execution_dispatches_on_the_chosen_adapter_id() -> None:
+    store = RecordingExecutionRuntimeStore()
+    uc, fx = _use_case(candidates=(remote_adapter("fal.flux"),), store=store)
+    registry: FakeAdapterRegistry = fx["registry"]  # type: ignore[assignment]
+    result = await uc.execute(_request())
+
+    assert result.succeeded
+    assert set(registry.requested) == {"fal.flux"}
+    assert all(s.adapter_used == "fal.flux" for s in store.shots)
+
+
+async def test_producer_identity_comes_from_the_binding_not_the_adapters_self_report() -> None:
+    # DISP-2: an adapter that misreports itself cannot corrupt provenance, because the
+    # registry key we dispatched on is the authority.
+    store = RecordingExecutionRuntimeStore()
+    liar = FakeImageGenerator(reports_as="someone.else")
+    uc, _ = _use_case(generator=liar, store=store)
+    result = await uc.execute(_request())
+
+    assert result.succeeded
+    assert all(s.adapter_used == "pollinations.image" for s in store.shots)
+
+
+async def test_a_wrong_registry_binding_is_visible_in_provenance() -> None:
+    # The negative of the previous test: bind the chosen id to an implementation that is
+    # not the one the catalogue means, and provenance must name what we dispatched on —
+    # which is what makes a misbinding detectable rather than silently absorbed.
+    store = RecordingExecutionRuntimeStore()
+    registry = FakeAdapterRegistry({"pollinations.image": FakeImageGenerator(reports_as="comfyui")})
+    uc, _ = _use_case(registry=registry, store=store)
+    await uc.execute(_request())
+
+    produced = {s.adapter_used for s in store.shots}
+    assert produced == {"pollinations.image"}
+    assert "comfyui" not in produced
+
+
+async def test_rejected_bytes_still_record_their_producer() -> None:
+    # Acceptance and production are different events (ADR-0054 D2): verification failed,
+    # the image was discarded, but something did produce it and the record says so.
+    store = RecordingExecutionRuntimeStore()
+    uc, _ = _use_case(extractor=FakeFeatureExtractor(fail_first=99), store=store)
+    await uc.execute(_request(max_attempts=2))
+
+    assert len(store.shots) == 1
+    assert store.shots[0].accepted is False
+    assert store.shots[0].adapter_used == "pollinations.image"
+
+
+async def test_an_unconstructible_adapter_records_no_producer() -> None:
+    # Non-conformant wiring: the decision named an adapter the deployment cannot build.
+    # Fail closed — no shot row, so no execution record claims an adapter ran.
+    store = RecordingExecutionRuntimeStore()
+    uc, _ = _use_case(registry=FakeAdapterRegistry({}), store=store)
+
+    with pytest.raises(AdapterNotRegisteredError):
+        await uc.execute(_request())
+
+    assert store.shots == []
+    # The decision is still recorded: a selection was made, nothing executed.
+    assert store.resolutions == ["success"]
 
 
 async def test_deterministic_result_shape() -> None:

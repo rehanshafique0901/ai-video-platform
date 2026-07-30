@@ -15,7 +15,12 @@ from app.application.interfaces.execution_runtime_store import (
     ShotRecord,
 )
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
-from app.application.interfaces.image_generator import GeneratedImage, IImageGenerator
+from app.application.interfaces.image_generator import (
+    AdapterNotRegisteredError,
+    GeneratedImage,
+    IImageAdapterRegistry,
+    IImageGenerator,
+)
 from app.application.interfaces.model_manager import IModelManager, LocalModel
 from app.application.interfaces.object_storage import IObjectStorage, StoredObject
 from app.application.interfaces.slideshow_renderer import (
@@ -50,10 +55,16 @@ class FakeCapabilityResolver(ICapabilityResolver):
 
 
 class FakeImageGenerator(IImageGenerator):
-    """Produces deterministic bytes; records every generate call."""
+    """Produces deterministic bytes; records every generate call.
 
-    def __init__(self) -> None:
+    ``reports_as`` makes the adapter's *self-reported* identity differ from the id it was
+    asked for, which is how tests tell a genuine dispatch binding apart from an echo
+    (ADR-0054 DISP-2). Left unset it echoes, exactly as the real Pollinations adapter does.
+    """
+
+    def __init__(self, *, reports_as: str | None = None) -> None:
         self.calls: list[dict[str, object]] = []
+        self._reports_as = reports_as
 
     async def generate(
         self,
@@ -80,9 +91,27 @@ class FakeImageGenerator(IImageGenerator):
         return GeneratedImage(
             data=f"img:{adapter_id}:{seed}:{prompt}".encode(),
             content_type="image/png",
-            adapter_id=adapter_id,
+            adapter_id=self._reports_as or adapter_id,
             provider_id="p",
         )
+
+
+class FakeAdapterRegistry(IImageAdapterRegistry):
+    """Adapter-id → generator map; records every key it was asked to bind."""
+
+    def __init__(self, adapters: dict[str, IImageGenerator]) -> None:
+        self._adapters = dict(adapters)
+        self.requested: list[str] = []
+
+    def for_adapter(self, adapter_id: str) -> IImageGenerator:
+        self.requested.append(adapter_id)
+        adapter = self._adapters.get(adapter_id)
+        if adapter is None:
+            raise AdapterNotRegisteredError(adapter_id)
+        return adapter
+
+    def supported_adapters(self) -> frozenset[str]:
+        return frozenset(self._adapters)
 
 
 class FakeFeatureExtractor(IImageFeatureExtractor):

@@ -142,6 +142,30 @@ class RuntimeSnapshot:
 
 
 # --------------------------------------------------------------------------- #
+# Deployment — executable adapters (ADR-0054 D1; read-only to the resolver)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableAdapters:
+    """The adapter ids this deployment can construct (ADR-0054 D1).
+
+    A third input category, deliberately separate from the other two: the catalogue is
+    manifest-derived and identified by ``manifest_digest``, the runtime snapshot is
+    measurement-derived, and executability is *build*-derived — two deployments of one
+    manifest can construct different adapters. Folding it into either would make that
+    object's identity or origin incoherent.
+
+    Empty means nothing is executable, so the default fails closed.
+    """
+
+    adapter_ids: frozenset[str] = frozenset()
+
+    def can_execute(self, adapter_id: str) -> bool:
+        return adapter_id in self.adapter_ids
+
+
+# --------------------------------------------------------------------------- #
 # Request — the current generation
 # --------------------------------------------------------------------------- #
 

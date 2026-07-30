@@ -19,6 +19,7 @@ from app.domain.resolver import (
 from app.domain.resolver.models import (
     AdapterInfo,
     CatalogueSnapshot,
+    ExecutableAdapters,
     ExecutionMode,
     RoutingStrategy,
 )
@@ -101,7 +102,12 @@ def test_build_runtime_snapshot_drives_resolver_health() -> None:
         ),
         routing={"default": RoutingStrategy.BALANCED},
     )
-    res = resolve(ResolveRequest(capability="image_generation"), catalogue, snapshot)
+    res = resolve(
+        ResolveRequest(capability="image_generation"),
+        catalogue,
+        snapshot,
+        ExecutableAdapters(frozenset({"poll.image"})),
+    )
     top = res.top
     assert top is not None and top.breakdown is not None
     assert top.breakdown.health_multiplier == 0.5

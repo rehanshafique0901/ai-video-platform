@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.interfaces.image_generator import IImageAdapterRegistry, IImageGenerator
 from app.application.interfaces.resolution_ledger import ExecutionOutcome
 from app.application.use_cases.resolver.resolver_service import ResolverService
 from app.domain.resolver import ResolveRequest, RoutingStrategy
@@ -67,12 +68,31 @@ async def _seed(session: AsyncSession, *, tag: str) -> dict[str, str]:
     return {"cap": cap, "prov": prov, "a1": a1, "dev": dev}
 
 
+class _ExecutableSet(IImageAdapterRegistry):
+    """Declares what this deployment can construct (ADR-0054 D1).
+
+    Decision-plane only: resolution needs the executable set, never the generators
+    behind it, so asking for one here is a bug the lookup makes loud.
+    """
+
+    def __init__(self, *adapter_ids: str) -> None:
+        self._ids = frozenset(adapter_ids)
+
+    def for_adapter(self, adapter_id: str) -> IImageGenerator:
+        raise AssertionError(f"this test resolves but never executes: {adapter_id}")
+
+    def supported_adapters(self) -> frozenset[str]:
+        return self._ids
+
+
 @pytest.mark.integration
 async def test_seed_resolve_and_record_ledger(session: AsyncSession) -> None:
     tag = uuid4().hex[:8]
     keys = await _seed(session, tag=tag)
 
-    service = ResolverService(CatalogueReader(session), RuntimeStateReader(session))
+    service = ResolverService(
+        CatalogueReader(session), RuntimeStateReader(session), _ExecutableSet(keys["a1"])
+    )
     resolution = await service.resolve(ResolveRequest(capability=keys["cap"]))
 
     assert resolution.routing_strategy is RoutingStrategy.FREE_FIRST

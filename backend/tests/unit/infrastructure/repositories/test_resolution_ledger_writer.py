@@ -8,6 +8,7 @@ from app.domain.resolver import ResolveRequest, resolve
 from app.domain.resolver.models import (
     AdapterInfo,
     CatalogueSnapshot,
+    ExecutableAdapters,
     ExecutionMode,
     Pricing,
     ProviderInfo,
@@ -51,7 +52,12 @@ def _resolution() -> object:
         routing={"default": RoutingStrategy.BALANCED},
     )
     # local_only makes the cloud adapter ineligible → exercises both branches.
-    return resolve(ResolveRequest(capability="cap", local_only=True), catalogue, RuntimeSnapshot())
+    return resolve(
+        ResolveRequest(capability="cap", local_only=True),
+        catalogue,
+        RuntimeSnapshot(),
+        ExecutableAdapters(frozenset({"p.local", "p.cloud"})),
+    )
 
 
 def test_candidate_list_payload_captures_full_ranked_list() -> None:

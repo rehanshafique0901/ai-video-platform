@@ -5,7 +5,8 @@ A thin translation layer between the generation use case (which speaks
 ``ResolveRequest`` + score). It:
 
 1. maps constraints -> a ``ResolveRequest`` (local_only / allow_paid),
-2. runs the pure resolver against a single immutable catalogue snapshot (W8.5e.6),
+2. runs the pure resolver against a single immutable catalogue snapshot (W8.5e.6) and the
+   deployment's executable adapter set, derived from the registry port (ADR-0054 D1),
 3. enriches each eligible candidate with its execution *tier* (derived from the
    adapter's execution mode + the provider's pricing — never a provider name), and
 4. applies the execution-mode policy: AUTO/single-tier modes cascade to the first
@@ -23,6 +24,7 @@ from app.application.interfaces.capability_resolver import (
     ResolvedAdapter,
 )
 from app.application.interfaces.catalogue_reader import ICatalogueReader
+from app.application.interfaces.image_generator import IImageAdapterRegistry
 from app.application.interfaces.runtime_state_reader import IRuntimeStateReader
 from app.application.use_cases.resolver.resolver_service import CatalogueNotSeededError
 from app.domain.generation.execution import ExecutionConstraints, ExecutionTier
@@ -31,6 +33,7 @@ from app.domain.resolver.models import (
     AdapterInfo,
     Candidate,
     CatalogueSnapshot,
+    ExecutableAdapters,
     ExecutionMode as ResolverExecutionMode,
     Pricing,
     ProviderInfo,
@@ -87,9 +90,11 @@ class ResolverCapabilityResolver(ICapabilityResolver):
         self,
         catalogue_reader: ICatalogueReader,
         runtime_reader: IRuntimeStateReader,
+        adapter_registry: IImageAdapterRegistry,
     ) -> None:
         self._catalogue = catalogue_reader
         self._runtime = runtime_reader
+        self._adapters = adapter_registry
 
     async def resolve(
         self,
@@ -105,10 +110,14 @@ class ResolverCapabilityResolver(ICapabilityResolver):
                 "provider catalogue is not seeded; run scripts/seed_providers.py"
             )
         runtime = await self._runtime.load_snapshot()
+        # ADR-0054 D1: what this deployment can construct is a resolver *input*, so the
+        # Decision plane can never name an adapter Execution would fail to build.
+        executable = ExecutableAdapters(adapter_ids=self._adapters.supported_adapters())
         resolution = resolve_candidates(
             _to_request(capability, constraints, prompt, budget),
             snapshot,
             runtime,
+            executable,
             resolver_version=RESOLVER_VERSION,
         )
 

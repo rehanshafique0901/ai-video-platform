@@ -44,6 +44,10 @@ from provider_manifest import (  # noqa: E402
     load_routing,
 )
 
+from app.infrastructure.generation.registry import (  # noqa: E402
+    IMPLEMENTED_IMAGE_ADAPTER_IDS,
+)
+
 _ADAPTER_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _CONFIG_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _PARAM_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -443,6 +447,28 @@ def _rule_cost(pdoc: ProvidersDoc, r: Report) -> None:
             )
 
 
+def _rule_registry_reconciliation(
+    pdoc: ProvidersDoc, implemented_adapter_ids: frozenset[str], r: Report
+) -> None:
+    """Every adapter this build can construct must be a real catalogue adapter id.
+
+    ADR-0054: the registry key *is* the executable-set entry the resolver is told about
+    and the identity execution provenance records, so a key that names no catalogue
+    adapter is unreachable code with a provenance value nothing can interpret.
+
+    Weakest useful form on purpose. The converse — every ``implemented: true`` manifest
+    adapter having code — is not asserted yet; ADR-0045 F5's protocol mismatch has to be
+    settled before the manifest's ``implemented`` flag can be held to that standard.
+    """
+    manifest_ids = {a.id for _, a in _adapters(pdoc)}
+    for adapter_id in sorted(implemented_adapter_ids):
+        if adapter_id not in manifest_ids:
+            r.error(
+                "registry_reconciliation",
+                f"registered image adapter {adapter_id!r} is not in the provider manifest",
+            )
+
+
 def _rule_devices(devices: DevicesDoc | None, r: Report) -> None:
     if devices is None:
         return
@@ -455,7 +481,16 @@ def validate(
     pdoc: ProvidersDoc,
     rdoc: RoutingDoc,
     devices: DevicesDoc | None = None,
+    *,
+    implemented_adapter_ids: frozenset[str] | None = None,
 ) -> Report:
+    """Validate the manifests. ``implemented_adapter_ids`` defaults to this build's
+    registry keys; tests validating synthetic manifests pass their own set."""
+    implemented = (
+        IMPLEMENTED_IMAGE_ADAPTER_IDS
+        if implemented_adapter_ids is None
+        else implemented_adapter_ids
+    )
     r = Report()
     _rule_uniqueness(cat, pdoc, r)
     _rule_capability_metadata(cat, r)
@@ -475,6 +510,7 @@ def validate(
     _rule_config_keys(pdoc, r)
     _rule_anti_drift(cat, r)
     _rule_free_provider_sanity(pdoc, rdoc, r)
+    _rule_registry_reconciliation(pdoc, implemented, r)
     _rule_devices(devices, r)
     return r
 

@@ -38,7 +38,7 @@ from app.application.interfaces.download_delivery import IDownloadDelivery
 from app.application.interfaces.exporter import IExporter
 from app.application.interfaces.gif_previewer import IGifPreviewer
 from app.application.interfaces.image_feature_extractor import IImageFeatureExtractor
-from app.application.interfaces.image_generator import IImageGenerator
+from app.application.interfaces.image_generator import IImageAdapterRegistry, IImageGenerator
 from app.application.interfaces.media_downloader import IMediaDownloader
 from app.application.interfaces.notifier import INotifier
 from app.application.interfaces.oauth_state_signer import IOAuthStateSigner
@@ -231,7 +231,11 @@ from app.infrastructure.generation.generation_reader import GenerationReader
 from app.infrastructure.generation.generation_runner import SessionScopedGenerationRunner
 from app.infrastructure.generation.model_cache_manager import ModelCacheManager
 from app.infrastructure.generation.pillow_feature_extractor import PillowFeatureExtractor
-from app.infrastructure.generation.pollinations_image_generator import PollinationsImageGenerator
+from app.infrastructure.generation.pollinations_image_generator import (
+    ADAPTER_ID as POLLINATIONS_ADAPTER_ID,
+    PollinationsImageGenerator,
+)
+from app.infrastructure.generation.registry import ImageAdapterRegistry
 from app.infrastructure.media import HttpMediaDownloader
 from app.infrastructure.notifications.logging_notifier import LoggingNotifier
 from app.infrastructure.notifications.smtp_notifier import SmtpNotifier
@@ -319,8 +323,11 @@ _media_download_client: httpx.AsyncClient | None = None
 # owns a dedicated httpx client (closed in shutdown()); the Pillow extractor,
 # slideshow renderer and ffprobe probe are stateless. All built lazily so the
 # common test path opens no HTTP client and shells out to no binary at import.
-_image_generator: IImageGenerator | None = None
-_image_client: httpx.AsyncClient | None = None
+# α9.9 (ADR-0054): image adapters are reached through a keyed registry, so client
+# ownership is a list rather than one named client — each adapter appends its own as it
+# is constructed, and shutdown() closes them in a loop.
+_image_adapter_registry: IImageAdapterRegistry | None = None
+_image_adapter_clients: list[httpx.AsyncClient] = []
 _feature_extractor: IImageFeatureExtractor | None = None
 _slideshow_renderer: ISlideshowRenderer | None = None
 _video_probe: IVideoProbe | None = None
@@ -488,7 +495,7 @@ async def shutdown() -> None:
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
-    global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
+    global _image_adapter_registry, _feature_extractor, _slideshow_renderer, _video_probe
     global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
     global _tiktok_client
     if _engine is not None:
@@ -501,8 +508,8 @@ async def shutdown() -> None:
         await _fal_webhook_client.aclose()
     if _media_download_client is not None:
         await _media_download_client.aclose()
-    if _image_client is not None:
-        await _image_client.aclose()
+    for image_client in _image_adapter_clients:
+        await image_client.aclose()
     if _youtube_client is not None:
         await _youtube_client.aclose()
     if _tiktok_client is not None:
@@ -527,8 +534,8 @@ async def shutdown() -> None:
     _storage_resolver = None
     _cloud_bundle = None
     _cloud_bundle_built = False
-    _image_generator = None
-    _image_client = None
+    _image_adapter_registry = None
+    _image_adapter_clients.clear()
     _feature_extractor = None
     _slideshow_renderer = None
     _video_probe = None
@@ -549,7 +556,7 @@ def reset() -> None:
     global _object_storage, _media_downloader, _media_download_client, _renderer, _thumbnailer
     global _preview_clipper, _gif_previewer, _waveform_renderer, _exporter, _download_delivery
     global _storage_resolver, _cloud_bundle, _cloud_bundle_built
-    global _image_generator, _image_client, _feature_extractor, _slideshow_renderer, _video_probe
+    global _image_adapter_registry, _feature_extractor, _slideshow_renderer, _video_probe
     global _destination_registry, _youtube_client, _publish_metadata_generator, _notifier
     global _tiktok_client
     _settings = None
@@ -582,8 +589,8 @@ def reset() -> None:
     _storage_resolver = None
     _cloud_bundle = None
     _cloud_bundle_built = False
-    _image_generator = None
-    _image_client = None
+    _image_adapter_registry = None
+    _image_adapter_clients.clear()
     _feature_extractor = None
     _slideshow_renderer = None
     _video_probe = None
@@ -762,7 +769,9 @@ def get_runtime_state_reader(session: AsyncSession) -> IRuntimeStateReader:
 
 def get_resolver_service(session: AsyncSession) -> ResolverService:
     """Factory: a ``ResolverService`` (catalogue + runtime readers) over the session (α8.5e.5)."""
-    return ResolverService(CatalogueReader(session), RuntimeStateReader(session))
+    return ResolverService(
+        CatalogueReader(session), RuntimeStateReader(session), _get_image_adapter_registry()
+    )
 
 
 def get_resolution_ledger(session: AsyncSession) -> IResolutionLedger:
@@ -1477,21 +1486,33 @@ def get_process_render_job_use_case() -> ProcessRenderJob:
 # eligible candidate.
 
 
-def _get_image_generator() -> IImageGenerator:
-    """Lazily build + memoise the Pollinations image generator + its HTTP client."""
-    global _image_generator, _image_client
+def _build_pollinations_adapter() -> IImageGenerator:
+    """Construct the Pollinations adapter + its HTTP client (closed in ``shutdown()``)."""
+    settings = _get_settings()
+    client = httpx.AsyncClient(
+        base_url=settings.pollinations_base_url,
+        timeout=settings.pollinations_timeout_seconds,
+        follow_redirects=True,
+    )
+    _image_adapter_clients.append(client)
+    return PollinationsImageGenerator(client=client, model=settings.pollinations_model)
+
+
+def _get_image_adapter_registry() -> IImageAdapterRegistry:
+    """Lazily build + memoise the adapter-id → generator registry (ADR-0054).
+
+    This is the composition root's declaration of what this deployment can execute: its
+    keys become the resolver's ``ExecutableAdapters``, and the key an adapter is
+    registered under is the authority on what produced an artefact. Keys are catalogue
+    adapter ids; CI asserts the correspondence.
+    """
+    global _image_adapter_registry
     _require_init()
-    if _image_generator is None:
-        settings = _get_settings()
-        _image_client = httpx.AsyncClient(
-            base_url=settings.pollinations_base_url,
-            timeout=settings.pollinations_timeout_seconds,
-            follow_redirects=True,
+    if _image_adapter_registry is None:
+        _image_adapter_registry = ImageAdapterRegistry(
+            {POLLINATIONS_ADAPTER_ID: _build_pollinations_adapter()}
         )
-        _image_generator = PollinationsImageGenerator(
-            client=_image_client, model=settings.pollinations_model
-        )
-    return _image_generator
+    return _image_adapter_registry
 
 
 def _get_feature_extractor() -> IImageFeatureExtractor:
@@ -1530,17 +1551,22 @@ def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
     """Factory: the α8.6 end-to-end generation use case over the supplied session.
 
     The capability resolver reads the catalogue + runtime snapshots through the
-    request ``session``; the image generator / extractor / renderer / probe are
-    process-wide (memoised). The persistent Execution Runtime store + model cache
-    manager use their own short-lived sessions (generation is long-running, so no
-    single transaction spans the run — Increment 4 / ADR-0046). The Model Cache has
-    no downloader until Increment 6; it resolves already-registered local models.
+    request ``session``; the adapter registry / extractor / renderer / probe are
+    process-wide (memoised). Resolver and use case share one registry instance, so
+    what the Decision plane treats as executable is by construction what Execution
+    can build. The persistent Execution Runtime store + model cache manager use their
+    own short-lived sessions (generation is long-running, so no single transaction
+    spans the run — Increment 4 / ADR-0046). The Model Cache has no downloader until
+    Increment 6; it resolves already-registered local models.
     """
-    resolver = ResolverCapabilityResolver(CatalogueReader(session), RuntimeStateReader(session))
+    registry = _get_image_adapter_registry()
+    resolver = ResolverCapabilityResolver(
+        CatalogueReader(session), RuntimeStateReader(session), registry
+    )
     session_factory = get_session_factory()
     return GenerateVideo(
         resolver=resolver,
-        image_generator=_get_image_generator(),
+        adapter_registry=registry,
         feature_extractor=_get_feature_extractor(),
         renderer=_get_slideshow_renderer(),
         video_probe=_get_video_probe(),

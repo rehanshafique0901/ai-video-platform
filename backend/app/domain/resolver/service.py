@@ -1,6 +1,7 @@
 """α8.5e — the resolver core (pure, deterministic).
 
-`resolve(request, catalogue, runtime)` → an ordered, explainable candidate list. It never
+`resolve(request, catalogue, runtime, executable)` → an ordered, explainable candidate list.
+Executability is an input (ADR-0054 D1), never an import. It never
 executes, never mutates the catalogue (W8.5e.2) or runtime health (W8.5e.3); given
 identical inputs it returns byte-identical output (W8.5e.4) against a single immutable
 snapshot (W8.5e.6). No provider-specific branching lives here (W8.5e.8) — everything is
@@ -16,6 +17,7 @@ from app.domain.resolver.eligibility import ineligibility_reason
 from app.domain.resolver.models import (
     Candidate,
     CatalogueSnapshot,
+    ExecutableAdapters,
     Resolution,
     ResolveRequest,
     RuntimeSnapshot,
@@ -48,6 +50,7 @@ def resolve(
     request: ResolveRequest,
     catalogue: CatalogueSnapshot,
     runtime: RuntimeSnapshot,
+    executable: ExecutableAdapters,
     *,
     resolver_version: str = RESOLVER_VERSION,
 ) -> Resolution:
@@ -79,7 +82,9 @@ def resolve(
             )
             continue
 
-        reason = ineligibility_reason(adapter, provider, request, runtime, catalogue, strategy)
+        reason = ineligibility_reason(
+            adapter, provider, request, runtime, catalogue, executable, strategy
+        )
         if reason is not None:
             ineligible.append(
                 Candidate(

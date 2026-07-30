@@ -130,8 +130,18 @@ def _routing(strategy: str = "free_first", by_capability: dict | None = None) ->
     )
 
 
-def _validate(cat=None, pdoc=None, rdoc=None, devices=None) -> vp.Report:
-    return vp.validate(cat or _catalogue(), pdoc or _providers(), rdoc or _routing(), devices)
+def _validate(
+    cat=None, pdoc=None, rdoc=None, devices=None, *, implemented=frozenset()
+) -> vp.Report:
+    """Validate a synthetic manifest. The synthetic build implements nothing by default,
+    so registry reconciliation is opted into by the tests that exercise it."""
+    return vp.validate(
+        cat or _catalogue(),
+        pdoc or _providers(),
+        rdoc or _routing(),
+        devices,
+        implemented_adapter_ids=implemented,
+    )
 
 
 def _err_rules(report: vp.Report) -> set[str]:
@@ -150,6 +160,28 @@ def _warn_rules(report: vp.Report) -> set[str]:
 def test_base_manifest_is_valid() -> None:
     report = _validate()
     assert report.ok, report.errors
+
+
+def test_registered_adapter_must_exist_in_the_manifest() -> None:
+    # ADR-0054: a registry key is both an executable-set entry and a provenance value, so
+    # one that names no catalogue adapter is unreachable code writing an uninterpretable id.
+    report = _validate(implemented=frozenset({"ghost.image"}))
+    assert "registry_reconciliation" in _err_rules(report)
+
+
+def test_a_registered_adapter_present_in_the_manifest_is_clean() -> None:
+    report = _validate(implemented=frozenset({"alpha.image"}))
+    assert "registry_reconciliation" not in _err_rules(report)
+
+
+def test_the_real_build_reconciles_with_the_committed_manifest() -> None:
+    # The assertion that actually guards the repository: this build's registry keys are
+    # real catalogue adapter ids. Uses validate()'s default implemented set.
+    cat = pm.load_catalogue(pm.PROVIDERS_DIR / pm.CAPABILITIES_FILE)
+    pdoc = pm.load_providers(pm.PROVIDERS_DIR / pm.PROVIDERS_FILE)
+    rdoc = pm.load_routing(pm.PROVIDERS_DIR / pm.ROUTING_FILE)
+    report = vp.validate(cat, pdoc, rdoc, pm.load_devices(pm.PROVIDERS_DIR / pm.DEVICES_FILE))
+    assert "registry_reconciliation" not in _err_rules(report)
 
 
 def test_committed_manifest_validates_clean() -> None:
