@@ -383,10 +383,12 @@ verdict in the recorded `candidate_list`, which is what lets ADR-0054 decline to
 Three departures, all discovered while implementing and none reopening an ADR-0054 decision.
 
 **A second Decision-plane entry point.** The plan named `ResolverCapabilityResolver` as the only
-consumer of the pure resolver. `ResolverService` — which serves the resolver API's preview/explain
-path — is a second one. Left alone it would have kept recommending adapters this deployment cannot
-construct, so it takes the executable set the same way. DISP-1 is a property of resolution, not of
-one caller.
+consumer of the pure resolver. `ResolverService` is a second one. It is dormant today — reachable
+only through `container.get_resolver_service`, which nothing in `app/` calls — so the signature
+change is what forced the question, not a live path. Giving it the same executable set rather than
+a locally invented one is what keeps DISP-1 a property of *resolution* instead of a property of one
+caller: whenever this composition is wired to something, it cannot recommend an adapter the
+deployment is unable to construct, and no future surface has to remember to re-establish that.
 
 **The wrong-binding test splits in two.** Section 9 item 3 expected a misbinding to surface as
 `AdapterNotRegisteredError`. It cannot, and the reason is the invariant working: a wrong binding

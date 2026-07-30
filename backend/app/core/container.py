@@ -1552,11 +1552,12 @@ def get_generate_video_use_case(session: AsyncSession) -> GenerateVideo:
 
     The capability resolver reads the catalogue + runtime snapshots through the
     request ``session``; the adapter registry / extractor / renderer / probe are
-    process-wide (memoised). Resolver and use case share one registry instance, so what
-    the Decision plane treats as executable is by construction what Execution can build. The persistent Execution Runtime store + model cache
-    manager use their own short-lived sessions (generation is long-running, so no
-    single transaction spans the run — Increment 4 / ADR-0046). The Model Cache has
-    no downloader until Increment 6; it resolves already-registered local models.
+    process-wide (memoised). Resolver and use case share one registry instance, so
+    what the Decision plane treats as executable is by construction what Execution
+    can build. The persistent Execution Runtime store + model cache manager use their
+    own short-lived sessions (generation is long-running, so no single transaction
+    spans the run — Increment 4 / ADR-0046). The Model Cache has no downloader until
+    Increment 6; it resolves already-registered local models.
     """
     registry = _get_image_adapter_registry()
     resolver = ResolverCapabilityResolver(
