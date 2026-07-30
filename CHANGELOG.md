@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### α9.9 — Execution Adapter Dispatch (`0.4.52-phase3-alpha9.9-dev`)
+### α9.9 — Execution Adapter Dispatch (`0.4.52-phase3-alpha9.9`, 2026-07-30)
 
 **The resolver has been choosing an adapter, and the runtime has been ignoring it.** Since α8.5e the
 Decision plane has produced an ordered, scored, fully explainable candidate list, and `GenerateVideo`
