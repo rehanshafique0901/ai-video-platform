@@ -1,7 +1,8 @@
 # Phase 3 — α10.0 Pre-flight: Identity-Runtime Authoring
 
 > **Status:** **Approved 2026-07-31**, and reconciled against the accepted ADR-0055 in a recorded
-> pass (§14). Implementation begins at §12 step 1 once the governance baseline is committed.
+> pass (§14). Implementation is complete through §12 step 11; what it did and what it decided is
+> recorded in §15. Only step 12 (release) remains.
 >
 > **Slice:** α10.0 — durable, creator-authored world state (characters, locations, props, project
 > look, seed) bound into a generation at request time.
@@ -395,3 +396,111 @@ granularity, and whether a profile may be created inline with a generation — a
 choices inside §12 and are not pre-empted here. Open questions 5–6 — which slice lifts the location
 cap, and when v1 payload retirement becomes worthwhile — belong to later slices and are not opened
 by this one.
+
+---
+
+## 15. Implementation record
+
+*Written 2026-08-01, on completion of §12 steps 1–11. Branch
+`feat/alpha10.0-identity-runtime-authoring`, baselined at `9d9288d` (the governance baseline plus
+the naming correction). Eight commits, 45 files, +5723/−53. The slice is implemented, not released:
+step 12 has not started.*
+
+### 15.1 The steps, as they were actually taken
+
+| Step | Commit | What landed |
+|---|---|---|
+| 1 | `7c8ac35` | `app/domain/identity_runtime/` — `IdentityProfile` root, `Character` / `Location` / `Prop`, caps, validation, total child ordering |
+| 2 | `c6d66e8` | Migration `0017_identity_runtime` + `models/identity_runtime.py` (the step-boundary correction above), ERD regenerated |
+| 3 | `55f63c1` | `IIdentityRepository`, `identity_repository.py`, the `IUnitOfWork` slot, keyset list |
+| 4 | `f99e070` | Eight use cases: create / get / list / update / delete profile, add / update / remove child |
+| 5 | `0c90184` | `schemas/identity.py`, `routers/identity.py`, `deps.py`, container factories, `main.py` registration |
+| 6–9 | `1db5cd8` | Codec v2, ingress binding and snapshot, the PF3 correction, Stage 27 |
+| 10 | `c1e64bb` | Cleanup: one unused export removed |
+| 11 | `8be77fc` | The conformance fix below, `EXECUTION_RUNTIME_CONTRACT` §3, and this section |
+
+Steps 6–9 landed together because the codec, the binding, the PF3 correction and the integration
+test are one behaviour: a v2 payload that no ingress writes, an ingress that writes a payload no
+reader accepts, or an `identity_id` the first status write erases are each individually red. The
+step list stays as written; only the commit boundary merged.
+
+### 15.2 The four open questions the ADR left to implementation
+
+ADR-0055 open questions 2–4 were decided here, each by the rule in §12's preamble — the smallest
+change that keeps the gate green — and none of them touches a decision or an invariant.
+
+**Q2, a child's stable key is creator-supplied.** `character_key`, `location_key` and `prop_key`
+arrive on the create request, are validated as non-empty and ≤ 64 characters, and are unique inside
+their profile by `uq_identity_*_profile_key`. Deriving them from the name was rejected for the
+reason the key exists at all: the key appears in shot records, so a rename would silently break a
+reference the creator cannot see. A key is immutable once written — the PATCH bodies have no key
+field — which is what makes `name` freely editable.
+
+**Q3, child writes are per-child endpoints.** `POST`, `PATCH` and `DELETE` under
+`/{identity_id}/characters|locations|props`, each carrying the *root's* `version`, rather than
+whole-profile replacement. Both satisfy frozen decision 3; per-child wins on the ADR's own terms
+because replacement makes every edit a read-modify-write of the entire world and turns an omitted
+child into a deletion. The root still carries the version and still bumps on a child write, so the
+aggregate boundary is unchanged.
+
+**Q4, a profile may not be created inline with a generation.** `identity_id` on the create request
+names an existing profile and nothing else. Inline creation was not foreclosed by the ADR and is
+not added: it would put an authoring write inside the ingress transaction, and IDENT-1's snapshot
+answers the convenience argument anyway — the world is copied, so naming one is already a single
+field.
+
+**Q1 (the cardinality numbers) was not reopened.** Four characters, one location, six props, as §3
+states.
+
+### 15.3 The one conformance defect found, and the fix
+
+Found in the step-11 audit, not by a failing test. A named world declares both a seed and a global
+style; `_bind_world` applied the seed's precedence rule and not the style's, because
+`GenerationCreateRequest.global_style` carried a `PIXAR` default. Ingress therefore could not tell
+*the caller chose Pixar* from *the caller said nothing*, and an authored style lost to a value
+nobody stated — an authorable field silently discarded, which is exactly the failure IDENT-2
+names. The field is now `GlobalStyle | None` with no default, and both fields follow one rule:
+**explicit request > named world > platform default**. An omitted style with no world named still
+resolves to `PIXAR`, so no existing caller changes behaviour; the codec docstring already described
+this rule, so nothing in the contract moved. Covered by two schema unit tests, two use-case unit
+tests, and an assertion in the Stage 27 provenance test.
+
+### 15.4 Tests
+
+115 tests added: 26 domain, 32 use case, 12 API schema, 17 codec (v1 decode, v2 round-trip, unknown
+keys, identity-free v2 equivalence), 10 ingress binding, 18 Stage 27 integration. Stage 27 walks the
+whole §11 script — author a world, name it, assert the snapshot and `identity_id` survive the
+pipeline, then edit the profile and re-read the generation, then delete the profile and re-read it
+again. Stages 13, 25, 26 and the frozen-platform check are untouched and green, as §11 requires.
+
+### 15.5 Migration and gate
+
+`0017_identity_runtime` verified on the local Docker PostgreSQL: `upgrade` → `downgrade` →
+`upgrade`, schema validator, and ERD comparison all green, as gate stages 5–9. Four tables, two
+indexes on the root (`uq_identity_profiles_owner_name`, `ix_identity_profiles_owner_created`), one
+unique index per child table, `ON DELETE CASCADE` to the root, `ON DELETE RESTRICT` to tenant and
+owner, and the two root triggers that mirror `publish_jobs`. Additive only; no existing table,
+column or row is touched, and there is no data migration (frozen decision 11).
+
+Full canonical gate: **28/28 green**, ~4m36s, on local PostgreSQL only. 1475 unit tests in 66s;
+Stage 27 in 10.9s.
+
+### 15.6 Deliberate limitations carried out of the slice
+
+Everything §8 deferred stayed deferred: no reference images, no per-shot casting, one location, no
+multi-location worlds. Beyond those — the list endpoint is owner-scoped keyset only, with no search
+or filter; deletion is hard, by frozen decision 6; and v1 payloads are still written by nothing and
+read by everything, which is frozen decision 9 and not a debt.
+
+**One documented step-11 departure.** §12 step 11 lists an `API_CONTRACT` update. No such document
+exists — `docs/api/` contains only `AUTH_ENDPOINTS.md`, and the generation endpoints it was
+presumably modelled on are described in `SYSTEM_MAP` instead. Creating one for this slice alone
+would add an artifact the repository does not have and duplicate a surface `SYSTEM_MAP` already
+carries, so the endpoint description goes to `SYSTEM_MAP` with the rest of the release-time
+documentation. The `EXECUTION_RUNTIME_CONTRACT` §3 ownership table was updated in step 11 as
+listed, since it records the PF3 reclassification rather than the release.
+
+**Deferred to step 12 (release), untouched here:** the version bump to
+`0.4.53-phase3-alpha10.0-dev` and on to the release string, `PLATFORM_STATUS` (capability row,
+IDENT-1…4 in the invariant catalog, roadmap row retired), the `SYSTEM_MAP` Identity Runtime row,
+and the `CHANGELOG` heading. The repository still reports `0.4.52-phase3-alpha9.9`.
