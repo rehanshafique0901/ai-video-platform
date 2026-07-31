@@ -26,6 +26,7 @@ from app.application.interfaces.repositories import (
     IAnalyticsRepository,
     IEventOutboxRepository,
     IExportJobRepository,
+    IIdentityRepository,
     ILibraryRepository,
     IMediaRepository,
     IModelPricingRepository,
@@ -75,6 +76,7 @@ class IUnitOfWork(ABC):
     prompts: IPromptRepository  # α6.1
     media: IMediaRepository  # α6.2
     library: ILibraryRepository  # α9.2
+    identities: IIdentityRepository  # α10.0 — creator world state, not auth identity
     timeline: ITimelineRepository  # α6.3a
     render_jobs: IRenderJobRepository  # α7.1
     export_jobs: IExportJobRepository  # α8.5a

@@ -1,8 +1,10 @@
 """DTOs for ``/api/v1/generations/*`` — the α9.7 generation ingress (ADR-0052 D3/D5).
 
-* :class:`GenerationCreateRequest` — what a creator asks for. Flat and scalar: v1 identity is a
-  ``seed`` plus a project-wide ``global_style``. Characters, locations, props and reference
-  images belong to Identity-Runtime authoring, a separate slice with its own persistence.
+* :class:`GenerationCreateRequest` — what a creator asks for. Flat and scalar, plus an optional
+  ``identity_id`` (α10.0) naming one of the caller's authored worlds. The world itself is never
+  in the body: it is read once at acceptance and snapshotted into the stored request, so the
+  cast a generation runs with cannot change under it (ADR-0055 IDENT-1). Reference images
+  remain out of scope — no executable adapter consumes them (PF5).
 * :class:`GenerationPublic` — the **curated** read projection. Field selection is deliberate
   and load-bearing: ``provenance``, the resolution ledger, the chosen adapter/provider, every
   component version, and ``final_video_asset_id`` are execution internals and are *not*
@@ -33,13 +35,23 @@ class GenerationCreateRequest(BaseModel):
     ``idempotency_key`` is the creator's *explicit* replay intent. It is deliberately not
     derived from the prompt: asking twice for the same prompt is a legitimate second take, and
     content-hashing would silently deny it (ADR-0052 D4).
+
+    ``seed`` and ``global_style`` are optional so that "the caller said nothing" stays
+    distinguishable from "the caller asked for the default": when a world is named, the value
+    it declares fills the gap, and a value stated here outranks it (ADR-0055 D4).
     """
 
     prompt: str = Field(min_length=1, max_length=2000)
     idempotency_key: str | None = Field(default=None, max_length=255)
     title: str | None = Field(default=None, max_length=200)
     execution_mode: ExecutionMode = ExecutionMode.AUTO
-    global_style: GlobalStyle = GlobalStyle.PIXAR
+    global_style: GlobalStyle | None = Field(
+        default=None,
+        description=(
+            "Omit to inherit the named world's style, or the platform default "
+            f"({GlobalStyle.PIXAR.value}) when no world is named."
+        ),
+    )
     aspect_ratio: str = Field(default="9:16", max_length=16)
     target_platform: str = Field(default="reel", max_length=32)
     target_duration_seconds: float = Field(default=18.0, gt=0, le=300)
@@ -48,6 +60,13 @@ class GenerationCreateRequest(BaseModel):
     height: int = Field(default=1280, ge=64, le=4096)
     fps: int = Field(default=30, ge=1, le=60)
     seed: int | None = Field(default=None, ge=0, lt=2**31)
+    identity_id: UUID | None = Field(
+        default=None,
+        description=(
+            "One of the caller's identity profiles. Its world is snapshotted into this "
+            "request at acceptance; later edits to the profile never reach this generation."
+        ),
+    )
 
 
 class GenerationPublic(BaseModel):

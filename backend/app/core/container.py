@@ -84,6 +84,14 @@ from app.application.use_cases.generation.read_generations import (
     GetGeneration,
     ListGenerations,
 )
+from app.application.use_cases.identity.add_identity_child import AddIdentityChild
+from app.application.use_cases.identity.create_identity_profile import CreateIdentityProfile
+from app.application.use_cases.identity.delete_identity_profile import DeleteIdentityProfile
+from app.application.use_cases.identity.get_identity_profile import GetIdentityProfile
+from app.application.use_cases.identity.list_identity_profiles import ListIdentityProfiles
+from app.application.use_cases.identity.remove_identity_child import RemoveIdentityChild
+from app.application.use_cases.identity.update_identity_child import UpdateIdentityChild
+from app.application.use_cases.identity.update_identity_profile import UpdateIdentityProfile
 from app.application.use_cases.library.add_library_asset import AddLibraryAsset
 from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
 from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
@@ -917,6 +925,43 @@ def get_record_library_asset_use_use_case() -> RecordLibraryAssetUse:
 
 
 # ---------------------------------------------------------------------
+# Use-case factories (Slice α10.0 — Identity Runtime authoring)
+# ---------------------------------------------------------------------
+
+
+def get_create_identity_profile_use_case() -> CreateIdentityProfile:
+    return CreateIdentityProfile(uow=get_unit_of_work())
+
+
+def get_get_identity_profile_use_case() -> GetIdentityProfile:
+    return GetIdentityProfile(uow=get_unit_of_work())
+
+
+def get_list_identity_profiles_use_case() -> ListIdentityProfiles:
+    return ListIdentityProfiles(uow=get_unit_of_work())
+
+
+def get_update_identity_profile_use_case() -> UpdateIdentityProfile:
+    return UpdateIdentityProfile(uow=get_unit_of_work())
+
+
+def get_delete_identity_profile_use_case() -> DeleteIdentityProfile:
+    return DeleteIdentityProfile(uow=get_unit_of_work())
+
+
+def get_add_identity_child_use_case() -> AddIdentityChild:
+    return AddIdentityChild(uow=get_unit_of_work())
+
+
+def get_update_identity_child_use_case() -> UpdateIdentityChild:
+    return UpdateIdentityChild(uow=get_unit_of_work())
+
+
+def get_remove_identity_child_use_case() -> RemoveIdentityChild:
+    return RemoveIdentityChild(uow=get_unit_of_work())
+
+
+# ---------------------------------------------------------------------
 # Use-case factories (Slice α5c — Scenes CRUD + reorder)
 # ---------------------------------------------------------------------
 
@@ -1587,7 +1632,7 @@ def _get_generation_job_store() -> SqlGenerationJobStore:
 
 def get_create_generation_use_case() -> CreateGeneration:
     """Factory: the α9.7 generation ingress (queues a ``queued`` row; never generates)."""
-    return CreateGeneration(store=_get_generation_job_store())
+    return CreateGeneration(store=_get_generation_job_store(), uow=get_unit_of_work())
 
 
 def get_get_generation_use_case() -> GetGeneration:

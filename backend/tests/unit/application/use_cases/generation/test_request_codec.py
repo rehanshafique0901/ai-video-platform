@@ -14,7 +14,11 @@ import pytest
 from app.application.use_cases.generation.request import GenerateVideoRequest
 from app.application.use_cases.generation.request_codec import (
     SPEC_VERSION,
+    SUPPORTED_SPEC_VERSIONS,
+    CharacterSnapshot,
+    EntitySnapshot,
     GenerationRequestSpec,
+    IdentitySnapshot,
     decode_spec,
     encode_spec,
     to_runtime_request,
@@ -95,3 +99,208 @@ def test_rejects_an_unsupported_version() -> None:
 def test_rejects_a_payload_missing_a_required_field() -> None:
     with pytest.raises(ValidationFailedError):
         decode_spec({"v": SPEC_VERSION, "prompt": "p"})
+
+
+# --- v2: the authored world, captured at acceptance (α10.0, PF4) ------------
+
+
+def _snapshot(**overrides: object) -> IdentitySnapshot:
+    base: dict[str, object] = {
+        "identity_id": str(uuid4()),
+        "version": 3,
+        "name": "Bedtime world",
+        "seed": 4242,
+        "global_style": GlobalStyle.ANIME.value,
+        "camera_style": "handheld",
+        "lighting": "golden hour",
+        "color_palette": "warm pastels",
+        "negative_prompt": "no text",
+        "characters": (
+            CharacterSnapshot(
+                key="zoe",
+                name="Zoe",
+                age="7 years old",
+                appearance=("curly red hair",),
+                clothing="yellow raincoat",
+                accessories=("green boots",),
+            ),
+        ),
+        "locations": (EntitySnapshot(key="home", name="Home", descriptors=("cosy",)),),
+        "props": (EntitySnapshot(key="kite", name="Kite", descriptors=("red",)),),
+    }
+    base.update(overrides)
+    return IdentitySnapshot(**base)  # type: ignore[arg-type]
+
+
+def test_the_current_version_is_two() -> None:
+    assert SPEC_VERSION == 2
+    assert SUPPORTED_SPEC_VERSIONS == (1, 2)
+
+
+def test_a_v1_row_still_decodes_and_carries_no_world() -> None:
+    """The rows α9.7 queued must replay exactly as written — never rewritten, never guessed."""
+    v1_payload = {
+        "v": 1,
+        "prompt": "a paper boat",
+        "seed": 5,
+        "title": "Boat",
+        "execution_mode": ExecutionMode.AUTO.value,
+        "global_style": GlobalStyle.PIXAR.value,
+        "aspect_ratio": "9:16",
+        "target_platform": "reel",
+        "target_duration_seconds": 18.0,
+        "per_shot_seconds": 3.0,
+        "width": 720,
+        "height": 1280,
+        "fps": 30,
+    }
+
+    spec = decode_spec(v1_payload)
+
+    assert spec.identity is None
+    assert spec == GenerationRequestSpec(prompt="a paper boat", seed=5, title="Boat")
+
+
+def test_a_v1_row_decodes_to_exactly_the_identity_it_always_did() -> None:
+    v1_payload = {"v": 1, "prompt": "p", "seed": 7, "global_style": GlobalStyle.DISNEY.value}
+
+    request = to_runtime_request(decode_spec(v1_payload), generation_id=None)
+
+    assert request.identity == IdentityProfile(seed=7, global_style=GlobalStyle.DISNEY)
+
+
+def test_a_v1_row_may_not_carry_a_world() -> None:
+    """A payload that claims version 1 and an identity is malformed, not "nearly v2"."""
+    with pytest.raises(ValidationFailedError):
+        decode_spec({"v": 1, "prompt": "p", "seed": 1, "identity": {}})
+
+
+def test_a_v2_spec_without_a_world_omits_the_key_entirely() -> None:
+    payload = encode_spec(GenerationRequestSpec(prompt="p", seed=1))
+
+    assert payload["v"] == 2
+    assert "identity" not in payload
+    assert decode_spec(payload).identity is None
+
+
+def test_a_v2_spec_without_a_world_behaves_exactly_as_v1() -> None:
+    spec = GenerationRequestSpec(prompt="p", seed=7, global_style=GlobalStyle.WATERCOLOR.value)
+
+    v2 = to_runtime_request(spec, generation_id=None)
+    v1 = to_runtime_request(
+        decode_spec({"v": 1, **{k: v for k, v in encode_spec(spec).items() if k != "v"}}),
+        generation_id=None,
+    )
+
+    assert v2.identity == v1.identity
+
+
+def test_a_world_round_trips_whole() -> None:
+    spec = GenerationRequestSpec(prompt="p", seed=1, identity=_snapshot())
+
+    assert decode_spec(encode_spec(spec)) == spec
+
+
+def test_the_runtime_profile_is_rebuilt_from_the_snapshot_alone() -> None:
+    snapshot = _snapshot()
+    spec = GenerationRequestSpec(
+        prompt="p", seed=1, global_style=GlobalStyle.PIXAR.value, identity=snapshot
+    )
+
+    identity = to_runtime_request(spec, generation_id=None).identity
+
+    # The child's stable key becomes the id the planner and prompt builder address.
+    assert [c.id for c in identity.characters] == ["zoe"]
+    assert identity.characters[0].appearance == ("curly red hair",)
+    assert identity.characters[0].accessories == ("green boots",)
+    assert [loc.id for loc in identity.locations] == ["home"]
+    assert [p.id for p in identity.props] == ["kite"]
+    assert identity.camera_style == "handheld"
+    assert identity.lighting == "golden hour"
+    assert identity.color_palette == "warm pastels"
+    assert identity.negative_prompt == "no text"
+
+
+def test_the_run_uses_the_seed_ingress_resolved_not_the_world_s_own() -> None:
+    """One authority per value: ``generations.seed`` and the runtime seed cannot disagree."""
+    spec = GenerationRequestSpec(prompt="p", seed=11, identity=_snapshot(seed=4242))
+
+    identity = to_runtime_request(spec, generation_id=None).identity
+
+    assert identity.seed == 11
+    assert spec.identity is not None and spec.identity.seed == 4242
+
+
+def test_the_run_uses_the_style_ingress_resolved() -> None:
+    spec = GenerationRequestSpec(
+        prompt="p",
+        seed=1,
+        global_style=GlobalStyle.CLAYMATION.value,
+        identity=_snapshot(global_style=GlobalStyle.ANIME.value),
+    )
+
+    assert to_runtime_request(spec, generation_id=None).identity.global_style is (
+        GlobalStyle.CLAYMATION
+    )
+
+
+def test_an_empty_world_is_still_a_world() -> None:
+    spec = GenerationRequestSpec(
+        prompt="p",
+        seed=1,
+        identity=IdentitySnapshot(
+            identity_id=str(uuid4()),
+            version=1,
+            name="Empty",
+            seed=3,
+            global_style=GlobalStyle.PIXAR.value,
+        ),
+    )
+
+    decoded = decode_spec(encode_spec(spec))
+
+    assert decoded == spec
+    assert to_runtime_request(decoded, generation_id=None).identity.characters == ()
+
+
+def test_rejects_an_unknown_key_inside_the_world() -> None:
+    payload = encode_spec(GenerationRequestSpec(prompt="p", seed=1, identity=_snapshot()))
+    payload["identity"]["music_style"] = "lofi"
+
+    with pytest.raises(ValidationFailedError):
+        decode_spec(payload)
+
+
+def test_rejects_an_unknown_key_inside_a_character() -> None:
+    """Reference images and voice are deferred (PF5) — a payload carrying one is malformed."""
+    payload = encode_spec(GenerationRequestSpec(prompt="p", seed=1, identity=_snapshot()))
+    payload["identity"]["characters"][0]["reference_image_refs"] = ["s3://x"]
+
+    with pytest.raises(ValidationFailedError):
+        decode_spec(payload)
+
+
+def test_rejects_a_world_that_is_not_an_object() -> None:
+    with pytest.raises(ValidationFailedError):
+        decode_spec({"v": 2, "prompt": "p", "seed": 1, "identity": "bedtime"})
+
+
+def test_rejects_a_world_missing_its_provenance() -> None:
+    with pytest.raises(ValidationFailedError):
+        decode_spec({"v": 2, "prompt": "p", "seed": 1, "identity": {"name": "Bedtime"}})
+
+
+def test_rejects_a_cast_that_is_not_a_list() -> None:
+    payload = encode_spec(GenerationRequestSpec(prompt="p", seed=1, identity=_snapshot()))
+    payload["identity"]["characters"] = {"key": "zoe", "name": "Zoe"}
+
+    with pytest.raises(ValidationFailedError):
+        decode_spec(payload)
+
+
+def test_rejects_an_appearance_that_is_not_a_list() -> None:
+    payload = encode_spec(GenerationRequestSpec(prompt="p", seed=1, identity=_snapshot()))
+    payload["identity"]["characters"][0]["appearance"] = "curly red hair"
+
+    with pytest.raises(ValidationFailedError):
+        decode_spec(payload)

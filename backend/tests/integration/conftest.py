@@ -163,6 +163,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.application.interfaces.locks import IDistributedLockManager
     from app.application.interfaces.repositories import (
         IEventOutboxRepository,
+        IIdentityRepository,
         ILibraryRepository,
         IMediaRepository,
         IModelPricingRepository,
@@ -190,6 +191,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
     from app.infrastructure.repositories.event_outbox_repository import (
         EventOutboxRepository,
     )
+    from app.infrastructure.repositories.identity_repository import IdentityRepository
     from app.infrastructure.repositories.library_repository import LibraryRepository
     from app.infrastructure.repositories.media_repository import MediaRepository
     from app.infrastructure.repositories.model_pricing_repository import (
@@ -270,6 +272,7 @@ async def client(settings: Settings, engine: AsyncEngine) -> AsyncIterator[Async
                 self.prompts = cast(IPromptRepository, PromptRepository(self._session))
                 self.media = cast(IMediaRepository, MediaRepository(self._session))
                 self.library = cast(ILibraryRepository, LibraryRepository(self._session))
+                self.identities = cast(IIdentityRepository, IdentityRepository(self._session))
                 self.notifications = cast(
                     INotificationRepository, NotificationRepository(self._session)
                 )

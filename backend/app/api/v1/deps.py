@@ -50,6 +50,14 @@ from app.application.use_cases.generation.read_generations import (
     GetGeneration,
     ListGenerations,
 )
+from app.application.use_cases.identity.add_identity_child import AddIdentityChild
+from app.application.use_cases.identity.create_identity_profile import CreateIdentityProfile
+from app.application.use_cases.identity.delete_identity_profile import DeleteIdentityProfile
+from app.application.use_cases.identity.get_identity_profile import GetIdentityProfile
+from app.application.use_cases.identity.list_identity_profiles import ListIdentityProfiles
+from app.application.use_cases.identity.remove_identity_child import RemoveIdentityChild
+from app.application.use_cases.identity.update_identity_child import UpdateIdentityChild
+from app.application.use_cases.identity.update_identity_profile import UpdateIdentityProfile
 from app.application.use_cases.library.add_library_asset import AddLibraryAsset
 from app.application.use_cases.library.create_library_folder import CreateLibraryFolder
 from app.application.use_cases.library.delete_library_asset import DeleteLibraryAsset
@@ -213,6 +221,33 @@ DeleteLibraryAssetDep = Annotated[
 ]
 RecordLibraryAssetUseDep = Annotated[
     RecordLibraryAssetUse, Depends(container.get_record_library_asset_use_use_case)
+]
+
+# ---- Use-case dependencies (Slice α10.0 — Identity Runtime) -----------
+
+CreateIdentityProfileDep = Annotated[
+    CreateIdentityProfile, Depends(container.get_create_identity_profile_use_case)
+]
+GetIdentityProfileDep = Annotated[
+    GetIdentityProfile, Depends(container.get_get_identity_profile_use_case)
+]
+ListIdentityProfilesDep = Annotated[
+    ListIdentityProfiles, Depends(container.get_list_identity_profiles_use_case)
+]
+UpdateIdentityProfileDep = Annotated[
+    UpdateIdentityProfile, Depends(container.get_update_identity_profile_use_case)
+]
+DeleteIdentityProfileDep = Annotated[
+    DeleteIdentityProfile, Depends(container.get_delete_identity_profile_use_case)
+]
+AddIdentityChildDep = Annotated[
+    AddIdentityChild, Depends(container.get_add_identity_child_use_case)
+]
+UpdateIdentityChildDep = Annotated[
+    UpdateIdentityChild, Depends(container.get_update_identity_child_use_case)
+]
+RemoveIdentityChildDep = Annotated[
+    RemoveIdentityChild, Depends(container.get_remove_identity_child_use_case)
 ]
 
 # ---- Use-case dependencies (Slice α5c — Scenes) -----------------------

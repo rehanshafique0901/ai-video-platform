@@ -99,15 +99,16 @@ read/written through explicit raw-SQL repositories.
 | `model_cache` | Persistent local-model registry (version/sha/size/backend/tier/capabilities) | 1 / model |
 | `generation_resolution_ledger` | Resolution provenance (α8.5e — **reused**, not re-created) | 1 / resolution |
 
-### Ingress-owned columns on `generations` (α9.7, migration `0016`)
+### Ingress-owned columns on `generations` (α9.7, migration `0016`; `identity_id` reclassified α10.0)
 
-`generations` carries four columns the Execution Runtime **does not own and never writes**:
+`generations` carries five columns the Execution Runtime **does not own and never writes**:
 
 | Column | Owner | Purpose |
 |---|---|---|
 | `tenant_id`, `owner_user_id` | Generation **ingress** | Who asked for this generation (ADR-0052 D1). Nullable: legacy rows predate ingress and their owner must never be inferred |
 | `idempotency_key` | Generation **ingress** | Client-supplied create idempotency, backed by `uq_generations_owner_idempotency_key` (ADR-0052 D4) |
 | `request` | Generation **ingress** | The creator's asserted `GenerateVideoRequest`, persisted verbatim so a worker can reconstruct it exactly — the `publish_jobs.content_package` pattern |
+| `identity_id` | Generation **ingress** | Which authored world the request's snapshot was taken from (ADR-0055 D4 — a *request fact*, neither a decision nor an execution fact). A provenance **value**, never an FK, so it survives the profile's deletion. Present since `0012` but written by nobody until α10.0, when it was removed from the runtime's upsert enumeration: the runtime supplied `NULL` on every call, so the first status write of a claimed run erased what ingress had recorded |
 
 **Ingress owns identity; the Execution Runtime owns execution state.** Neither writes the
 other's columns. The runtime remains completely ownership-blind: `GenerateVideoRequest` carries

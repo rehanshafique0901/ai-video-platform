@@ -26,7 +26,7 @@ in these interfaces.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -43,6 +43,7 @@ from app.domain.export.export_job import ExportJob, ExportJobClaim
 from app.domain.identity.session import Session
 from app.domain.identity.tenant import Tenant
 from app.domain.identity.user import User
+from app.domain.identity_runtime import IdentityProfile
 from app.domain.library.library_asset import LibraryAsset
 from app.domain.library.library_folder import LibraryFolder
 from app.domain.media.media_asset import MediaAsset
@@ -2841,4 +2842,229 @@ class ILibraryRepository(ABC):
         DO NOTHING`` — idempotent per pair). Returns ``None`` when no live owned asset
         matched (→ ``404``). The caller has verified the project is the caller's own.
         """
+        ...
+
+
+class IIdentityRepository(ABC):
+    """Persistence surface for Identity Runtime — Slice α10.0, ADR-0055.
+
+    The creator's authored world: ``identity_profiles`` plus its character, location and
+    prop children. Owner-scoped (``tenant_id`` + ``owner_user_id``) like
+    :class:`ILibraryRepository`; a foreign or absent id is indistinguishable from missing
+    (anti-enumeration), so every read returns ``None`` rather than raising.
+
+    **The profile is the aggregate root** (PF8). Children are never addressed on their own:
+    every child write is fenced on the root's ``expected_version`` and bumps it, so a world
+    read at any moment is one coherent state and can be snapshotted as such. That is why the
+    child methods take the root's version and return the whole rebuilt profile.
+
+    **Hard delete is permitted** (PF10): past generations hold a snapshot, not a reference,
+    so a deleted world cannot change what a generation already accepted (IDENT-1).
+
+    Caps (4 characters / 1 location / 6 props) are the domain's, enforced by the use case
+    before it writes; the aggregate rebuilt here re-checks them as a backstop.
+    """
+
+    @abstractmethod
+    async def add_profile(
+        self,
+        *,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        name: str,
+        seed: int,
+        global_style: str,
+        camera_style: str | None = None,
+        lighting: str | None = None,
+        color_palette: str | None = None,
+        negative_prompt: str | None = None,
+        characters: Sequence[Mapping[str, Any]] = (),
+        locations: Sequence[Mapping[str, Any]] = (),
+        props: Sequence[Mapping[str, Any]] = (),
+    ) -> IdentityProfile:
+        """Create a world owned by the caller, optionally with its children inline.
+
+        Raises ``ConflictError`` if the owner already has a profile with this ``name``
+        (``uq_identity_profiles_owner_name``) or if two children of one kind share a key
+        (``uq_identity_<kind>_profile_key``) → ``409``. The constraint is the race-safe
+        arbiter; no pre-check SELECT.
+        """
+        ...
+
+    @abstractmethod
+    async def get_profile(
+        self, profile_id: UUID, tenant_id: UUID, owner_user_id: UUID
+    ) -> IdentityProfile | None:
+        """Return the owner's world with all children, or ``None``."""
+        ...
+
+    @abstractmethod
+    async def list_profiles(
+        self,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        limit: int,
+        after: tuple[datetime, UUID] | None = None,
+    ) -> list[IdentityProfile]:
+        """Keyset page of the owner's worlds, newest first.
+
+        Ordered ``(created_at DESC, id DESC)`` to match ``ix_identity_profiles_owner_created``
+        exactly, so paging is an index scan. Children are loaded for the page in one query
+        per kind — never per row.
+        """
+        ...
+
+    @abstractmethod
+    async def update_profile(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        changes: Mapping[str, Any],
+    ) -> IdentityProfile | None:
+        """Version-fenced CAS over the root's own fields. ``None`` if nothing matched.
+
+        The caller distinguishes 404 from 412 by reading first (404-before-412). Raises
+        ``ConflictError`` on a name collision with another of the owner's worlds.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_profile(self, profile_id: UUID, tenant_id: UUID, owner_user_id: UUID) -> bool:
+        """Hard-delete the owner's world; children cascade. ``True`` iff a row was removed."""
+        ...
+
+    @abstractmethod
+    async def add_character(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        character_key: str,
+        name: str,
+        age: str | None = None,
+        appearance: Sequence[str] = (),
+        clothing: str | None = None,
+        accessories: Sequence[str] = (),
+        position: int = 0,
+    ) -> IdentityProfile | None:
+        """Add a character and bump the root. ``ConflictError`` if the key is taken."""
+        ...
+
+    @abstractmethod
+    async def update_character(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        character_key: str,
+        changes: Mapping[str, Any],
+    ) -> IdentityProfile | None:
+        """Update one character and bump the root. ``None`` if the fence or the key missed."""
+        ...
+
+    @abstractmethod
+    async def remove_character(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        character_key: str,
+    ) -> IdentityProfile | None:
+        """Remove one character and bump the root. ``None`` if the fence or the key missed."""
+        ...
+
+    @abstractmethod
+    async def add_location(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        location_key: str,
+        name: str,
+        descriptors: Sequence[str] = (),
+        position: int = 0,
+    ) -> IdentityProfile | None:
+        """Add a location and bump the root. ``ConflictError`` if the key is taken."""
+        ...
+
+    @abstractmethod
+    async def update_location(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        location_key: str,
+        changes: Mapping[str, Any],
+    ) -> IdentityProfile | None:
+        """Update one location and bump the root. ``None`` if the fence or the key missed."""
+        ...
+
+    @abstractmethod
+    async def remove_location(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        location_key: str,
+    ) -> IdentityProfile | None:
+        """Remove one location and bump the root. ``None`` if the fence or the key missed."""
+        ...
+
+    @abstractmethod
+    async def add_prop(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        prop_key: str,
+        name: str,
+        descriptors: Sequence[str] = (),
+        position: int = 0,
+    ) -> IdentityProfile | None:
+        """Add a prop and bump the root. ``ConflictError`` if the key is taken."""
+        ...
+
+    @abstractmethod
+    async def update_prop(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        prop_key: str,
+        changes: Mapping[str, Any],
+    ) -> IdentityProfile | None:
+        """Update one prop and bump the root. ``None`` if the fence or the key missed."""
+        ...
+
+    @abstractmethod
+    async def remove_prop(
+        self,
+        profile_id: UUID,
+        tenant_id: UUID,
+        owner_user_id: UUID,
+        *,
+        expected_version: int,
+        prop_key: str,
+    ) -> IdentityProfile | None:
+        """Remove one prop and bump the root. ``None`` if the fence or the key missed."""
         ...

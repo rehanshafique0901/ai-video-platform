@@ -41,6 +41,7 @@ from app.application.use_cases.generation.create_generation import resolve_seed
 from app.application.use_cases.generation.request_codec import GenerationRequestSpec
 from app.core.errors import ValidationFailedError
 from app.domain.generation.execution_state import ExecutionStatus
+from app.domain.generation.identity import GlobalStyle
 
 router = APIRouter(prefix="/generations", tags=["generations"])
 
@@ -83,12 +84,13 @@ async def create_generation(
     earlier request — the render-job split. The seed is resolved here and persisted, so a replay
     returns the identical generation rather than a similar one.
     """
+    requested_global_style = body.global_style.value if body.global_style is not None else None
     spec = GenerationRequestSpec(
         prompt=body.prompt,
         seed=resolve_seed(body.seed),
         title=body.title,
         execution_mode=body.execution_mode.value,
-        global_style=body.global_style.value,
+        global_style=requested_global_style or GlobalStyle.PIXAR.value,
         aspect_ratio=body.aspect_ratio,
         target_platform=body.target_platform,
         target_duration_seconds=body.target_duration_seconds,
@@ -101,6 +103,9 @@ async def create_generation(
         tenant_id=current_user.tenant_id,
         owner_user_id=current_user.id,
         spec=spec,
+        identity_id=body.identity_id,
+        requested_seed=body.seed,
+        requested_global_style=requested_global_style,
         idempotency_key=body.idempotency_key,
     )
     code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK

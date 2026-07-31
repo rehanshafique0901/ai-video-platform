@@ -31,23 +31,30 @@ from app.domain.generation.execution_state import ExecutionStatus
 # upsert at all.
 #
 # The DO UPDATE clause below enumerates **only runtime-owned execution columns**. `tenant_id`,
-# `owner_user_id`, `idempotency_key`, `request`, `prompt` and `created_at` are ingress-owned and
-# are absent by construction — so a `begin()` call can never rebind a queued generation to a
-# different owner or a different request, no matter how often it is replayed. `prompt` is
-# supplied on INSERT (it is NOT NULL) but never on UPDATE: the creator's prompt is theirs.
+# `owner_user_id`, `idempotency_key`, `request`, `prompt`, `identity_id` and `created_at` are
+# ingress-owned and are absent by construction — so a `begin()` call can never rebind a queued
+# generation to a different owner, a different request or a different world, no matter how often
+# it is replayed. `prompt` is supplied on INSERT (it is NOT NULL) but never on UPDATE: the
+# creator's prompt is theirs.
+#
+# α10.0 (PF3) removed `identity_id` from this statement entirely — column list, values and
+# DO UPDATE alike. It was written as `NULL` on every call, so an ingress-written world was
+# erased by the first status write; and the execution runtime has no business knowing what a
+# profile is. The world a run executes reaches it through the decoded request payload and
+# nowhere else (ADR-0055 D2/D4, GEN-1).
 #
 # See docs/engineering/EXECUTION_RUNTIME_CONTRACT.md §4 and PHASE3_ALPHA9_7_PREFLIGHT.md §2.1.
 _INSERT_GENERATION_SQL = text(
     """
     INSERT INTO generations (
-        id, status, prompt, title, identity_id, execution_mode, execution_tier,
+        id, status, prompt, title, execution_mode, execution_tier,
         chosen_provider, chosen_adapter, seed, aspect_ratio, target_platform,
         width, height, fps, shot_count,
         planner_version, storyboard_version, prompt_builder_version, resolver_version,
         verifier_version, repair_version, renderer_version, score_schema_version,
         catalogue_version, manifest_digest, provenance, started_at
     ) VALUES (
-        CAST(:id AS uuid), CAST(:status AS generation_status), :prompt, :title, :identity_id,
+        CAST(:id AS uuid), CAST(:status AS generation_status), :prompt, :title,
         :execution_mode, CAST(:execution_tier AS execution_tier),
         :chosen_provider, :chosen_adapter, :seed, :aspect_ratio, :target_platform,
         :width, :height, :fps, :shot_count,
@@ -58,7 +65,6 @@ _INSERT_GENERATION_SQL = text(
     ON CONFLICT (id) DO UPDATE SET
         status                 = EXCLUDED.status,
         title                  = EXCLUDED.title,
-        identity_id            = EXCLUDED.identity_id,
         execution_mode         = EXCLUDED.execution_mode,
         execution_tier         = EXCLUDED.execution_tier,
         chosen_provider        = EXCLUDED.chosen_provider,
@@ -176,7 +182,6 @@ class GenerationLedgerRepository:
                 "status": status.value,
                 "prompt": request.prompt,
                 "title": title,
-                "identity_id": None,
                 "execution_mode": request.execution_mode.value,
                 "execution_tier": provenance.execution_tier,
                 "chosen_provider": provenance.chosen_provider,
