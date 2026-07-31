@@ -6,6 +6,87 @@
 
 ## [Unreleased]
 
+### α10.0 — Identity-Runtime Authoring (`0.4.53-phase3-alpha10.0`, 2026-08-01)
+
+**Every generation has been about strangers.** The planner already casts characters, the prompt
+builder already composes their appearance fragments, the payload already carries them, and the
+execution path already ships them to a provider — the substrate has been there since α8.7. What was
+missing was the one thing a creator could act on: nothing could *author* a world. Ingress accepted a
+seed and a global style, so six shots of a video were six unrelated images that happened to share a
+prompt. This slice supplies the missing surface and deliberately nothing else — the planner, prompt
+builder, storyboard, shot-intent and resolver are byte-identical. Governed by
+[ADR-0055](docs/decisions/ADR-0055-identity-runtime-authoring.md) and
+[`PHASE3_ALPHA10_0_PREFLIGHT.md`](docs/engineering/PHASE3_ALPHA10_0_PREFLIGHT.md).
+
+#### Added
+- **`app/domain/identity_runtime/`** — a new owner-scoped bounded context: an `IdentityProfile` root
+  with `Character` / `Location` / `Prop` children, bounded cardinality, and a total child ordering.
+  It is deliberately **not** `app/domain/identity/`, which has been the *authentication* context
+  (`User`, `Tenant`, `Session`) since α2a; writing the world aggregate there would have merged two
+  bounded contexts. The rename stops at the collision — the resource is still `/api/v1/identities`.
+- **Migration `0017`** — four tables (profile root plus three child tables), a unique
+  `(owner_user_id, name)`, a unique `(profile_id, key)` per child, `ON DELETE CASCADE` to the root,
+  `ON DELETE RESTRICT` to tenant and owner, and the root's OCC + `updated_at` triggers.
+- **`/api/v1/identities`** — fourteen owner-scoped routes: profile create / get / keyset-list /
+  update / delete, plus per-child add / update / remove for characters, locations and props. Every
+  mutation is version-fenced on the root.
+- **`SPEC_VERSION = 2`** — the request payload gains a nested identity snapshot.
+- **CI Stage 27** — `identity runtime integration`: authors a world, names it on a generation, runs
+  the pipeline, then edits and deletes the profile to prove the completed generation cannot notice.
+
+#### Behaviour
+- **IDENT-1 — a generation is bound to the world it was accepted with, not the world as it is now.**
+  Naming a profile copies it whole into `generations.request` at acceptance. The run, every retry
+  inside it, and every replay see that snapshot and nothing else. Nothing downstream re-reads the
+  profile — ingress is the only production caller of the identity repository outside authoring.
+- **Editing a world changes no past generation, and deleting one leaves it intact.** There is
+  deliberately **no foreign key** from `generations.identity_id`: identity provenance is a value, not
+  a reference (ADR-0046 X5), so a hard delete leaves a provenance id that no longer resolves and a
+  record that still explains itself.
+- **IDENT-2 — only honourable state is authorable.** Reference images are **refused with a 422**
+  rather than accepted and discarded, because no registered adapter does reference conditioning.
+  Executable capability answers ***can*, never *should***: it gates what may be offered and never
+  expresses quality, preference, routing, ranking, cost, or historical success.
+- **IDENT-3 / IDENT-4 — identity is world state, never policy, and knowledge, never measurement.**
+  `resolve()` keeps its four inputs; a profile is not one of them, and never accumulates execution
+  outcomes or per-adapter tuning.
+- **The payload version covers the whole envelope, including the nested snapshot.** Every v1 row
+  still decodes to exactly what it always did; a v2 payload naming no world behaves exactly as v1;
+  writers emit only v2. **No stored payload is ever rewritten and no legacy generation is given an
+  identity.** An unknown version or an unknown key **fails loudly** — a world is never guessed.
+- **Identity is a third provenance class, a *request fact*** — written once by ingress beside
+  ownership and the persisted request, and never by the execution runtime.
+- **Identity does not participate in the idempotency key.** A replayed key returns the original
+  generation with its original snapshot, even when the second call names a different world.
+
+#### Fixed
+- **A latent GEN-1 violation the grounding uncovered.** `identity_id` sat in the execution store's
+  `ON CONFLICT DO UPDATE` enumeration while `begin()` always supplied `None`. Harmless only because
+  nothing wrote the column — the moment ingress did, the first status write would have erased it.
+  The column is removed from the runtime upsert and written by ingress alone, so ADR-0052's GEN-1
+  now holds by construction rather than by luck. Stage 27 carries the regression test.
+- **An authored `global_style` was silently discarded.** A world declares both a seed and a style,
+  but ingress applied precedence only to the seed: the request DTO defaulted `global_style` to
+  `PIXAR`, so ingress could not distinguish *the caller chose Pixar* from *the caller said nothing*,
+  and an authored style lost to a value nobody stated — the exact defect IDENT-2 names. Both fields
+  now follow one rule: **explicit request > named world > platform default**.
+
+#### Changed
+- **`global_style` on `POST /api/v1/generations` is now optional** rather than defaulted. A client
+  that omits it and names no world still gets `PIXAR`; a client that sends it explicitly is
+  unaffected. The change exists so that omitting it can mean *inherit the world's*.
+
+#### Accepted limitations
+- **One location per world.** Multi-location worlds require per-shot casting — a Decision-plane
+  change with its own contract — and the cap is that premise, not a storage limit.
+- **No per-shot casting.** The planner casts the whole world into every shot, unchanged.
+- **Reference images stay unauthorable** until an adapter with reference conditioning is registered.
+  The adapter comes first; the control follows it.
+- **Hard delete is permitted.** A deleted world leaves past generations complete and self-describing;
+  that is the snapshot guarantee working, not a dangling reference.
+- **v1 payloads are read by everything and written by nothing.** Retirement is a separate decision
+  with its own evidence, not a deadline.
+
 ### α9.9 — Execution Adapter Dispatch (`0.4.52-phase3-alpha9.9`, 2026-07-30)
 
 **The resolver has been choosing an adapter, and the runtime has been ignoring it.** Since α8.5e the
