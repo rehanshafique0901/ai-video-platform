@@ -8,7 +8,7 @@ by the ingress snapshot that binds it to a generation.
 Not the authentication context — that is ``use_cases/auth``. Different bounded context.
 """
 
-from app.application.use_cases.identity._children import CAPS, CHILD_KINDS, ChildKind
+from app.application.use_cases.identity._children import ChildKind
 from app.application.use_cases.identity.add_identity_child import AddIdentityChild
 from app.application.use_cases.identity.create_identity_profile import CreateIdentityProfile
 from app.application.use_cases.identity.delete_identity_profile import DeleteIdentityProfile
@@ -19,8 +19,6 @@ from app.application.use_cases.identity.update_identity_child import UpdateIdent
 from app.application.use_cases.identity.update_identity_profile import UpdateIdentityProfile
 
 __all__ = [
-    "CAPS",
-    "CHILD_KINDS",
     "AddIdentityChild",
     "ChildKind",
     "CreateIdentityProfile",

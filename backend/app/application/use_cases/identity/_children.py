@@ -24,8 +24,6 @@ ChildKind = Literal["character", "location", "prop"]
 
 ProfileChild = Character | Location | Prop
 
-CHILD_KINDS: tuple[ChildKind, ...] = ("character", "location", "prop")
-
 CAPS: dict[ChildKind, int] = {
     "character": MAX_CHARACTERS,
     "location": MAX_LOCATIONS,
