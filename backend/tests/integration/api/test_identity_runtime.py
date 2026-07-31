@@ -536,6 +536,9 @@ async def test_the_request_carries_the_whole_world_and_its_provenance(
     payload = row["request"]
     assert payload["v"] == 2
     assert payload["seed"] == 4242
+    # …and so does the style it declared: an authored control the run ignored would be a
+    # control sold and silently discarded (IDENT-2).
+    assert payload["global_style"] == GlobalStyle.ANIME.value
     snapshot = payload["identity"]
     assert snapshot["identity_id"] == str(world.id)
     assert snapshot["version"] == world.version

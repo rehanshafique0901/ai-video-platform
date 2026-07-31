@@ -35,13 +35,23 @@ class GenerationCreateRequest(BaseModel):
     ``idempotency_key`` is the creator's *explicit* replay intent. It is deliberately not
     derived from the prompt: asking twice for the same prompt is a legitimate second take, and
     content-hashing would silently deny it (ADR-0052 D4).
+
+    ``seed`` and ``global_style`` are optional so that "the caller said nothing" stays
+    distinguishable from "the caller asked for the default": when a world is named, the value
+    it declares fills the gap, and a value stated here outranks it (ADR-0055 D4).
     """
 
     prompt: str = Field(min_length=1, max_length=2000)
     idempotency_key: str | None = Field(default=None, max_length=255)
     title: str | None = Field(default=None, max_length=200)
     execution_mode: ExecutionMode = ExecutionMode.AUTO
-    global_style: GlobalStyle = GlobalStyle.PIXAR
+    global_style: GlobalStyle | None = Field(
+        default=None,
+        description=(
+            "Omit to inherit the named world's style, or the platform default "
+            f"({GlobalStyle.PIXAR.value}) when no world is named."
+        ),
+    )
     aspect_ratio: str = Field(default="9:16", max_length=16)
     target_platform: str = Field(default="reel", max_length=32)
     target_duration_seconds: float = Field(default=18.0, gt=0, le=300)

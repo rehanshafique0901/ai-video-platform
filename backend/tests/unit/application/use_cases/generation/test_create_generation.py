@@ -239,6 +239,44 @@ async def test_an_explicit_seed_outranks_the_world_s() -> None:
     assert row.spec.identity is not None and row.spec.identity.seed == 4242
 
 
+async def test_the_world_s_style_is_used_when_the_caller_named_none() -> None:
+    """An authored style the run then ignores would be a control sold and discarded (IDENT-2)."""
+    store, uow = FakeGenerationJobStore(), FakeIdentityUnitOfWork()
+    tenant_id, owner_user_id = uuid4(), uuid4()
+    profile = await _world(uow, tenant_id=tenant_id, owner_user_id=owner_user_id)
+
+    result = await CreateGeneration(store, uow=uow).execute(
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        # What the router builds when the body named no style: the platform default.
+        spec=GenerationRequestSpec(prompt="p", seed=1, global_style=GlobalStyle.PIXAR.value),
+        identity_id=profile.id,
+        requested_global_style=None,
+    )
+
+    assert store.rows[result.generation.id].spec.global_style == GlobalStyle.ANIME.value
+
+
+async def test_an_explicit_style_outranks_the_world_s() -> None:
+    store, uow = FakeGenerationJobStore(), FakeIdentityUnitOfWork()
+    tenant_id, owner_user_id = uuid4(), uuid4()
+    profile = await _world(uow, tenant_id=tenant_id, owner_user_id=owner_user_id)
+
+    result = await CreateGeneration(store, uow=uow).execute(
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        spec=GenerationRequestSpec(prompt="p", seed=1, global_style=GlobalStyle.CLAYMATION.value),
+        identity_id=profile.id,
+        requested_global_style=GlobalStyle.CLAYMATION.value,
+    )
+
+    row = store.rows[result.generation.id]
+    assert row.spec.global_style == GlobalStyle.CLAYMATION.value
+    # The world's own style survives in the snapshot as what it declared.
+    assert row.spec.identity is not None
+    assert row.spec.identity.global_style == GlobalStyle.ANIME.value
+
+
 async def test_a_replayed_key_keeps_its_original_world() -> None:
     """Identity is not part of the idempotency key (ADR-0055 frozen decision 14)."""
     store, uow = FakeGenerationJobStore(), FakeIdentityUnitOfWork()

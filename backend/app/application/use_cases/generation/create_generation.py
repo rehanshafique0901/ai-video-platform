@@ -76,6 +76,7 @@ class CreateGeneration:
         spec: GenerationRequestSpec,
         identity_id: UUID | None = None,
         requested_seed: int | None = None,
+        requested_global_style: str | None = None,
         idempotency_key: str | None = None,
     ) -> CreateGenerationResult:
         if identity_id is not None:
@@ -85,6 +86,7 @@ class CreateGeneration:
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
                 requested_seed=requested_seed,
+                requested_global_style=requested_global_style,
             )
         outcome = await self._store.create(
             generation_id=uuid4(),
@@ -103,13 +105,16 @@ class CreateGeneration:
         tenant_id: UUID,
         owner_user_id: UUID,
         requested_seed: int | None,
+        requested_global_style: str | None,
     ) -> GenerationRequestSpec:
         """Read the named world once and fold it into the request.
 
-        The seed follows the precedence the pre-flight fixes: an explicit request seed, then
-        the world's own, then the one already drawn. Whichever wins is written to the flat
-        ``seed`` field — the single value ``generations.seed`` and the runtime both read, so
-        the two can never disagree (ADR-0055 D4).
+        Precedence is resolved here, once, and written to the flat fields: an explicit
+        request value, then the world's own, then what the request already carried. The
+        seed matters most — the flat ``seed`` is the single value ``generations.seed`` and
+        the runtime both read, so the two can never disagree (ADR-0055 D4) — and the style
+        follows the same rule, because a world that declares one and is then rendered in
+        another has had an authored control silently discarded (IDENT-2).
         """
         if self._uow is None:  # pragma: no cover - a composition error, not a request error
             raise RuntimeError("CreateGeneration needs a unit of work to bind an identity")
@@ -122,6 +127,11 @@ class CreateGeneration:
         return replace(
             spec,
             seed=spec.seed if requested_seed is not None else profile.seed,
+            global_style=(
+                spec.global_style
+                if requested_global_style is not None
+                else profile.global_style.value
+            ),
             identity=snapshot_of(profile),
         )
 
