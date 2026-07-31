@@ -304,9 +304,11 @@ check.
 Each step is independently reviewable and leaves the gate green.
 
 1. **Domain** — `app/domain/identity_runtime/` profile + children, caps, validation. Unit tests.
-2. **Migration `0017`** — four tables, indexes, symmetric `downgrade()`; `validate_schema.py` /
-   ERD round-trip updated.
-3. **ORM + repository** — `models/identity_runtime.py`, `IIdentityRepository` on `IUnitOfWork`,
+2. **Migration `0017` + ORM declarations** — four tables, indexes, symmetric `downgrade()`;
+   `models/identity_runtime.py`; `validate_schema.py` / ERD round-trip updated. The ORM
+   declarations belong here and not in step 3 because the schema validator fails on a table with
+   no model, so a migration alone cannot leave the gate green (recorded in §14).
+3. **Repository** — `IIdentityRepository` on `IUnitOfWork`,
    `infrastructure/repositories/identity_repository.py` (`uuid4()`, `IntegrityError` →
    `ConflictError`, keyset list).
 4. **Use cases** — create / get / list / update / delete profile, plus child add / update / remove.
@@ -378,6 +380,15 @@ The rename stops at the collision: the resource stays `/api/v1/identities`, the 
 `IIdentityRepository` on `IUnitOfWork` (neither exists today — auth uses `user`, `tenant` and
 `session` repositories), and the auth context is not touched. ADR-0055 D1 carries the same
 correction. No ruling, table, endpoint, invariant, or step changed.
+
+**Step-boundary correction, made during step 2.** §12 put the migration in step 2 and the ORM
+declarations in step 3, which the preamble's own promise — every step leaves the gate green —
+cannot satisfy: `scripts/validate_schema.py` fails on any base table with no SQLAlchemy model,
+and the allowlist for that is reserved for tables that are ORM-less *by design* (the provider
+catalogue, the execution-runtime tables). The α10.0 tables are ORM-mapped, so
+`models/identity_runtime.py` moved into step 2. Nothing else moved: the repository, the
+`IIdentityRepository` port, the `IUnitOfWork` slot, container and API wiring all remain step 3 and
+beyond. No table, column, index, endpoint, ruling or invariant changed.
 
 **Left open deliberately.** ADR open questions 2–4 — a child's stable-key provenance, child-write
 granularity, and whether a profile may be created inline with a generation — are implementation

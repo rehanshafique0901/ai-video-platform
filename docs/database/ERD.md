@@ -1293,6 +1293,85 @@ erDiagram
 
 ---
 
+## Cluster 15 — Identity Runtime (α10.0)
+
+> **The creator's authored world.** Created by migration `0017_identity_runtime` (additive) and
+> governed by `docs/decisions/ADR-0055-identity-runtime-authoring.md` (Accepted) and
+> `docs/engineering/PHASE3_ALPHA10_0_PREFLIGHT.md` §3. A **Knowledge**-plane context: it declares
+> what exists in the creator's world — named characters, the location they are in, recurring props,
+> the project look and a stable seed — the way the provider catalogue declares what can be executed.
+> The Decision plane consumes it; Execution never sees it. Relational rather than a JSONB body (PF1)
+> because this is *mutable* creator state: one character is edited without rewriting the world, and
+> a child's stable key is unique inside its profile by database constraint. Owner-scoped, not
+> project-scoped (PF9) — `generations` carries only `tenant_id` + `owner_user_id`.
+
+```mermaid
+erDiagram
+    tenants ||--o{ identity_profiles : tenant_id
+    users ||--o{ identity_profiles : owner_user_id
+    identity_profiles ||--o{ identity_characters : profile_id
+    identity_profiles ||--o{ identity_locations : profile_id
+    identity_profiles ||--o{ identity_props : profile_id
+
+    identity_profiles {
+        uuid id PK
+        uuid tenant_id FK
+        uuid owner_user_id FK
+        text name "unique per owner"
+        bigint seed "stable seed reused across shots"
+        text global_style "GlobalStyle vocabulary, default pixar"
+        text camera_style "nullable"
+        text lighting "nullable"
+        text color_palette "nullable"
+        text negative_prompt "nullable"
+        integer version "OCC fence, bumped by child writes too (PF8)"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    identity_characters {
+        uuid id PK
+        uuid profile_id FK "CASCADE"
+        text character_key "stable id carried by shot records"
+        text name
+        text age "nullable"
+        text[] appearance
+        text clothing "nullable"
+        text[] accessories
+        integer position "author order"
+    }
+    identity_locations {
+        uuid id PK
+        uuid profile_id FK "CASCADE"
+        text location_key
+        text name
+        text[] descriptors
+        integer position
+    }
+    identity_props {
+        uuid id PK
+        uuid profile_id FK "CASCADE"
+        text prop_key
+        text name
+        text[] descriptors
+        integer position
+    }
+```
+
+> **Reconciliation note (α10.0).**
+> - A generation binds a world by **snapshot into `generations.request`**, never by foreign key
+>   (ADR-0055 D2, IDENT-1). `generations.identity_id` is a provenance *value*; editing or hard
+>   deleting a profile cannot reach a generation that already accepted one, and a deleted profile
+>   leaves an `identity_id` that no longer resolves — the honest record (PF10).
+> - Cardinality is capped in the domain, not the schema: at most 4 characters, 1 location and
+>   6 props, because that is what the current planner and prompt builder honour (PF6).
+> - `global_style` is `text`, not a Postgres ENUM: a new enum type is a governance-visible
+>   addition and ADR-0055 authorises none. The value is validated by `GlobalStyle` in the domain.
+> - Deliberately absent, now and later (ADR-0055 frozen decision 19): execution history, planner
+>   decisions, adapter or provider preference, adapter health, success statistics, verification
+>   outcomes. A profile records what the creator declares exists, never what happened.
+
+---
+
 ## Cross-Cluster Foreign-Key Summary
 
 These FKs span clusters and are easy to miss; documented here for review:

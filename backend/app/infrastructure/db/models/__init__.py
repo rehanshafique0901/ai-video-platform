@@ -15,6 +15,7 @@ from app.infrastructure.db.models import (  # noqa: F401
     events,
     feature_flags,
     identity,
+    identity_runtime,
     jobs,
     media,
     notifications,
