@@ -41,6 +41,7 @@ from app.api.v1.routers import (
     export_jobs,
     generations,
     health,
+    identity,
     library,
     media,
     notifications,
@@ -124,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media.router, prefix="/api/v1")
     app.include_router(generations.router, prefix="/api/v1")
     app.include_router(library.router, prefix="/api/v1")
+    app.include_router(identity.router, prefix="/api/v1")
     app.include_router(timeline.router, prefix="/api/v1")
     app.include_router(render_jobs.router, prefix="/api/v1")
     app.include_router(export_jobs.router, prefix="/api/v1")
