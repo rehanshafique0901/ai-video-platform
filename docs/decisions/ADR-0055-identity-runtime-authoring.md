@@ -139,11 +139,16 @@ also multiplies payload size without giving the creator anything to edit. C matc
 model already is: `IdentityProfile` is an aggregate with children, and the repository's established
 recipe for owner-scoped aggregates (α9.2's library) applies unchanged.
 
-**Recommendation: C.** `app/domain/identity/`, owned by `(tenant_id, owner_user_id)`, persisted
-relationally — a profile root with character, location and prop children. The relational shape is
-chosen over a JSONB body because this is *mutable* creator state needing partial edits and
+**Recommendation: C.** `app/domain/identity_runtime/`, owned by `(tenant_id, owner_user_id)`,
+persisted relationally — a profile root with character, location and prop children. The relational
+shape is chosen over a JSONB body because this is *mutable* creator state needing partial edits and
 per-profile uniqueness of a child's stable key; JSONB in this repository is reserved for frozen
 snapshots, which is exactly what D2 makes the *binding* rather than the source.
+
+*The package name is `identity_runtime`, not `identity`, because `app/domain/identity/` is already
+the **authentication** context (`User`, `Tenant`, `Session`, α2a). Sharing that package would merge
+two bounded contexts and contradict this very decision. The name is a path correction made before
+implementation; it changes nothing decided here.*
 
 **Plane classification.** Identity Runtime is **Knowledge** — it declares what exists in the
 creator's world, the way the catalogue declares what exists in the provider world. It is *consumed*
@@ -507,6 +512,7 @@ Implementation questions deliberately excluded from this ADR:
 
 | Date | Change |
 |---|---|
+| 2026-07-31 | **Path correction, post-baseline; no decision changed.** D1's recommendation named `app/domain/identity/`, which is already the authentication context (`User`, `Tenant`, `Session`). The Knowledge-plane context is `app/domain/identity_runtime/`, and its ORM module `models/identity_runtime.py`, so that D1's *new bounded context* is genuinely separate. The API surface (`/api/v1/identities`, `schemas/identity.py`, `routers/identity.py`) is unchanged; the pre-flight carries the same correction (§14). |
 | 2026-07-31 | **Accepted.** No decision changed at acceptance. The nineteen frozen decisions are now normative for α10.0; the pre-flight's PF1–PF10 were reconciled against them in a recorded pass (pre-flight §14) that found no contradiction and folded in four frozen decisions the pre-flight had not yet carried (7 loud decode failure, 14 idempotency exclusion, 18 *can* not *should*, 19 negative ownership). Review history: an evidence-first grounding that selected the slice, a pre-flight that surfaced the rulings needing governance, and two independent architecture reviews — the first approving the selection in principle and requiring this ADR before implementation, the second approving the decisions and requesting the two clarifications recorded below. |
 | 2026-07-31 | Pre-acceptance revision from architecture review; **no decision changed**. **(1)** D5 gains *Capability answers `can`, never `should`* — a prohibition separating the Knowledge fact "this deployment can produce X" from the Decision fact "X is the right choice here", barring authoring from inferring or exposing quality, preference, routing, ranking, cost, historical success, or planner decisions, and stating that a newly registered adapter unlocks a control rather than a default or a recommendation. IDENT-2 carries the same clause. **(2)** D1 gains *What Identity Runtime does not own*, an explicit negative-ownership list (execution history, planner decisions, rendering/adapter preferences, adapter health, success statistics, verification outcomes) with the plane that owns each. Frozen decisions 18–19 index both. |
 | 2026-07-31 | Drafted as **Proposed** after the α10.0 grounding selected the slice on evidence and the pre-flight surfaced the rulings needing governance. Records the ordering inversion (grounding → pre-flight → ADR) and subordinates PF1–PF10 to the decisions here. Five decisions: a Knowledge-plane bounded context (D1), snapshot binding with an explicit six-part boundary (D2), payload versioning with read-compatibility and no data migration (D3), identity as a third provenance class plus the GEN-1 upsert correction the grounding uncovered (D4), and capability-bounded authorability (D5). Introduces IDENT-1…IDENT-4. |

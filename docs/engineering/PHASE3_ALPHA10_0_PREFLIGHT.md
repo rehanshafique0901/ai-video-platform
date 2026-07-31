@@ -41,7 +41,7 @@ as written — implementation follows them and does not reopen them.*
 
 ### PF1 — a new bounded context with a relational model, not a JSONB body
 
-`app/domain/identity/` with an `IdentityProfile` root and `Character` / `Location` / `Prop`
+`app/domain/identity_runtime/` with an `IdentityProfile` root and `Character` / `Location` / `Prop`
 children, persisted as one parent table plus three child tables (§3). The alternative — a single
 `identity_profiles.body` JSONB on the `templates` precedent — is rejected because this is *mutable*
 creator state, not an immutable record: it needs partial updates to one character, per-row
@@ -303,10 +303,10 @@ check.
 
 Each step is independently reviewable and leaves the gate green.
 
-1. **Domain** — `app/domain/identity/` profile + children, caps, validation. Unit tests.
+1. **Domain** — `app/domain/identity_runtime/` profile + children, caps, validation. Unit tests.
 2. **Migration `0017`** — four tables, indexes, symmetric `downgrade()`; `validate_schema.py` /
    ERD round-trip updated.
-3. **ORM + repository** — `models/identity.py`, `IIdentityRepository` on `IUnitOfWork`,
+3. **ORM + repository** — `models/identity_runtime.py`, `IIdentityRepository` on `IUnitOfWork`,
    `infrastructure/repositories/identity_repository.py` (`uuid4()`, `IntegrityError` →
    `ConflictError`, keyset list).
 4. **Use cases** — create / get / list / update / delete profile, plus child add / update / remove.
@@ -367,6 +367,17 @@ was added, and the slice's scope (§8) is unchanged.
 than left implicit:** 7 (an undecodable payload fails loudly) and 14 (identity is excluded from the
 idempotency key) into §5; 18 (*can*, never *should*) into §4; 19 (negative ownership) into §3.
 IDENT-4 was added to §7 alongside them, taking the slice from three new invariants to four.
+
+**Path correction, made after the baseline commit and before step 1.** PF1 and §12 named
+`app/domain/identity/` and `models/identity.py`. Both are already taken by the **authentication**
+context (`User`, `Tenant`, `Session`, and their ORM module, α2a). Writing the profile aggregate
+there would have merged two bounded contexts and contradicted the decision it implements, so the
+domain package is `app/domain/identity_runtime/` and the ORM module `models/identity_runtime.py`.
+The rename stops at the collision: the resource stays `/api/v1/identities`, the API modules stay
+`schemas/identity.py` and `routers/identity.py`, the repository stays `identity_repository.py` with
+`IIdentityRepository` on `IUnitOfWork` (neither exists today — auth uses `user`, `tenant` and
+`session` repositories), and the auth context is not touched. ADR-0055 D1 carries the same
+correction. No ruling, table, endpoint, invariant, or step changed.
 
 **Left open deliberately.** ADR open questions 2–4 — a child's stable-key provenance, child-write
 granularity, and whether a profile may be created inline with a generation — are implementation
