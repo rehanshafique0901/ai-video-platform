@@ -1632,7 +1632,7 @@ def _get_generation_job_store() -> SqlGenerationJobStore:
 
 def get_create_generation_use_case() -> CreateGeneration:
     """Factory: the α9.7 generation ingress (queues a ``queued`` row; never generates)."""
-    return CreateGeneration(store=_get_generation_job_store())
+    return CreateGeneration(store=_get_generation_job_store(), uow=get_unit_of_work())
 
 
 def get_get_generation_use_case() -> GetGeneration:

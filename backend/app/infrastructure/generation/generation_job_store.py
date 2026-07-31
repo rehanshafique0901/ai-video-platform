@@ -54,12 +54,12 @@ _TERMINAL = (
 _INSERT_SQL = text(
     """
     INSERT INTO generations (
-        id, tenant_id, owner_user_id, idempotency_key, request,
+        id, tenant_id, owner_user_id, idempotency_key, request, identity_id,
         status, prompt, title, execution_mode, seed,
         aspect_ratio, target_platform, width, height, fps
     ) VALUES (
         CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:owner_user_id AS uuid),
-        :idempotency_key, CAST(:request AS jsonb),
+        :idempotency_key, CAST(:request AS jsonb), :identity_id,
         CAST(:status AS generation_status), :prompt, :title, :execution_mode, :seed,
         :aspect_ratio, :target_platform, :width, :height, :fps
     )
@@ -217,6 +217,10 @@ class SqlGenerationJobStore(IGenerationJobStore):
             "owner_user_id": str(owner_user_id),
             "idempotency_key": idempotency_key,
             "request": json.dumps(encode_spec(spec)),
+            # Provenance, not a foreign key (ADR-0046 X5): which world this request was bound
+            # to. The column is text and stays text — it must still read after the profile it
+            # names is deleted (PF10). The world itself lives in `request`.
+            "identity_id": spec.identity.identity_id if spec.identity is not None else None,
             "status": ExecutionStatus.QUEUED.value,
             "prompt": spec.prompt,
             "title": spec.title,

@@ -29,6 +29,8 @@ provider pre-flight):
    23. notification_email        (α9.5 — out-of-band email delivery worker + read-model sanitisation)
    24. tiktok_destination        (α9.6 — second destination adapter through the real publish runtime)
    25. generation_ingress        (α9.7 — owner-scoped generation queue, worker, reaper, GEN-1)
+   26. worker_runtime_host       (α9.8 — a real host scheduling real workers against a live DB)
+   27. identity_runtime          (α10.0 — authored worlds, snapshot binding, IDENT-1, PF3)
 
 Stage 0 is a fast, no-DB pre-flight (α8.5c) that runs before everything so a
 manifest regression fails cheaply before the DB round-trip. It is numbered 0 —
@@ -868,6 +870,28 @@ def _stages() -> list[Stage]:
                 "-m",
                 "integration",
                 "tests/integration/runtime/test_worker_host.py",
+            ],
+            requires_db=True,
+        ),
+        # α10.0 — Identity-Runtime authoring against the live DB. Two halves: the authoring
+        # surface over HTTP (caps, per-owner name uniqueness, the root-fenced version every
+        # child write bumps, 404-before-412, the uniform 404 that hides another creator's
+        # world), and the binding — a world snapshotted into `generations.request` at
+        # acceptance, the untouched planner and prompt builder consuming it, and the two
+        # properties IDENT-1 exists for: editing the world afterwards changes nothing about
+        # the generation, and deleting it leaves the past generation readable with its
+        # provenance intact. Carries the PF3 regression: `begin()` can no longer null the
+        # ingress-written `identity_id`.
+        Stage(
+            number=27,
+            title="identity runtime integration",
+            cmd=[
+                py,
+                "-m",
+                "pytest",
+                "-m",
+                "integration",
+                "tests/integration/api/test_identity_runtime.py",
             ],
             requires_db=True,
         ),

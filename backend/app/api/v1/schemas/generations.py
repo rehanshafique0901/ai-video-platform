@@ -1,8 +1,10 @@
 """DTOs for ``/api/v1/generations/*`` — the α9.7 generation ingress (ADR-0052 D3/D5).
 
-* :class:`GenerationCreateRequest` — what a creator asks for. Flat and scalar: v1 identity is a
-  ``seed`` plus a project-wide ``global_style``. Characters, locations, props and reference
-  images belong to Identity-Runtime authoring, a separate slice with its own persistence.
+* :class:`GenerationCreateRequest` — what a creator asks for. Flat and scalar, plus an optional
+  ``identity_id`` (α10.0) naming one of the caller's authored worlds. The world itself is never
+  in the body: it is read once at acceptance and snapshotted into the stored request, so the
+  cast a generation runs with cannot change under it (ADR-0055 IDENT-1). Reference images
+  remain out of scope — no executable adapter consumes them (PF5).
 * :class:`GenerationPublic` — the **curated** read projection. Field selection is deliberate
   and load-bearing: ``provenance``, the resolution ledger, the chosen adapter/provider, every
   component version, and ``final_video_asset_id`` are execution internals and are *not*
@@ -48,6 +50,13 @@ class GenerationCreateRequest(BaseModel):
     height: int = Field(default=1280, ge=64, le=4096)
     fps: int = Field(default=30, ge=1, le=60)
     seed: int | None = Field(default=None, ge=0, lt=2**31)
+    identity_id: UUID | None = Field(
+        default=None,
+        description=(
+            "One of the caller's identity profiles. Its world is snapshotted into this "
+            "request at acceptance; later edits to the profile never reach this generation."
+        ),
+    )
 
 
 class GenerationPublic(BaseModel):

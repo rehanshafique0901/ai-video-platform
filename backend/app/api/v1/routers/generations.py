@@ -101,6 +101,8 @@ async def create_generation(
         tenant_id=current_user.tenant_id,
         owner_user_id=current_user.id,
         spec=spec,
+        identity_id=body.identity_id,
+        requested_seed=body.seed,
         idempotency_key=body.idempotency_key,
     )
     code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
